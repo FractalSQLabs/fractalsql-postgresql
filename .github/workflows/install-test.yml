@@ -274,12 +274,25 @@ jobs:
               sleep 0.2
           done
 
-          # Wire the extension to the plugin + mock endpoint. SIGHUP GUCs;
-          # a fresh backend loads the plugin lazily on the first reason call.
-          su postgres -c "psql -c \"ALTER SYSTEM SET fractalsql.reasoning_plugin = '\${PLUGIN}'\""
-          su postgres -c "psql -c \"ALTER SYSTEM SET fractalsql.http_url = 'http://127.0.0.1:18080/v1/chat/completions'\""
-          su postgres -c "psql -c \"ALTER SYSTEM SET fractalsql.http_allow_plaintext = on\""
-          su postgres -c "psql -c 'SELECT pg_reload_conf()'"
+          # fractalsql.* GUCs are registered by _PG_init(), which runs
+          # lazily on first dlopen -- a backend that has never called a
+          # fractalsql function doesn't know the GUC name yet, so
+          # ALTER SYSTEM SET on a truly fresh connection fails with
+          # "unrecognized configuration parameter" (confirmed directly:
+          # reproduces deterministically on PG14/15/16, PG17+ relaxed
+          # ALTER SYSTEM's validation for unrecognized placeholder GUCs).
+          # Fix: call the cheapest fractalsql function first, in the SAME
+          # session -- multiple -c flags on one psql invocation share one
+          # connection but each is still its own simple-query (unlike
+          # "-c 'A; B'", which runs as one implicit transaction block and
+          # would reject ALTER SYSTEM). Matches debian-install's own fix
+          # for this exact issue above.
+          su postgres -c "psql \
+              -c 'SELECT fractal_version();' \
+              -c \"ALTER SYSTEM SET fractalsql.reasoning_plugin = '\${PLUGIN}'\" \
+              -c \"ALTER SYSTEM SET fractalsql.http_url = 'http://127.0.0.1:18080/v1/chat/completions'\" \
+              -c \"ALTER SYSTEM SET fractalsql.http_allow_plaintext = on\" \
+              -c 'SELECT pg_reload_conf();'"
 
           REPLY=\$(su postgres -c "psql -At -c \"SELECT fractal_reason('ping')\"")
           kill \${MOCK_PID} 2>/dev/null || true
@@ -358,10 +371,20 @@ jobs:
           done
           PLUGIN="$(pg_config --pkglibdir)/fractalsql-reasoning-http.so"
           test -f "${PLUGIN}" || { echo "FAIL: plugin missing at ${PLUGIN}"; exit 1; }
-          psql -d postgres -c "ALTER SYSTEM SET fractalsql.reasoning_plugin = '${PLUGIN}'"
-          psql -d postgres -c "ALTER SYSTEM SET fractalsql.http_url = 'http://127.0.0.1:18080/v1/chat/completions'"
-          psql -d postgres -c "ALTER SYSTEM SET fractalsql.http_allow_plaintext = on"
-          psql -d postgres -c "SELECT pg_reload_conf()"
+          # This job currently pins PG17, where ALTER SYSTEM SET accepts
+          # an unrecognized placeholder GUC unconditionally -- confirmed
+          # PG14/15/16 reject it ("unrecognized configuration parameter")
+          # unless the defining module has already been dlopen'd in the
+          # SAME session (rpm-install/debian-install hit this directly).
+          # One shared-connection psql call, cheapest fractalsql function
+          # first, keeps this job correct if the matrix ever grows to
+          # include those majors.
+          psql -d postgres \
+              -c "SELECT fractal_version();" \
+              -c "ALTER SYSTEM SET fractalsql.reasoning_plugin = '${PLUGIN}'" \
+              -c "ALTER SYSTEM SET fractalsql.http_url = 'http://127.0.0.1:18080/v1/chat/completions'" \
+              -c "ALTER SYSTEM SET fractalsql.http_allow_plaintext = on" \
+              -c "SELECT pg_reload_conf();"
           REPLY=$(psql -d postgres -Atc "SELECT fractal_reason('ping')")
           kill "${MOCK_PID}" 2>/dev/null || true
           echo "reason reply=${REPLY}"

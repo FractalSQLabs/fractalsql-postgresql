@@ -73,6 +73,8 @@ bench/*.pyc
 bench/.pytest_cache/
 bench/data/
 
+fsql_setup.sql
+
 # Editor / OS cruft
 .vscode/
 .idea/
