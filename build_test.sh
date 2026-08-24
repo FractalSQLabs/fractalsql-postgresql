@@ -186,16 +186,18 @@ TMPROOT="$(cd /tmp && pwd -P)"
 # here built fine either way (make itself doesn't care what name it
 # writes), but every RUNTIME load failed on whichever majors guessed
 # wrong, since Postgres's dfmgr.c looks for that exact suffix with no
-# fallback. Querying each target's own Makefile.global (next to its
-# pg_config --pgxs) is the only way to get this right for every major,
-# not just the ones a hardcoded guess happens to cover.
+# fallback. A prior version of this function parsed Makefile.global's
+# own DLSUFFIX default directly -- but that value can be overridden
+# LATER by an `include .../Makefile.port` line inside Makefile.global
+# (Makefile.port wins, since it's included last), so parsing only
+# Makefile.global silently missed the override on PG14/15 and always
+# fell back to the wrong guess there. PGXS ships a `show_dl_suffix`
+# target for exactly this ("Show the DLSUFFIX to build scripts (e.g.
+# buildfarm)") -- ask the same Makefile/PGXS chain the real build uses
+# instead of re-deriving the include/override logic ourselves.
 fsql_pg_dlsuffix() {
-  local pg_config="$1" pgxs mkglobal suffix=""
-  pgxs="$("$pg_config" --pgxs 2>/dev/null)"
-  if [ -n "$pgxs" ]; then
-    mkglobal="$(dirname "$(dirname "$pgxs")")/Makefile.global"
-    suffix="$(sed -n 's/^DLSUFFIX[[:space:]]*=[[:space:]]*//p' "$mkglobal" 2>/dev/null | head -1)"
-  fi
+  local pg_config="$1" suffix=""
+  suffix="$(make PG_CONFIG="$pg_config" show_dl_suffix 2>/dev/null | tail -1)"
   if [ -n "$suffix" ]; then
     printf '%s' "$suffix"
   elif [ "$(uname -s)" = "Darwin" ]; then

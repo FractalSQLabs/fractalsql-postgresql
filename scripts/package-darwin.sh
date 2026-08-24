@@ -49,15 +49,16 @@ PG_MAJOR="$("${PG_CONFIG}" --version | sed -E 's/^PostgreSQL[[:space:]]+([0-9]+)
 # CI hardware (2026-08): PostgreSQL itself changed its own default from
 # .so to .dylib at a specific major-version boundary that lands INSIDE
 # our supported range (PG14/15 still build .so; PG16-18 build .dylib,
-# each confirmed directly from a real link command). Query the TARGET's
-# own Makefile.global (next to its pg_config --pgxs) rather than
-# guessing from uname -s, which only ever gets the newer majors right.
-DLSUFFIX=""
-PGXS_PATH="$("${PG_CONFIG}" --pgxs 2>/dev/null || true)"
-if [ -n "${PGXS_PATH}" ]; then
-    MAKEFILE_GLOBAL="$(dirname "$(dirname "${PGXS_PATH}")")/Makefile.global"
-    DLSUFFIX="$(sed -n 's/^DLSUFFIX[[:space:]]*=[[:space:]]*//p' "${MAKEFILE_GLOBAL}" 2>/dev/null | head -1)"
-fi
+# each confirmed directly from a real link command). The value can come
+# from Makefile.global's own default OR be overridden later by an
+# `include .../Makefile.port` line INSIDE Makefile.global -- Makefile.port
+# wins because it's included last, so parsing Makefile.global alone (a
+# prior version of this script) silently missed the override and always
+# fell back to the wrong guess. PGXS ships a `show_dl_suffix` target
+# (Makefile.global: "Show the DLSUFFIX to build scripts (e.g. buildfarm)")
+# for exactly this -- ask the same Makefile/PGXS chain the real build
+# uses instead of re-deriving the logic ourselves.
+DLSUFFIX="$(make PG_CONFIG="${PG_CONFIG}" show_dl_suffix 2>/dev/null | tail -1)"
 [ -n "${DLSUFFIX}" ] || DLSUFFIX=".dylib"
 
 FSQL_PLATFORM="darwin-${ARCH}"
