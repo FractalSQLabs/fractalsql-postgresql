@@ -176,20 +176,34 @@ cd "$HERE"
 # instead of weakening the security check itself.
 TMPROOT="$(cd /tmp && pwd -P)"
 
-# Postgres's own src/Makefile.global.in sets DLSUFFIX=.dylib on Darwin,
-# .so everywhere else -- PGXS names the built extension module to
-# match, and Postgres's dfmgr.c (LOAD/CREATE FUNCTION AS/
-# shared_preload_libraries) looks for that exact suffix, with no
-# fallback/guessing if a wrong-suffixed path is given. Confirmed on
-# real Darwin hardware: a hardcoded ".so" here built fine (make itself
-# doesn't care) but every runtime load failed with "could not access
-# file .../fractalsql.so" because PGXS had actually produced
-# fractalsql.dylib.
-if [ "$(uname -s)" = "Darwin" ]; then
-  FSQL_DLSUFFIX=".dylib"
-else
-  FSQL_DLSUFFIX=".so"
-fi
+# fsql_pg_dlsuffix <pg_config> -- echoes the DLSUFFIX the GIVEN target's
+# own PGXS will actually use. Confirmed on real CI hardware (2026-08):
+# this is NOT simply "uname -s == Darwin" -> .dylib -- PostgreSQL itself
+# changed its own default Darwin DLSUFFIX from .so to .dylib at a
+# specific major-version boundary, and that boundary lands INSIDE our
+# own supported range (PG14/15 still use .so; PG16-18 use .dylib, each
+# confirmed directly from a real link command in CI). A hardcoded guess
+# here built fine either way (make itself doesn't care what name it
+# writes), but every RUNTIME load failed on whichever majors guessed
+# wrong, since Postgres's dfmgr.c looks for that exact suffix with no
+# fallback. Querying each target's own Makefile.global (next to its
+# pg_config --pgxs) is the only way to get this right for every major,
+# not just the ones a hardcoded guess happens to cover.
+fsql_pg_dlsuffix() {
+  local pg_config="$1" pgxs mkglobal suffix=""
+  pgxs="$("$pg_config" --pgxs 2>/dev/null)"
+  if [ -n "$pgxs" ]; then
+    mkglobal="$(dirname "$(dirname "$pgxs")")/Makefile.global"
+    suffix="$(sed -n 's/^DLSUFFIX[[:space:]]*=[[:space:]]*//p' "$mkglobal" 2>/dev/null | head -1)"
+  fi
+  if [ -n "$suffix" ]; then
+    printf '%s' "$suffix"
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    printf '%s' ".dylib"
+  else
+    printf '%s' ".so"
+  fi
+}
 
 DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26)
 QUICK_GATES=(01 02)
@@ -419,6 +433,10 @@ pg_setup() {
   if [ ! -x "$BIN/initdb" ] || [ ! -x "$BIN/pg_config" ]; then
     return 1
   fi
+  # Independent of gate_01_build's own detection -- a single non-01
+  # -Gate run reuses a prior build without gate_01_build ever running
+  # this session, so FSQL_DLSUFFIX may not be set yet.
+  FSQL_DLSUFFIX="$(fsql_pg_dlsuffix "$BIN/pg_config")"
   SO="$HERE/fractalsql$FSQL_DLSUFFIX"
   MOCK="$TMPROOT/fractalsql_bt_mock_$v.so"
   EVIL="$TMPROOT/fractalsql_bt_evil_$v.so"
@@ -598,6 +616,7 @@ pg_swap_plugin() { pg_set_guc fractalsql.reasoning_plugin "'$1'" "$1"; }
 gate_01_build() {
   local v="$1" bin; bin="$(pg_bindir "$v")"
   if [ ! -x "$bin/pg_config" ]; then skip "01 build (PG$v pg_config absent)"; return; fi
+  FSQL_DLSUFFIX="$(fsql_pg_dlsuffix "$bin/pg_config")"
   make clean >/dev/null 2>&1
   local cov_arg=""
   # with_llvm=no: PGXS's separate JIT-bitcode compile (clang -emit-llvm)

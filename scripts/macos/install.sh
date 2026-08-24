@@ -48,6 +48,21 @@ if [ -f "${HERE}/PG_MAJOR" ]; then
     fi
 fi
 
+# DLSUFFIX differs by PG major on Darwin (PostgreSQL itself changed its
+# own default from .so to .dylib at a specific major-version boundary --
+# confirmed on real CI hardware: PG14/15 use .so, PG16+ use .dylib).
+# package-darwin.sh already staged the file under whatever name that
+# major actually needs -- just find it, rather than assuming either
+# name and guessing wrong for half our supported majors.
+if [ -f "${HERE}/fractalsql.dylib" ]; then
+    SO_FILE="fractalsql.dylib"
+elif [ -f "${HERE}/fractalsql.so" ]; then
+    SO_FILE="fractalsql.so"
+else
+    echo "error: neither fractalsql.dylib nor fractalsql.so found in ${HERE}" >&2
+    exit 1
+fi
+
 echo "Target PostgreSQL : ${PG_VERSION}"
 echo "  pkglibdir       : ${PKGLIBDIR}"
 echo "  extension dir   : ${EXTDIR}"
@@ -65,8 +80,8 @@ fi
 
 ${INSTALL} -d "${PKGLIBDIR}" "${EXTDIR}"
 
-${INSTALL} -m 0755 "${HERE}/fractalsql.dylib" \
-    "${PKGLIBDIR}/fractalsql.dylib"
+${INSTALL} -m 0755 "${HERE}/${SO_FILE}" \
+    "${PKGLIBDIR}/${SO_FILE}"
 ${INSTALL} -m 0755 "${HERE}/fractalsql-reasoning-http.so" \
     "${PKGLIBDIR}/fractalsql-reasoning-http.so"
 ${INSTALL} -m 0644 "${HERE}/fractalsql.control" \
@@ -82,7 +97,7 @@ ${INSTALL} -m 0644 "${HERE}/fractalsql_agents--1.0.sql" \
     "${EXTDIR}/fractalsql_agents--1.0.sql"
 
 echo "Installed:"
-echo "  ${PKGLIBDIR}/fractalsql.dylib"
+echo "  ${PKGLIBDIR}/${SO_FILE}"
 echo "  ${PKGLIBDIR}/fractalsql-reasoning-http.so"
 echo "  ${EXTDIR}/fractalsql.control"
 echo "  ${EXTDIR}/fractalsql--1.0.sql"

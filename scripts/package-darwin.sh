@@ -45,6 +45,21 @@ PG_MAJOR="$("${PG_CONFIG}" --version | sed -E 's/^PostgreSQL[[:space:]]+([0-9]+)
 [ -n "${PG_MAJOR}" ] \
     || { echo "could not parse PG major from '${PG_CONFIG} --version'" >&2; exit 1; }
 
+# DLSUFFIX genuinely differs by PG major on Darwin -- confirmed on real
+# CI hardware (2026-08): PostgreSQL itself changed its own default from
+# .so to .dylib at a specific major-version boundary that lands INSIDE
+# our supported range (PG14/15 still build .so; PG16-18 build .dylib,
+# each confirmed directly from a real link command). Query the TARGET's
+# own Makefile.global (next to its pg_config --pgxs) rather than
+# guessing from uname -s, which only ever gets the newer majors right.
+DLSUFFIX=""
+PGXS_PATH="$("${PG_CONFIG}" --pgxs 2>/dev/null || true)"
+if [ -n "${PGXS_PATH}" ]; then
+    MAKEFILE_GLOBAL="$(dirname "$(dirname "${PGXS_PATH}")")/Makefile.global"
+    DLSUFFIX="$(sed -n 's/^DLSUFFIX[[:space:]]*=[[:space:]]*//p' "${MAKEFILE_GLOBAL}" 2>/dev/null | head -1)"
+fi
+[ -n "${DLSUFFIX}" ] || DLSUFFIX=".dylib"
+
 FSQL_PLATFORM="darwin-${ARCH}"
 REASONING_SO="include/${FSQL_PLATFORM}/fractalsql-reasoning-http.so"
 CORE_A="include/${FSQL_PLATFORM}/libfractalsql-community-sovereign-c.a"
@@ -57,7 +72,7 @@ for f in "${REASONING_SO}" "${CORE_A}" LICENSE THIRD-PARTY-NOTICES.md \
         || { echo "missing ${f} — re-run the vendored-artifact deploy step" >&2; exit 1; }
 done
 
-echo "== building fractalsql.dylib for PG ${PG_MAJOR} / darwin-${ARCH} =="
+echo "== building fractalsql${DLSUFFIX} for PG ${PG_MAJOR} / darwin-${ARCH} (DLSUFFIX=${DLSUFFIX}) =="
 # COPT is appended to both CFLAGS and LDFLAGS by PGXS, so -arch reaches the
 # compile and the link. FSQL_PLATFORM overrides the Makefile's host-derived
 # value so an x86_64 cross build on an arm64 runner still links the
@@ -78,7 +93,7 @@ make clean >/dev/null 2>&1 || true
 make FSQL_PLATFORM="${FSQL_PLATFORM}" COPT="-arch ${ARCH}" PG_CONFIG="${PG_CONFIG}" \
     FSQL_DARWIN_XC_LDFLAGS="${XC_LDFLAGS}"
 
-test -f fractalsql.dylib || { echo "build did not produce fractalsql.dylib" >&2; exit 1; }
+test -f "fractalsql${DLSUFFIX}" || { echo "build did not produce fractalsql${DLSUFFIX}" >&2; exit 1; }
 
 PKG="fractalsql-postgresql-${VERSION}-pg${PG_MAJOR}-darwin-${ARCH}"
 DIST="dist/packages"
@@ -87,7 +102,7 @@ STAGE="${WORK}/${PKG}"
 trap 'rm -rf "${WORK}"' EXIT
 mkdir -p "${STAGE}" "${DIST}"
 
-install -m 0755 fractalsql.dylib           "${STAGE}/fractalsql.dylib"
+install -m 0755 "fractalsql${DLSUFFIX}"    "${STAGE}/fractalsql${DLSUFFIX}"
 install -m 0755 "${REASONING_SO}"       "${STAGE}/fractalsql-reasoning-http.so"
 install -m 0644 fractalsql.control      "${STAGE}/fractalsql.control"
 install -m 0644 sql/fractalsql--1.0.sql "${STAGE}/fractalsql--1.0.sql"
