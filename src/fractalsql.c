@@ -74,6 +74,38 @@
 
 #include "postgres.h"
 #include "fmgr.h"
+
+/*
+ * PG_FUNCTION_INFO_V1 only decorates the raw funcname declaration with
+ * PGDLLEXPORT from PG16 onward -- PG14/15's own fmgr.h emits a plain
+ * "extern Datum funcname(...)" (confirmed by diffing fmgr.h across
+ * every supported major). On Windows, where nothing is exported from a
+ * DLL by default, that leaves every V1 SQL-callable function in this
+ * file unreachable via CREATE FUNCTION ... LANGUAGE C on PG14/15 --
+ * confirmed directly: PG_FUNCTION_INFO_V1-registered agent-tier
+ * functions failed "could not find function ... in file ...dll" only
+ * on PG14/15 Windows builds, never on PG16+. Redefine the macro to
+ * match PG16's own version for exactly this gap (Windows, PG < 16) --
+ * this is upstream Postgres's own fix, just backported here since we
+ * can't edit an older major's installed system header. Deliberately
+ * NOT decorating the function definitions themselves (below): a prior
+ * declaration with PGDLLEXPORT is sufficient on MSVC, matching how
+ * Postgres's own core functions rely solely on this same macro.
+ */
+#if defined(_WIN32) && PG_VERSION_NUM < 160000
+#undef PG_FUNCTION_INFO_V1
+#define PG_FUNCTION_INFO_V1(funcname) \
+extern PGDLLEXPORT Datum funcname(PG_FUNCTION_ARGS); \
+extern PGDLLEXPORT const Pg_finfo_record * CppConcat(pg_finfo_,funcname)(void); \
+const Pg_finfo_record * \
+CppConcat(pg_finfo_,funcname) (void) \
+{ \
+	static const Pg_finfo_record my_finfo = { 1 }; \
+	return &my_finfo; \
+} \
+extern int no_such_variable
+#endif
+
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "access/htup_details.h"
@@ -1545,7 +1577,7 @@ run_sfs(double *query, int dim,
 
 PG_FUNCTION_INFO_V1(fractal_search);
 
-PGDLLEXPORT Datum
+Datum
 fractal_search(PG_FUNCTION_ARGS)
 {
     ArrayType *query_arr = PG_GETARG_ARRAYTYPE_P(0);
@@ -1577,7 +1609,7 @@ fractal_search(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(fractal_search_debug);
 
-PGDLLEXPORT Datum
+Datum
 fractal_search_debug(PG_FUNCTION_ARGS)
 {
     ArrayType *query_arr = PG_GETARG_ARRAYTYPE_P(0);
@@ -1901,7 +1933,7 @@ build_retrieval_context(const char *table, const char *vector_col,
 
 PG_FUNCTION_INFO_V1(fractal_search_explore);
 
-PGDLLEXPORT Datum
+Datum
 fractal_search_explore(PG_FUNCTION_ARGS)
 {
     FuncCallContext *funcctx;
@@ -2021,7 +2053,7 @@ fractal_search_explore(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(fractal_reason);
 
-PGDLLEXPORT Datum
+Datum
 fractal_reason(PG_FUNCTION_ARGS)
 {
     ensure_reason_ctx();   /* triggers lazy plugin load if not yet done */
@@ -2075,7 +2107,7 @@ fractal_reason(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(fractal_search_agent);
 
-PGDLLEXPORT Datum
+Datum
 fractal_search_agent(PG_FUNCTION_ARGS)
 {
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
@@ -2189,7 +2221,7 @@ fractal_search_agent(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(fractal_sql_agent);
 
-PGDLLEXPORT Datum
+Datum
 fractal_sql_agent(PG_FUNCTION_ARGS)
 {
     ensure_text_to_sql_ctx();
@@ -2344,7 +2376,7 @@ fractal_sql_agent(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(fractal_agent_plan_explore);
 
-PGDLLEXPORT Datum
+Datum
 fractal_agent_plan_explore(PG_FUNCTION_ARGS)
 {
     const char *initial_state = text_to_cstring(PG_GETARG_TEXT_PP(0));
@@ -2472,7 +2504,7 @@ decode_vector_datum(Datum d, Oid coltype, int *out_dim)
 
 PG_FUNCTION_INFO_V1(fractal_agent_trajectory_predict);
 
-PGDLLEXPORT Datum
+Datum
 fractal_agent_trajectory_predict(PG_FUNCTION_ARGS)
 {
     const char *table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
@@ -2646,7 +2678,7 @@ detect_short_period(const double *s, int n, int max_p)
 
 PG_FUNCTION_INFO_V1(fractal_agent_detect_loop);
 
-PGDLLEXPORT Datum
+Datum
 fractal_agent_detect_loop(PG_FUNCTION_ARGS)
 {
     ArrayType *log_arr = PG_GETARG_ARRAYTYPE_P(0);
@@ -2683,7 +2715,7 @@ fractal_agent_detect_loop(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(fractal_rag_agent);
 
-PGDLLEXPORT Datum
+Datum
 fractal_rag_agent(PG_FUNCTION_ARGS)
 {
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
@@ -2776,7 +2808,7 @@ fractal_rag_agent(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(fractal_embed);
 
-PGDLLEXPORT Datum
+Datum
 fractal_embed(PG_FUNCTION_ARGS)
 {
     ensure_embed_ctx();   /* triggers lazy plugin load if not yet done */
@@ -3095,7 +3127,7 @@ build_schema_context_cstr(ArrayType *table_names_arr)
 
 PG_FUNCTION_INFO_V1(fractal_schema_context);
 
-PGDLLEXPORT Datum
+Datum
 fractal_schema_context(PG_FUNCTION_ARGS)
 {
     ArrayType *table_names_arr = PG_ARGISNULL(0) ? NULL : PG_GETARG_ARRAYTYPE_P(0);
@@ -3511,7 +3543,7 @@ t2s_audit_log_best_effort(const char *question, const char *sql, int attempt)
 
 PG_FUNCTION_INFO_V1(fractal_text_to_sql);
 
-PGDLLEXPORT Datum
+Datum
 fractal_text_to_sql(PG_FUNCTION_ARGS)
 {
     ensure_text_to_sql_ctx();
@@ -3654,7 +3686,7 @@ cstring_json_to_jsonb(const char *json_cstr)
 /* ----- Diversify / Repulsion controls --------------------------- */
 
 PG_FUNCTION_INFO_V1(fractal_diversify_enable);
-PGDLLEXPORT Datum
+Datum
 fractal_diversify_enable(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -3668,7 +3700,7 @@ fractal_diversify_enable(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_diversify_disable);
-PGDLLEXPORT Datum
+Datum
 fractal_diversify_disable(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -3682,7 +3714,7 @@ fractal_diversify_disable(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_diversify_set_params);
-PGDLLEXPORT Datum
+Datum
 fractal_diversify_set_params(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -3714,7 +3746,7 @@ fractal_diversify_set_params(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_detect_collapse);
-PGDLLEXPORT Datum
+Datum
 fractal_detect_collapse(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -3731,7 +3763,7 @@ fractal_detect_collapse(PG_FUNCTION_ARGS)
  * honestly rather than overclaiming; per-candidate explain is a real
  * possible future core addition. */
 PG_FUNCTION_INFO_V1(fractal_explain_result);
-PGDLLEXPORT Datum
+Datum
 fractal_explain_result(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -3766,7 +3798,7 @@ parse_engagement_kind(const char *kind)
 }
 
 PG_FUNCTION_INFO_V1(fractal_feedback_report);
-PGDLLEXPORT Datum
+Datum
 fractal_feedback_report(PG_FUNCTION_ARGS)
 {
     int64 result_handle = PG_GETARG_INT64(0);
@@ -3794,7 +3826,7 @@ fractal_feedback_report(PG_FUNCTION_ARGS)
  * Inert until fractal_diversify_enable() has been called on this
  * session -- documented, not silently misleading. */
 PG_FUNCTION_INFO_V1(fractal_isolate_background);
-PGDLLEXPORT Datum
+Datum
 fractal_isolate_background(PG_FUNCTION_ARGS)
 {
     int64 result_handle = PG_GETARG_INT64(0);
@@ -3817,7 +3849,7 @@ fractal_isolate_background(PG_FUNCTION_ARGS)
 /* ----- Fractal Dimension Analysis --------------------------------- */
 
 PG_FUNCTION_INFO_V1(fractal_dimension_dfa);
-PGDLLEXPORT Datum
+Datum
 fractal_dimension_dfa(PG_FUNCTION_ARGS)
 {
     int     n;
@@ -3833,7 +3865,7 @@ fractal_dimension_dfa(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_dimension_boxcount);
-PGDLLEXPORT Datum
+Datum
 fractal_dimension_boxcount(PG_FUNCTION_ARGS)
 {
     int     flat_n;
@@ -3857,7 +3889,7 @@ fractal_dimension_boxcount(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_dimension_drift);
-PGDLLEXPORT Datum
+Datum
 fractal_dimension_drift(PG_FUNCTION_ARGS)
 {
     int     n;
@@ -3990,7 +4022,7 @@ portfolio_multimodal_audit_log_best_effort(const double *mu, const double *cov,
 }
 
 PG_FUNCTION_INFO_V1(fractal_optimize_portfolio);
-PGDLLEXPORT Datum
+Datum
 fractal_optimize_portfolio(PG_FUNCTION_ARGS)
 {
     int     n_assets;
@@ -4039,7 +4071,7 @@ fractal_optimize_portfolio(PG_FUNCTION_ARGS)
  * symbol above): same search as fractal_optimize_portfolio, run
  * n_restarts times with different derived seeds, diverse-selected. */
 PG_FUNCTION_INFO_V1(fractal_optimize_portfolio_multimodal);
-PGDLLEXPORT Datum
+Datum
 fractal_optimize_portfolio_multimodal(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -4188,7 +4220,7 @@ portfolio_multimodal_pareto_audit_log_best_effort(const double *mu, const double
  * the sharpe-mode function uses. Additive alongside that function --
  * does not change its selection semantics or output shape. */
 PG_FUNCTION_INFO_V1(fractal_optimize_portfolio_multimodal_pareto);
-PGDLLEXPORT Datum
+Datum
 fractal_optimize_portfolio_multimodal_pareto(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -4271,7 +4303,7 @@ fractal_optimize_portfolio_multimodal_pareto(PG_FUNCTION_ARGS)
 /* ----- Domain-specific geometric/topological metrics ---------------- */
 
 PG_FUNCTION_INFO_V1(fractal_vascular_network);
-PGDLLEXPORT Datum
+Datum
 fractal_vascular_network(PG_FUNCTION_ARGS)
 {
     int     nc_n;
@@ -4308,7 +4340,7 @@ fractal_vascular_network(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_cortical_folding);
-PGDLLEXPORT Datum
+Datum
 fractal_cortical_folding(PG_FUNCTION_ARGS)
 {
     int     v_n;
@@ -4340,7 +4372,7 @@ fractal_cortical_folding(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_nerve_plexus_metric);
-PGDLLEXPORT Datum
+Datum
 fractal_nerve_plexus_metric(PG_FUNCTION_ARGS)
 {
     int     nc_n;
@@ -4375,7 +4407,7 @@ fractal_nerve_plexus_metric(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_morphological_complexity);
-PGDLLEXPORT Datum
+Datum
 fractal_morphological_complexity(PG_FUNCTION_ARGS)
 {
     int     p_n;
@@ -4419,7 +4451,7 @@ fractal_morphological_complexity(PG_FUNCTION_ARGS)
 /* ------------------------------------------------------------------ */
 
 PG_FUNCTION_INFO_V1(fractal_store_morphology);
-PGDLLEXPORT Datum
+Datum
 fractal_store_morphology(PG_FUNCTION_ARGS)
 {
     int64      doc_id   = PG_GETARG_INT64(0);
@@ -4472,7 +4504,7 @@ topo_cand_cmp(const void *a, const void *b)
 }
 
 PG_FUNCTION_INFO_V1(fractal_mine_topology_negatives);
-PGDLLEXPORT Datum
+Datum
 fractal_mine_topology_negatives(PG_FUNCTION_ARGS)
 {
     ArrayType *surrogate_arr = PG_GETARG_ARRAYTYPE_P(0);
@@ -4673,7 +4705,7 @@ telemetry_topk_srf(FunctionCallInfo fcinfo,
 }
 
 PG_FUNCTION_INFO_V1(fractal_search_telemetry);
-PGDLLEXPORT Datum
+Datum
 fractal_search_telemetry(PG_FUNCTION_ARGS)
 {
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) || PG_ARGISNULL(3))
@@ -4701,7 +4733,7 @@ fractal_search_telemetry(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_hybrid_clinical_search);
-PGDLLEXPORT Datum
+Datum
 fractal_hybrid_clinical_search(PG_FUNCTION_ARGS)
 {
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
@@ -4840,7 +4872,7 @@ fractal_hybrid_clinical_search(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_search_trajectory);
-PGDLLEXPORT Datum
+Datum
 fractal_search_trajectory(PG_FUNCTION_ARGS)
 {
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
@@ -4882,7 +4914,7 @@ fractal_search_trajectory(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_cross_modal_search);
-PGDLLEXPORT Datum
+Datum
 fractal_cross_modal_search(PG_FUNCTION_ARGS)
 {
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
@@ -4937,7 +4969,7 @@ fractal_cross_modal_search(PG_FUNCTION_ARGS)
  * versions use. HNSW/SFS internals never see a float. */
 
 PG_FUNCTION_INFO_V1(fractal_search_trajectory_fv);
-PGDLLEXPORT Datum
+Datum
 fractal_search_trajectory_fv(PG_FUNCTION_ARGS)
 {
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
@@ -4976,7 +5008,7 @@ fractal_search_trajectory_fv(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_cross_modal_search_fv);
-PGDLLEXPORT Datum
+Datum
 fractal_cross_modal_search_fv(PG_FUNCTION_ARGS)
 {
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
@@ -5021,14 +5053,14 @@ fractal_cross_modal_search_fv(PG_FUNCTION_ARGS)
 /* ------------------------------------------------------------------ */
 
 PG_FUNCTION_INFO_V1(fractal_edition);
-PGDLLEXPORT Datum
+Datum
 fractal_edition(PG_FUNCTION_ARGS)
 {
     PG_RETURN_TEXT_P(cstring_to_text(FSQL_EDITION));
 }
 
 PG_FUNCTION_INFO_V1(fractal_version);
-PGDLLEXPORT Datum
+Datum
 fractal_version(PG_FUNCTION_ARGS)
 {
     PG_RETURN_TEXT_P(cstring_to_text(FSQL_VERSION));
@@ -5045,7 +5077,7 @@ fractal_version(PG_FUNCTION_ARGS)
  * not compile them on a clean build). */
 
 PG_FUNCTION_INFO_V1(fractal_ledger_flush);
-PGDLLEXPORT Datum
+Datum
 fractal_ledger_flush(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -5275,7 +5307,7 @@ ledger_verify_latest(void)
      * now-authenticated blob. */
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_ledger_load(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -5294,7 +5326,7 @@ fractal_ledger_load(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_ledger_compact);
-PGDLLEXPORT Datum
+Datum
 fractal_ledger_compact(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -5310,7 +5342,7 @@ fractal_ledger_compact(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_ledger_reset_soft);
-PGDLLEXPORT Datum
+Datum
 fractal_ledger_reset_soft(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -5326,7 +5358,7 @@ fractal_ledger_reset_soft(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_ledger_reset_hard);
-PGDLLEXPORT Datum
+Datum
 fractal_ledger_reset_hard(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -5342,7 +5374,7 @@ fractal_ledger_reset_hard(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_ledger_truth_count);
-PGDLLEXPORT Datum
+Datum
 fractal_ledger_truth_count(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -5359,7 +5391,7 @@ fractal_ledger_truth_count(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_ledger_shadow_count);
-PGDLLEXPORT Datum
+Datum
 fractal_ledger_shadow_count(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -5388,7 +5420,7 @@ fractal_ledger_shadow_count(PG_FUNCTION_ARGS)
  * running this wants a diagnosis, not a thrown exception.
  */
 PG_FUNCTION_INFO_V1(fractal_ledger_verify);
-PGDLLEXPORT Datum
+Datum
 fractal_ledger_verify(PG_FUNCTION_ARGS)
 {
     bool        empty       = false;
@@ -5545,7 +5577,7 @@ fractal_ledger_verify(PG_FUNCTION_ARGS)
  * back directly: SELECT id, updated, convert_from(blob,'UTF8')::jsonb
  * FROM fractalsql_ledger WHERE kind = 2 ORDER BY id. */
 PG_FUNCTION_INFO_V1(fractal_audit_log);
-PGDLLEXPORT Datum
+Datum
 fractal_audit_log(PG_FUNCTION_ARGS)
 {
     ensure_search_ctx();
@@ -5573,7 +5605,7 @@ fractal_audit_log(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(fractal_audit_unpack);
-PGDLLEXPORT Datum
+Datum
 fractal_audit_unpack(PG_FUNCTION_ARGS)
 {
     bytea *blob = PG_GETARG_BYTEA_PP(0);

@@ -194,7 +194,14 @@ $commonCompileArgs = @(
 # -> literal "), so the quoting never closes and swallows the next
 # argument (D8036). An explicit single-file .obj name sidesteps it.
 Write-Host "[build-windows] cl.exe (compile fractalsql.c) $($commonCompileArgs -join ' ') /Fo$FractalsqlObj $Src"
-& cl.exe @commonCompileArgs "/Fo$FractalsqlObj" $Src
+# Capture stdout+stderr into a variable rather than letting them pass
+# through natively -- PowerShell 7.3+'s $PSNativeCommandUseErrorActionPreference
+# treats a native command's stderr output combined with a nonzero exit
+# as a terminating error, which can suppress cl.exe's own diagnostic
+# text from ever reaching the log (seen in CI: a bare "exit 2" with no
+# error text at all). Explicit capture + Write-Host sidesteps that.
+$out = & cl.exe @commonCompileArgs "/Fo$FractalsqlObj" $Src 2>&1
+$out | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "cl.exe failed compiling fractalsql.c (exit $LASTEXITCODE)" }
 
 # Same commonCompileArgs as fractalsql.c above (the postgres include
@@ -203,7 +210,8 @@ if ($LASTEXITCODE -ne 0) { throw "cl.exe failed compiling fractalsql.c (exit $LA
 # PG_CPPFLAGS uniformly to both OBJS rather than a separate minimal
 # flag set for this TU.
 Write-Host "[build-windows] cl.exe (compile fractalsql_parse.c) $($commonCompileArgs -join ' ') /Fo$FractalsqlParseObj $SrcParse"
-& cl.exe @commonCompileArgs "/Fo$FractalsqlParseObj" $SrcParse
+$out = & cl.exe @commonCompileArgs "/Fo$FractalsqlParseObj" $SrcParse 2>&1
+$out | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "cl.exe failed compiling fractalsql_parse.c (exit $LASTEXITCODE)" }
 
 # fractalsql_vector.c uses the SAME $commonCompileArgs as the other two TUs
@@ -211,7 +219,8 @@ if ($LASTEXITCODE -ne 0) { throw "cl.exe failed compiling fractalsql_parse.c (ex
 # so it needs the PG include paths + /DFSQL_STATIC), exactly as fractalsql.c
 # does. Same rationale as fractalsql_parse.c sharing the flag set.
 Write-Host "[build-windows] cl.exe (compile fractalsql_vector.c) $($commonCompileArgs -join ' ') /Fo$FractalsqlVectorObj $SrcVector"
-& cl.exe @commonCompileArgs "/Fo$FractalsqlVectorObj" $SrcVector
+$out = & cl.exe @commonCompileArgs "/Fo$FractalsqlVectorObj" $SrcVector 2>&1
+$out | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "cl.exe failed compiling fractalsql_vector.c (exit $LASTEXITCODE)" }
 
 # bcrypt.lib: the vendored community-sovereign-c.lib includes
@@ -234,7 +243,8 @@ $linkArgs = @(
     'ws2_32.lib', 'advapi32.lib', 'secur32.lib', 'bcrypt.lib'
 )
 Write-Host "[build-windows] cl.exe (link) $($linkArgs -join ' ')"
-& cl.exe @linkArgs
+$out = & cl.exe @linkArgs 2>&1
+$out | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "cl.exe failed linking $Dll (exit $LASTEXITCODE)" }
 if (-not (Test-Path $Dll)) { throw "build did not produce $Dll" }
 

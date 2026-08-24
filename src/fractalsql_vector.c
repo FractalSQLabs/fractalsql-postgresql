@@ -10,6 +10,26 @@
 
 #include "postgres.h"
 #include "fmgr.h"
+
+/*
+ * Same PG14/15-on-Windows PG_FUNCTION_INFO_V1 gap as fractalsql.c (see
+ * that file's copy of this shim for the full rationale) -- a separate
+ * translation unit needs its own redefinition.
+ */
+#if defined(_WIN32) && PG_VERSION_NUM < 160000
+#undef PG_FUNCTION_INFO_V1
+#define PG_FUNCTION_INFO_V1(funcname) \
+extern PGDLLEXPORT Datum funcname(PG_FUNCTION_ARGS); \
+extern PGDLLEXPORT const Pg_finfo_record * CppConcat(pg_finfo_,funcname)(void); \
+const Pg_finfo_record * \
+CppConcat(pg_finfo_,funcname) (void) \
+{ \
+	static const Pg_finfo_record my_finfo = { 1 }; \
+	return &my_finfo; \
+} \
+extern int no_such_variable
+#endif
+
 #include "libpq/pqformat.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -92,7 +112,7 @@ check_dim_matches_typmod(int16 dim, int32 typmod)
 /* users don't have to learn a bespoke one.                           */
 /* ------------------------------------------------------------------ */
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_in(PG_FUNCTION_ARGS)
 {
     char   *str    = PG_GETARG_CSTRING(0);
@@ -166,7 +186,7 @@ fractal_vector_in(PG_FUNCTION_ARGS)
     PG_RETURN_FRACTALVEC_P(v);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_out(PG_FUNCTION_ARGS)
 {
     FractalVector *v = PG_GETARG_FRACTALVEC_P(0);
@@ -185,7 +205,7 @@ fractal_vector_out(PG_FUNCTION_ARGS)
 /* Binary I/O                                                         */
 /* ------------------------------------------------------------------ */
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_recv(PG_FUNCTION_ARGS)
 {
     StringInfo buf    = (StringInfo) PG_GETARG_POINTER(0);
@@ -202,7 +222,7 @@ fractal_vector_recv(PG_FUNCTION_ARGS)
     PG_RETURN_FRACTALVEC_P(v);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_send(PG_FUNCTION_ARGS)
 {
     FractalVector *v = PG_GETARG_FRACTALVEC_P(0);
@@ -219,7 +239,7 @@ fractal_vector_send(PG_FUNCTION_ARGS)
 /* self-cast (fractal_vector_enforce_typmod below), not this pair.    */
 /* ------------------------------------------------------------------ */
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_typmod_in(PG_FUNCTION_ARGS)
 {
     ArrayType *arr = PG_GETARG_ARRAYTYPE_P(0);
@@ -244,7 +264,7 @@ fractal_vector_typmod_in(PG_FUNCTION_ARGS)
     PG_RETURN_INT32((int32) dim);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_typmod_out(PG_FUNCTION_ARGS)
 {
     int32 typmod = PG_GETARG_INT32(0);
@@ -253,7 +273,7 @@ fractal_vector_typmod_out(PG_FUNCTION_ARGS)
     PG_RETURN_CSTRING(pstrdup(buf));
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_enforce_typmod(PG_FUNCTION_ARGS)
 {
     FractalVector *v      = PG_GETARG_FRACTALVEC_P(0);
@@ -266,7 +286,7 @@ fractal_vector_enforce_typmod(PG_FUNCTION_ARGS)
     PG_RETURN_FRACTALVEC_P(v);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_dims(PG_FUNCTION_ARGS)
 {
     FractalVector *v = PG_GETARG_FRACTALVEC_P(0);
@@ -278,7 +298,7 @@ fractal_vector_dims(PG_FUNCTION_ARGS)
 /* is deprecated or broken.                                           */
 /* ------------------------------------------------------------------ */
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_from_float8_array(PG_FUNCTION_ARGS)
 {
     ArrayType *arr = PG_GETARG_ARRAYTYPE_P(0);
@@ -300,7 +320,7 @@ fractal_vector_from_float8_array(PG_FUNCTION_ARGS)
     PG_RETURN_FRACTALVEC_P(v);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_to_float8_array(PG_FUNCTION_ARGS)
 {
     FractalVector *v  = PG_GETARG_FRACTALVEC_P(0);
@@ -325,7 +345,7 @@ check_same_dim(int16 a_dim, int16 b_dim)
                         a_dim, b_dim)));
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_l2_distance(PG_FUNCTION_ARGS)
 {
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
@@ -336,7 +356,7 @@ fractal_vector_l2_distance(PG_FUNCTION_ARGS)
     PG_RETURN_FLOAT8((double) dist);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_cosine_distance(PG_FUNCTION_ARGS)
 {
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
@@ -347,7 +367,7 @@ fractal_vector_cosine_distance(PG_FUNCTION_ARGS)
     PG_RETURN_FLOAT8((double) dist);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_negative_inner_product(PG_FUNCTION_ARGS)
 {
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
@@ -364,7 +384,7 @@ fractal_vector_negative_inner_product(PG_FUNCTION_ARGS)
 /* included alongside add for symmetry.                               */
 /* ------------------------------------------------------------------ */
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_l2_squared(PG_FUNCTION_ARGS)
 {
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
@@ -375,7 +395,7 @@ fractal_vector_l2_squared(PG_FUNCTION_ARGS)
     PG_RETURN_FLOAT8((double) sq);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_cosine_similarity(PG_FUNCTION_ARGS)
 {
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
@@ -386,7 +406,7 @@ fractal_vector_cosine_similarity(PG_FUNCTION_ARGS)
     PG_RETURN_FLOAT8((double) sim);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_norm(PG_FUNCTION_ARGS)
 {
     FractalVector *v = PG_GETARG_FRACTALVEC_P(0);
@@ -395,7 +415,7 @@ fractal_vector_norm(PG_FUNCTION_ARGS)
     PG_RETURN_FLOAT8((double) n);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_normalize(PG_FUNCTION_ARGS)
 {
     FractalVector *v   = PG_GETARG_FRACTALVEC_P(0);
@@ -404,7 +424,7 @@ fractal_vector_normalize(PG_FUNCTION_ARGS)
     PG_RETURN_FRACTALVEC_P(out);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_add(PG_FUNCTION_ARGS)
 {
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
@@ -415,7 +435,7 @@ fractal_vector_add(PG_FUNCTION_ARGS)
     PG_RETURN_FRACTALVEC_P(out);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_sub(PG_FUNCTION_ARGS)
 {
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
@@ -426,7 +446,7 @@ fractal_vector_sub(PG_FUNCTION_ARGS)
     PG_RETURN_FRACTALVEC_P(out);
 }
 
-PGDLLEXPORT Datum
+Datum
 fractal_vector_scale(PG_FUNCTION_ARGS)
 {
     FractalVector *v      = PG_GETARG_FRACTALVEC_P(0);
