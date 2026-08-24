@@ -1,0 +1,4 @@
+comment = 'FractalSQL Domain Agent engines — parameterized PL/pgSQL compositions over fractalsql'
+default_version = '1.0'
+requires = 'fractalsql'
+relocatable = true

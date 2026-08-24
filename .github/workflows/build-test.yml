@@ -1,0 +1,459 @@
+name: build-test
+
+# Public CI wrapper around run_build_test.sh / build_test.sh — the same
+# scripts a dev runs locally, so local == CI (fleet convention, see
+# fractalsql-core's foundry-tests.yml). Compiles the extension and
+# exercises the full behavioral gate matrix (smoke, schema_context,
+# text_to_sql allowlist, the guard-page non-terminated-response evil
+# test, and a deliberately-segfaulting plugin proving PostgreSQL's own
+# crash-recovery contract: connection drops, cluster auto-restarts,
+# prior data intact) against a throwaway cluster for every claimed
+# PostgreSQL major on every push/PR. Catches cross-version breaks (e.g.
+# the PG14 parse_analyze_fixedparams regression) and memory-safety/
+# crash-class regressions automatically instead of relying on manual
+# per-major testing.
+#
+# docker/Dockerfile.test runs build_test.sh --pg <major> AS a RUN step,
+# so a passing `docker build` cell IS the test result — no separate
+# `docker run` / cluster-cleanup dance in the workflow itself.
+#
+# Extra jobs alongside the Linux/Docker gate matrix:
+#   windows-gate-matrix — build_test.ps1 (PowerShell port of
+#              build_test.sh), PG 14-18 on windows-latest via EDB's
+#              per-major "binaries" zip. Verified end-to-end (all 12
+#              gates) against real Windows for PG16 during development
+#              -- see the job's own comment for what that took to get
+#              right. PG14/15/17/18 share the exact same code path but
+#              have not each been individually confirmed on CI yet.
+#   darwin-gate-matrix — build_test.sh (the same script, unmodified) on
+#              macos-14 via Homebrew's postgresql@$MAJOR, PG 14-18.
+#              Verified end-to-end (all 26 gates) against real Darwin/
+#              x86_64 hardware during development -- see the job's own
+#              comment for the three Darwin-specific bugs that surfaced
+#              and were fixed in build_test.sh itself along the way
+#              (none of them Windows- or Linux-specific, so this was
+#              never previously exercised by any CI job). PG14/15/17/18
+#              share the exact same code path but have not each been
+#              individually confirmed on CI yet.
+#   linux-asan / linux-ubsan — build_test.sh --asan / --ubsan (Docker,
+#              PG16 only), same basic-sanity scope and weekly/
+#              workflow_dispatch-only cadence as windows-asan/
+#              windows-ubsan / darwin-asan/darwin-ubsan. Verified
+#              locally (all 14 gates pass under both) before being
+#              wired in here.
+#   coverage — weekly/on-demand only (see the schedule trigger below):
+#              gcov-instrumented build_test.sh --coverage run, lcov/
+#              genhtml report uploaded as a workflow artifact.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, not per-push — coverage numbers move slowly and the
+    # extra instrumented rebuild + lcov pass isn't worth paying on
+    # every commit. workflow_dispatch below covers on-demand runs.
+    - cron: '30 5 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate-matrix:
+    name: build_test pg${{ matrix.pg }}
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: docker build (runs build_test.sh --pg ${{ matrix.pg }})
+        run: |
+          set -euo pipefail
+          chmod +x run_build_test.sh
+          ./run_build_test.sh --pg ${{ matrix.pg }}
+
+  windows-gate-matrix:
+    name: build_test.ps1 pg${{ matrix.pg }} (Windows)
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg: 14
+            edb_version: "14.13-1"
+          - pg: 15
+            edb_version: "15.8-1"
+          - pg: 16
+            edb_version: "16.4-1"
+          - pg: 17
+            edb_version: "17.0-1"
+          - pg: 18
+            edb_version: "18.0-1"
+    # build_test.ps1 was ported from build_test.sh by direct
+    # translation, then debugged against a real Windows box until all
+    # 12 gates passed end-to-end (PG16) -- see build_test.ps1's own
+    # .DESCRIPTION for the real list of Windows-specific issues found
+    # and fixed along the way (PGXS bitcode-vs-coverage, MSVC argv
+    # quoting, Postgres library-load-dedup vs fractalsql-core path-
+    # canonicalization wanting opposite path spellings,
+    # postgresql.conf's own backslash-escape processing, PowerShell
+    # 7.3+ native-stderr-as-terminating-error, and a hardcoded system-
+    # temp path that silently never worked for the test plugins' file-
+    # driven harness communication). PG14/15/17/18 share that exact
+    # code path but have not each been individually confirmed here yet
+    # -- this matrix cell is what will. Not blocking on the Linux/
+    # Docker gate-matrix job passing -- fail-fast: false at the matrix
+    # level, and this job is independent of that one entirely.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Set up MSVC dev cmd (x64)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Download + unpack EDB PostgreSQL ${{ matrix.edb_version }} x64 binaries
+        shell: pwsh
+        env:
+          EDB_VERSION: ${{ matrix.edb_version }}
+        run: |
+          $zipName = "postgresql-${env:EDB_VERSION}-windows-x64-binaries.zip"
+          $url     = "https://get.enterprisedb.com/postgresql/$zipName"
+          Write-Host "Fetching $url"
+          New-Item -ItemType Directory -Force -Path deps\pg | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\pg\edb.zip" -UseBasicParsing
+          Expand-Archive -Path "deps\pg\edb.zip" -DestinationPath "deps\pg" -Force
+          if (Test-Path "deps\pg\pgsql") {
+            Rename-Item -Path "deps\pg\pgsql" -NewName "root"
+          } else {
+            Write-Host "FATAL: expected deps\pg\pgsql\ inside $zipName"
+            exit 1
+          }
+
+      - name: build_test.ps1 --pg ${{ matrix.pg }}
+        shell: pwsh
+        run: |
+          .\build_test.ps1 -PgDir "deps\pg\root" -PgMajor ${{ matrix.pg }}
+          exit $LASTEXITCODE
+
+  darwin-gate-matrix:
+    name: build_test.sh pg${{ matrix.pg }} (macOS)
+    if: github.event_name != 'schedule'
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    # build_test.sh's own pg_bindir() already tries `brew --prefix
+    # postgresql@$MAJOR` first on Darwin (see build_test.sh's pg_bindir
+    # comment) -- same Homebrew-install pattern install-test.yml's
+    # macos-install job and release.yml's build-darwin job already use,
+    # so no explicit PG_BINDIR/path plumbing is needed here, unlike the
+    # Windows job above (build_test.ps1's -PgDir is mandatory, no
+    # auto-detection). Debugged end-to-end against real Darwin/x86_64
+    # hardware during development -- see build_test.sh's TMPROOT
+    # (symlink-canonical /tmp, since macOS's own /tmp -> /private/tmp
+    # trips fractalsql-core's reasoning-plugin path-canonicalization
+    # check), FSQL_DLSUFFIX (.dylib vs .so, matching Postgres's own
+    # src/Makefile.global.in), and the herestring-vs-pipe grep fix
+    # (`grep -q ... <<< "$x"`, not `echo "$x" | grep -q ...` -- the
+    # latter's SIGPIPE-on-early-exit can register as a pipefail failure
+    # on this platform's bash even when the match itself succeeded).
+    # PG16 was the hardware-verified major; PG14/15/17/18 share the
+    # exact same code path but have not each been individually
+    # confirmed here yet -- this matrix cell is what will, same
+    # footnote as windows-gate-matrix's own comment above.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install PostgreSQL ${{ matrix.pg }} (Homebrew)
+        run: |
+          set -euo pipefail
+          brew install postgresql@${{ matrix.pg }}
+
+      - name: build_test.sh --pg ${{ matrix.pg }}
+        run: |
+          set -euo pipefail
+          chmod +x build_test.sh
+          ./build_test.sh --pg ${{ matrix.pg }}
+
+  windows-asan:
+    name: build_test.ps1 -Asan pg16 (Windows)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # PG16 only (not the full 14-18 matrix) -- basic-sanity scope: this
+    # rebuilds fractalsql.c with MSVC /fsanitize=address
+    # into a separate dist\windows-asan\ tree and re-runs the same 12
+    # gates against the instrumented DLL loaded into postgres.exe.
+    # Same technique that already found a real STATUS_HEAP_CORRUPTION
+    # bug in fractalsql-reasoning-http's test harness -- wired here as
+    # an ongoing gate instead of a one-off diagnostic. Weekly, not
+    # every push/PR, matching this workflow's own coverage job cadence.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Set up MSVC dev cmd (x64)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Download + unpack EDB PostgreSQL 16.4-1 x64 binaries
+        shell: pwsh
+        run: |
+          $url = "https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64-binaries.zip"
+          New-Item -ItemType Directory -Force -Path deps\pg | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\pg\edb.zip" -UseBasicParsing
+          Expand-Archive -Path "deps\pg\edb.zip" -DestinationPath "deps\pg" -Force
+          if (Test-Path "deps\pg\pgsql") {
+            Rename-Item -Path "deps\pg\pgsql" -NewName "root"
+          } else {
+            Write-Host "FATAL: expected deps\pg\pgsql\ inside the zip"
+            exit 1
+          }
+
+      - name: build_test.ps1 -Asan --pg 16
+        shell: pwsh
+        run: |
+          # -TimeoutMult 8: confirmed directly (real Windows run) that
+          # gate 06's crash-recovery poll needs real headroom under
+          # ASan -- the default budget (15s, TimeoutMult=1) cascaded
+          # into every later gate failing with "database system is in
+          # recovery mode" since the cluster hadn't actually finished
+          # restarting yet. Not a bug -- ASan adds real overhead to
+          # both Windows crash symbolization and every EXEC_BACKEND
+          # process reloading the instrumented DLL during WAL replay.
+          # 8 was confirmed sufficient locally; GHA runners can be
+          # slower/more loaded than a local dev box.
+          .\build_test.ps1 -PgDir "deps\pg\root" -PgMajor 16 -Asan -TimeoutMult 8
+          exit $LASTEXITCODE
+
+  windows-ubsan:
+    name: build_test.ps1 -Ubsan pg16 (Windows)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # Same structure as windows-asan above, but via clang-cl (LLVM's
+    # MSVC-ABI-compatible driver) and -fsanitize=undefined -- native
+    # cl.exe has no UBSan support at all. PG16 only, matching
+    # windows-asan's own basic-sanity scope decision. -TimeoutMult left
+    # at the same 8 windows-asan needed until a real run shows whether
+    # UBSan's instrumentation overhead on gate 06's crash-recovery poll
+    # is smaller, equal, or larger -- not assumed identical to ASan.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Set up MSVC dev cmd (x64)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Download + unpack EDB PostgreSQL 16.4-1 x64 binaries
+        shell: pwsh
+        run: |
+          $url = "https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64-binaries.zip"
+          New-Item -ItemType Directory -Force -Path deps\pg | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\pg\edb.zip" -UseBasicParsing
+          Expand-Archive -Path "deps\pg\edb.zip" -DestinationPath "deps\pg" -Force
+          if (Test-Path "deps\pg\pgsql") {
+            Rename-Item -Path "deps\pg\pgsql" -NewName "root"
+          } else {
+            Write-Host "FATAL: expected deps\pg\pgsql\ inside the zip"
+            exit 1
+          }
+
+      - name: build_test.ps1 -Ubsan --pg 16
+        shell: pwsh
+        run: |
+          .\build_test.ps1 -PgDir "deps\pg\root" -PgMajor 16 -Ubsan -TimeoutMult 8
+          exit $LASTEXITCODE
+
+  darwin-asan:
+    name: build_test.sh --asan pg16 (macOS)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    # PG16 only, matching linux-asan/windows-asan's own basic-sanity
+    # scope. No Debian-Bookworm-glibc class of hang here -- ASan on
+    # Darwin has no LeakSanitizer component at all, so there's no
+    # ASAN_OPTIONS=detect_leaks equivalent to set either.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install PostgreSQL 16 (Homebrew)
+        run: |
+          set -euo pipefail
+          brew install postgresql@16
+
+      - name: build_test.sh --asan --pg 16
+        run: |
+          set -euo pipefail
+          chmod +x build_test.sh
+          ./build_test.sh --asan --pg 16
+
+  darwin-ubsan:
+    name: build_test.sh --ubsan pg16 (macOS)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    # Same structure as darwin-asan above, matching linux-ubsan/
+    # windows-ubsan's own scope.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install PostgreSQL 16 (Homebrew)
+        run: |
+          set -euo pipefail
+          brew install postgresql@16
+
+      - name: build_test.sh --ubsan --pg 16
+        run: |
+          set -euo pipefail
+          chmod +x build_test.sh
+          ./build_test.sh --ubsan --pg 16
+
+  linux-asan:
+    name: build_test.sh --asan pg16
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # PG16 only, matching windows-asan's own basic-sanity scope. Runs
+    # DIRECTLY on the runner (PGDG apt packages, same as the coverage
+    # job below), NOT via docker/Dockerfile.test -- confirmed by direct
+    # reproduction (strace + LD_DEBUG=all, both with and without
+    # seccomp/apparmor/capabilities fully disabled) that LD_PRELOADing
+    # libasan.so into the official postgres:16-bookworm image's system
+    # postgres binary hangs the dynamic linker forever mid-dependency-
+    # resolution (stuck loading libgcrypt.so.20, a transitive dep of
+    # libsystemd.so.0 pulled in by that image's full LDAP/GSSAPI/
+    # systemd/PAM build) -- a Debian Bookworm glibc 2.36 problem, not a
+    # bug in our build_test.sh/Makefile ASan wiring, not a Docker
+    # sandboxing artifact (reproduces identically fully unconfined), and
+    # not present on Ubuntu 24.04's glibc 2.39 (confirmed: PGDG's own
+    # postgresql-16 package on ubuntu-latest, same library set, hangs
+    # nowhere -- this is exactly what this job now uses). The Docker
+    # path's ASAN=1/UBSAN=1 Makefile+build_test.sh flags themselves are
+    # unaffected and still work correctly for anyone running
+    # docker/Dockerfile.test on a non-Bookworm base.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install PostgreSQL 16
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y wget gnupg lsb-release ca-certificates
+          sudo install -d /etc/apt/keyrings
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+              | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+              | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y postgresql-16 postgresql-server-dev-16
+
+      - name: build_test.sh --asan --pg 16
+        run: |
+          set -euo pipefail
+          chmod +x build_test.sh
+          ./build_test.sh --asan --pg 16
+
+  linux-ubsan:
+    name: build_test.sh --ubsan pg16
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Same structure and same reason for running directly on the runner
+    # (not Docker) as linux-asan above -- see its comment for the full
+    # Debian-Bookworm-glibc-2.36 root cause. PG16 only, matching
+    # windows-ubsan's own scope.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install PostgreSQL 16
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y wget gnupg lsb-release ca-certificates
+          sudo install -d /etc/apt/keyrings
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+              | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+              | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y postgresql-16 postgresql-server-dev-16
+
+      - name: build_test.sh --ubsan --pg 16
+        run: |
+          set -euo pipefail
+          chmod +x build_test.sh
+          ./build_test.sh --ubsan --pg 16
+
+  coverage:
+    name: coverage (lcov)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install PostgreSQL 16 + lcov
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y wget gnupg lsb-release ca-certificates lcov
+          sudo install -d /etc/apt/keyrings
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+              | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+              | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y postgresql-16 postgresql-server-dev-16
+
+      - name: build_test.sh --coverage
+        run: |
+          set -euo pipefail
+          chmod +x build_test.sh
+          ./build_test.sh --coverage --pg 16
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: coverage-html
+          path: coverage_html/
+          retention-days: 30
+          if-no-files-found: warn

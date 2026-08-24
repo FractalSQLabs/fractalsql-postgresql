@@ -10,8 +10,15 @@ Values are clipped to [-1, 1] so they fall within FractalSQL's default
 search bounds.
 
 Writes two tables:
-    bench_vectors (id int, cluster_id int, emb vector(d), emb_arr float8[])
+    bench_vectors (id int, cluster_id int, emb vector(d), emb_arr float8[]
+                   [, emb_fv fractal_vector(d) if --with-fractal-vector])
     bench_centers (cluster_id int, center_arr float8[])
+
+--with-fractal-vector adds an emb_fv fractal_vector(d) column, populated
+from the SAME underlying values as emb_arr (modulo the deliberate
+float8->float4 narrowing) -- one corpus backing a fair storage/latency
+comparison in bench/vector_type_head_to_head.py. Default off so the
+existing head_to_head.py (HNSW-vs-Scout) run is unaffected.
 
 Builds an HNSW index on bench_vectors.emb for the pgvector comparison
 arm of the benchmark.
@@ -20,7 +27,7 @@ Usage:
     python3 bench/data_gen.py --dsn postgresql:///fractalsql_bench \\
         --n 100000 --dim 768 --clusters 50
 
-Defaults are the brief: 100k / d=768 / 50 clusters.
+Defaults: 100k points, dim=128, 50 clusters.
 """
 
 import argparse
@@ -49,6 +56,11 @@ def main() -> int:
     ap.add_argument("--sigma", type=float, default=0.05,
                     help="per-component std of intra-cluster noise "
                          "(default: %(default)s)")
+    ap.add_argument("--with-fractal-vector", action="store_true",
+                    help="also add an emb_fv fractal_vector(dim) column, "
+                         "for bench/vector_type_head_to_head.py "
+                         "(default: off, keeps the existing HNSW-vs-Scout "
+                         "head_to_head.py run unaffected)")
     ap.add_argument("--seed", type=int, default=42,
                     help="RNG seed (default: %(default)s)")
     args = ap.parse_args()
@@ -78,6 +90,9 @@ def main() -> int:
         conn.execute("CREATE EXTENSION IF NOT EXISTS fractalsql;")
         register_vector(conn)
 
+        fv_col = ",\n                emb_fv     fractal_vector(%d) NOT NULL" % args.dim \
+            if args.with_fractal_vector else ""
+
         conn.execute("DROP TABLE IF EXISTS bench_vectors;")
         conn.execute("DROP TABLE IF EXISTS bench_centers;")
         conn.execute(f"""
@@ -85,7 +100,7 @@ def main() -> int:
                 id         int       PRIMARY KEY,
                 cluster_id int       NOT NULL,
                 emb        vector({args.dim}) NOT NULL,
-                emb_arr    float8[]  NOT NULL
+                emb_arr    float8[]  NOT NULL{fv_col}
             );
         """)
         conn.execute(f"""
@@ -106,17 +121,28 @@ def main() -> int:
         # Text COPY — float format is simple and fast enough for this scale.
         # Using list representation for both vector and float8[] columns;
         # pgvector registers a text-out adapter that produces "[1,2,...]".
+        # fractal_vector's text format is "[1.23,...]" too (matches
+        # pgvector's own convention deliberately -- see fractal_vector's
+        # own type comment), same coords as emb/emb_arr modulo the
+        # deliberate float8->float4 narrowing on the way in -- one corpus
+        # backs a fair three-way comparison in
+        # vector_type_head_to_head.py.
+        fv_cols = ", emb_fv" if args.with_fractal_vector else ""
         with conn.cursor() as cur:
-            with cur.copy("COPY bench_vectors (id, cluster_id, emb, emb_arr) "
+            with cur.copy(f"COPY bench_vectors (id, cluster_id, emb, emb_arr{fv_cols}) "
                           "FROM STDIN WITH (FORMAT TEXT)") as copy:
                 for i in range(args.n):
                     v = vectors[i]
-                    # vector type's text input:   [1.23,4.56,...]
-                    # float8[] type's text input: {1.23,4.56,...}
+                    # vector type's text input:        [1.23,4.56,...]
+                    # float8[] type's text input:       {1.23,4.56,...}
+                    # fractal_vector's text input:      [1.23,4.56,...]
                     coords = ",".join(f"{x:.6f}" for x in v)
                     vec_lit = f"[{coords}]"
                     arr_lit = "{" + coords + "}"
-                    copy.write_row((i, int(labels[i]), vec_lit, arr_lit))
+                    if args.with_fractal_vector:
+                        copy.write_row((i, int(labels[i]), vec_lit, arr_lit, vec_lit))
+                    else:
+                        copy.write_row((i, int(labels[i]), vec_lit, arr_lit))
         print(f"    COPY done in {time.perf_counter() - t0:.1f}s")
 
         print(f"  building HNSW index on emb ...")

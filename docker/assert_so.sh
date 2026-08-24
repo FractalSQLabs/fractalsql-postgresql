@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck shell=sh  # Intentionally POSIX: runs in minimal builder stages where bash may be absent.
 # docker/assert_so.sh — zero-dependency posture check for fractalsql.so.
 #
 # Usage: assert_so.sh <path/to/fractalsql_pgN.so> <size_ceiling_bytes>

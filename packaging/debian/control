@@ -1,4 +1,4 @@
-Source: postgresql-fractalsql
+Source: fractalsql-postgresql
 Section: database
 Priority: optional
 Maintainer: FractalSQLabs <ops@fractalsqlabs.io>
@@ -6,20 +6,21 @@ Build-Depends:
  debhelper-compat (= 13),
  postgresql-server-dev-all
 Standards-Version: 4.6.2
-Homepage: https://github.com/FractalSQLabs/postgresql-fractalsql
+Homepage: https://github.com/FractalSQLabs/fractalsql-postgresql
 
 Package: postgresql-14-fractalsql
 Architecture: amd64 arm64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- libc6 (>= 2.38),
+ libc6 (>= 2.34),
+ libcurl4,
  postgresql-14
 Description: Stochastic Fractal Search extension for PostgreSQL 14
  FractalSQL registers the fractal_search() and fractal_search_explore()
- functions — a LuaJIT-backed Stochastic Fractal Search optimizer for
- high-diversity vector search. LuaJIT is statically linked into the
- extension; no external luajit runtime is required. This binary is
+ functions — a pure-C Stochastic Fractal Search optimizer for
+ high-diversity vector search, with an optional LLM reasoning plugin
+ (fractalsql-reasoning-http, which links libcurl). This binary is
  compiled against the PostgreSQL 14 server ABI.
 
 Package: postgresql-15-fractalsql
@@ -27,13 +28,14 @@ Architecture: amd64 arm64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- libc6 (>= 2.38),
+ libc6 (>= 2.34),
+ libcurl4,
  postgresql-15
 Description: Stochastic Fractal Search extension for PostgreSQL 15
  FractalSQL registers the fractal_search() and fractal_search_explore()
- functions — a LuaJIT-backed Stochastic Fractal Search optimizer for
- high-diversity vector search. LuaJIT is statically linked into the
- extension; no external luajit runtime is required. This binary is
+ functions — a pure-C Stochastic Fractal Search optimizer for
+ high-diversity vector search, with an optional LLM reasoning plugin
+ (fractalsql-reasoning-http, which links libcurl). This binary is
  compiled against the PostgreSQL 15 server ABI.
 
 Package: postgresql-16-fractalsql
@@ -41,13 +43,14 @@ Architecture: amd64 arm64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- libc6 (>= 2.38),
+ libc6 (>= 2.34),
+ libcurl4,
  postgresql-16
 Description: Stochastic Fractal Search extension for PostgreSQL 16
  FractalSQL registers the fractal_search() and fractal_search_explore()
- functions — a LuaJIT-backed Stochastic Fractal Search optimizer for
- high-diversity vector search. LuaJIT is statically linked into the
- extension; no external luajit runtime is required. This binary is
+ functions — a pure-C Stochastic Fractal Search optimizer for
+ high-diversity vector search, with an optional LLM reasoning plugin
+ (fractalsql-reasoning-http, which links libcurl). This binary is
  compiled against the PostgreSQL 16 server ABI.
 
 Package: postgresql-17-fractalsql
@@ -55,13 +58,14 @@ Architecture: amd64 arm64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- libc6 (>= 2.38),
+ libc6 (>= 2.34),
+ libcurl4,
  postgresql-17
 Description: Stochastic Fractal Search extension for PostgreSQL 17
  FractalSQL registers the fractal_search() and fractal_search_explore()
- functions — a LuaJIT-backed Stochastic Fractal Search optimizer for
- high-diversity vector search. LuaJIT is statically linked into the
- extension; no external luajit runtime is required. This binary is
+ functions — a pure-C Stochastic Fractal Search optimizer for
+ high-diversity vector search, with an optional LLM reasoning plugin
+ (fractalsql-reasoning-http, which links libcurl). This binary is
  compiled against the PostgreSQL 17 server ABI.
 
 Package: postgresql-18-fractalsql
@@ -69,11 +73,12 @@ Architecture: amd64 arm64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- libc6 (>= 2.38),
+ libc6 (>= 2.34),
+ libcurl4,
  postgresql-18
 Description: Stochastic Fractal Search extension for PostgreSQL 18
  FractalSQL registers the fractal_search() and fractal_search_explore()
- functions — a LuaJIT-backed Stochastic Fractal Search optimizer for
- high-diversity vector search. LuaJIT is statically linked into the
- extension; no external luajit runtime is required. This binary is
+ functions — a pure-C Stochastic Fractal Search optimizer for
+ high-diversity vector search, with an optional LLM reasoning plugin
+ (fractalsql-reasoning-http, which links libcurl). This binary is
  compiled against the PostgreSQL 18 server ABI.

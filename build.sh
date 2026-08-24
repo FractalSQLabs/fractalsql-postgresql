@@ -1,14 +1,11 @@
 #!/bin/bash
 #
-# postgresql-fractalsql multi-version, multi-arch build.
+# fractalsql-postgresql multi-version, multi-arch build.
 #
 # Drives docker/Dockerfile to produce one .so per PG major for a single
 # target architecture. Output layout:
-#   dist/amd64/fractalsql_pg16.so
-#   dist/amd64/fractalsql_pg17.so
-#   dist/amd64/fractalsql_pg18.so
-#   dist/arm64/fractalsql_pg16.so
-#   ...
+#   dist/amd64/fractalsql_pg14.so  ..  fractalsql_pg18.so
+#   dist/arm64/fractalsql_pg14.so  ..  fractalsql_pg18.so
 #
 # Usage:
 #   ./build.sh [amd64|arm64]        # default: amd64
@@ -36,7 +33,7 @@ OUT_DIR="${DIST_DIR}/${ARCH}"
 mkdir -p "${OUT_DIR}"
 
 echo "------------------------------------------"
-echo "Building postgresql-fractalsql for ${PLATFORM}"
+echo "Building fractalsql-postgresql for ${PLATFORM}"
 echo "  -> ${OUT_DIR}/fractalsql_pg{16,17,18}.so"
 echo "------------------------------------------"
 

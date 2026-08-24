@@ -1,11 +1,16 @@
 @echo off
 REM scripts/windows/build.bat
 REM
+REM LEGACY: this is the old LuaJIT-linked build (LuaJIT used as a
+REM parity oracle). The current production Windows build is the pure-C
+REM scripts\windows\build-windows.ps1 — use that instead. This script
+REM is retained only for the LuaJIT parity path.
+REM
 REM Builds fractalsql.dll against a single target PostgreSQL major on
-REM Windows using the MSVC toolchain. Mirrors the Linux static posture:
-REM static CRT (/MT), whole-program optimization (/GL), static LuaJIT
-REM archive — zero runtime dependency on the Visual C++ Redistributable
-REM and zero dependency on libluajit at load time.
+REM Windows using the MSVC toolchain: static CRT (/MT), whole-program
+REM optimization (/GL), static LuaJIT archive — zero runtime dependency
+REM on the Visual C++ Redistributable and zero dependency on libluajit
+REM at load time.
 REM
 REM Prerequisites
 REM   * Visual Studio Build Tools (cl.exe on PATH — invoke from a

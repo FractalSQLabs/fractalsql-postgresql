@@ -11,7 +11,7 @@ Metrics
 
 Evaluation is symmetric: for BOTH methods we take the returned coords
 and map each one to its nearest cluster center. This treats HNSW-returned
-stored vectors and SFS-returned free-floating particles with the same
+stored vectors and Scout Mode's MMR-selected rows with the same
 labeling rule, so we're not giving either side an unfair advantage from
 how it handles ground-truth labels.
 
@@ -69,6 +69,15 @@ def main() -> int:
                     help="pgvector hnsw.ef_search (default: %(default)s)")
     ap.add_argument("--seed", type=int, default=1,
                     help="RNG seed for query selection (default: %(default)s)")
+    ap.add_argument("--vector-col", default="emb_arr", choices=["emb_arr", "emb_fv"],
+                    help="which bench_vectors column Scout scans: emb_arr "
+                         "(float8[], original) or emb_fv (fractal_vector(n), "
+                         "requires data_gen.py --with-fractal-vector). Query "
+                         "is still passed as float8[] either way -- "
+                         "spi_scan_corpus dispatches on the STORED column's "
+                         "type, not the query's (default: %(default)s)")
+    ap.add_argument("--quiet", action="store_true",
+                    help="print only the final averages line (for sweep drivers)")
     args = ap.parse_args()
 
     with psycopg.connect(args.dsn, autocommit=True) as conn:
@@ -83,11 +92,13 @@ def main() -> int:
         K, dim = centers.shape
         n_total = conn.execute("SELECT count(*) FROM bench_vectors").fetchone()[0]
 
-        print(f"Benchmark: {n_total} stored vectors, {K} clusters, dim={dim}")
-        print(f"  HNSW: ef_search={args.hnsw_ef_search}, LIMIT {args.top_k}")
-        print(f"  SFS : population={args.top_k}, iterations={args.sfs_iter}, "
-              f"mdn={args.sfs_mdn}, walk=0.0 (Scout Mode)")
-        print()
+        if not args.quiet:
+            print(f"Benchmark: {n_total} stored vectors, {K} clusters, dim={dim}")
+            print(f"  HNSW: ef_search={args.hnsw_ef_search}, LIMIT {args.top_k}")
+            print(f"  Scout: population={args.top_k}, iterations={args.sfs_iter}, "
+                  f"mdn={args.sfs_mdn}, walk=0.0 (brute-force relevance scan + MMR), "
+                  f"col={args.vector_col}")
+            print()
 
         # ----- pick queries: one per randomly chosen cluster, slightly noised -----
         rng = np.random.default_rng(args.seed)
@@ -97,9 +108,10 @@ def main() -> int:
 
         # ----- run ---------------------------------------------------------
         hdr = ("qi  anchor      |       HNSW ms   HNSW recall    |"
-               "       SFS ms   SFS recall")
-        print(hdr)
-        print("-" * len(hdr))
+               "     Scout ms   Scout recall")
+        if not args.quiet:
+            print(hdr)
+            print("-" * len(hdr))
 
         hnsw_ms_list, hnsw_recall_list = [], []
         sfs_ms_list,  sfs_recall_list  = [], []
@@ -133,9 +145,9 @@ def main() -> int:
             with timed() as clk:
                 rows = conn.execute(
                     "SELECT p FROM fractal_search_explore("
-                    "    'bench_vectors', 'emb_arr', %s, %s::jsonb"
+                    "    'bench_vectors', %s, %s, %s::jsonb"
                     ") AS p",
-                    (q_fl8, opts)
+                    (args.vector_col, q_fl8, opts)
                 ).fetchall()
             sfs_ms = clk()
             sfs_pts = np.array([r[0] for r in rows], dtype=np.float64)
@@ -144,20 +156,27 @@ def main() -> int:
             hnsw_ms_list.append(hnsw_ms);  hnsw_recall_list.append(hnsw_clusters)
             sfs_ms_list.append(sfs_ms);    sfs_recall_list.append(sfs_clusters)
 
-            print(f"{qi:2d}  cluster {q_anchor:3d} | "
-                  f"{hnsw_ms:10.1f}   {hnsw_clusters:4d} / {K}     | "
-                  f"{sfs_ms:10.1f}   {sfs_clusters:4d} / {K}")
+            if not args.quiet:
+                print(f"{qi:2d}  cluster {q_anchor:3d} | "
+                      f"{hnsw_ms:10.1f}   {hnsw_clusters:4d} / {K}     | "
+                      f"{sfs_ms:10.1f}   {sfs_clusters:4d} / {K}")
 
-        print()
-        print("Averages over", args.n_queries, "queries:")
-        print(f"  HNSW: {np.mean(hnsw_ms_list):>8.1f} ms   "
-              f"recall {np.mean(hnsw_recall_list):>4.1f} / {K}")
-        print(f"  SFS : {np.mean(sfs_ms_list):>8.1f} ms   "
-              f"recall {np.mean(sfs_recall_list):>4.1f} / {K}")
         lat_ratio = np.mean(sfs_ms_list) / max(np.mean(hnsw_ms_list), 1e-9)
         rec_ratio = np.mean(sfs_recall_list) / max(np.mean(hnsw_recall_list), 1e-9)
-        print(f"  SFS is {lat_ratio:.1f}x slower and discovers "
-              f"{rec_ratio:.1f}x more distinct clusters")
+        if not args.quiet:
+            print()
+            print("Averages over", args.n_queries, "queries:")
+            print(f"  HNSW: {np.mean(hnsw_ms_list):>8.1f} ms   "
+                  f"recall {np.mean(hnsw_recall_list):>4.1f} / {K}")
+            print(f"  Scout: {np.mean(sfs_ms_list):>7.1f} ms   "
+                  f"recall {np.mean(sfs_recall_list):>4.1f} / {K}")
+            print(f"  Scout is {lat_ratio:.1f}x slower and discovers "
+                  f"{rec_ratio:.1f}x more distinct clusters")
+        else:
+            print(f"n={n_total:<7d} col={args.vector_col:<8s} "
+                  f"HNSW={np.mean(hnsw_ms_list):7.2f}ms/{np.mean(hnsw_recall_list):4.1f}  "
+                  f"Scout={np.mean(sfs_ms_list):7.2f}ms/{np.mean(sfs_recall_list):4.1f}  "
+                  f"({lat_ratio:.1f}x slower, {rec_ratio:.1f}x recall)")
 
     return 0
 

@@ -1,0 +1,370 @@
+name: Install test (packaging)
+
+# End-to-end validation of the shipped per-PG-major .deb and .rpm
+# packages. Builds all 5 per-major .so, packages them, then installs
+# and exercises CREATE EXTENSION for each (PG major × distro family)
+# cell. Catches any drift between Debian's /usr/lib/postgresql/<V>/
+# and PGDG's /usr/pgsql-<V>/ trees.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+  schedule:
+    - cron: '19 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-artifacts:
+    name: Build all per-major .so + .deb + .rpm (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - name: Build per-PG-major .so files
+        run: |
+          chmod +x build.sh
+          ./build.sh amd64
+      - name: Install fpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev build-essential rpm
+          sudo gem install --no-document fpm
+      - name: Package per-major .deb + .rpm
+        run: |
+          chmod +x package.sh
+          ./package.sh amd64
+          ls -l dist/packages
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages/*
+          retention-days: 1
+          if-no-files-found: error
+
+  debian-install:
+    name: Debian — install + CREATE EXTENSION (pg${{ matrix.pg }})
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install + verify in ubuntu:24.04 with postgresql-${{ matrix.pg }}
+        env:
+          PG_VER: ${{ matrix.pg }}
+        run: |
+          cat > test-deb.sh <<SCRIPT
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -qq -y wget gnupg lsb-release ca-certificates
+
+          # PGDG apt repo — gives us postgresql-14..18 on any Ubuntu.
+          # (Ubuntu's own repos only ship one PG major per release.)
+          install -d /etc/apt/keyrings
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+              | gpg --dearmor > /etc/apt/keyrings/pgdg.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt \$(lsb_release -cs)-pgdg main" \
+              > /etc/apt/sources.list.d/pgdg.list
+          apt-get update -qq
+          apt-get install -qq -y postgresql-\${PG_VER} postgresql-client-\${PG_VER}
+
+          # Start postgres without systemd. Debian's postgresql-common
+          # package relocates postgresql.conf to /etc/postgresql/<ver>/main/
+          # (out of PGDATA) -- a bare `pg_ctl -D PGDATA start` can't find
+          # it ("could not access the server configuration file"). The
+          # correct Debian tool for this split layout is pg_ctlcluster.
+          su postgres -c "pg_ctlcluster \${PG_VER} main start"
+
+          for i in \$(seq 1 60); do
+              su postgres -c "psql -c 'SELECT 1'" >/dev/null 2>&1 && break
+              sleep 1
+          done
+
+          apt-get install -qq -y ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.deb
+
+          # Verify files landed at the PG-declared extension dir.
+          EXT_DIR=\$(su postgres -c "pg_config --sharedir")/extension
+          test -f "\${EXT_DIR}/fractalsql.control" \
+              || { echo "FAIL: fractalsql.control missing"; ls -la "\${EXT_DIR}" || true; exit 1; }
+
+          su postgres -c "psql -c 'CREATE EXTENSION fractalsql;'"
+
+          EDITION=\$(su postgres -c "psql -At -c 'SELECT fractal_edition();'")
+          VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
+          echo "edition=\$EDITION version=\$VERSION"
+          test "\$EDITION" = "Community"
+          test "\$VERSION" = "2.0.0"
+          echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
+
+          # --- Reasoning smoke test against a mock LLM endpoint --------
+          apt-get install -qq -y python3
+
+          PLUGIN=/usr/lib/postgresql/\${PG_VER}/lib/fractalsql-reasoning-http.so
+          test -f "\${PLUGIN}" \
+              || { echo "FAIL: reasoning plugin missing at \${PLUGIN}"; exit 1; }
+
+          # .deb Depends: libcurl4 — the plugin dlopen-links libcurl at load.
+          ldd "\${PLUGIN}" | grep -qi libcurl \
+              || { echo "FAIL: reasoning plugin not linked to libcurl"; ldd "\${PLUGIN}"; exit 1; }
+
+          # Mock OpenAI-compatible endpoint (fixed canned reply).
+          python3 /work/scripts/ci/mock_llm.py 18080 &
+          MOCK_PID=\$!
+          for i in \$(seq 1 50); do
+              (echo > /dev/tcp/127.0.0.1/18080) >/dev/null 2>&1 && break
+              sleep 0.2
+          done
+
+          # fractalsql.* GUCs are registered by _PG_init(), which runs
+          # lazily on first dlopen -- a backend that has never called a
+          # fractalsql function doesn't know the GUC name yet, so
+          # ALTER SYSTEM SET on a truly fresh connection fails with
+          # "unrecognized configuration parameter". Fix: call the
+          # cheapest fractalsql function (no reasoning plugin needed)
+          # first, in the SAME session -- multiple -c flags on one psql
+          # invocation share one connection but each is still its own
+          # simple-query (unlike "-c 'A; B'", which runs as one implicit
+          # transaction block and would reject ALTER SYSTEM). Matches
+          # tests/_t2s_common.py's configure_reasoning(), which hit and
+          # solved this exact issue.
+          su postgres -c "psql \
+              -c 'SELECT fractal_version();' \
+              -c \"ALTER SYSTEM SET fractalsql.reasoning_plugin = '\${PLUGIN}'\" \
+              -c \"ALTER SYSTEM SET fractalsql.http_url = 'http://127.0.0.1:18080/v1/chat/completions'\" \
+              -c \"ALTER SYSTEM SET fractalsql.http_allow_plaintext = on\" \
+              -c 'SELECT pg_reload_conf();'"
+
+          REPLY=\$(su postgres -c "psql -At -c \"SELECT fractalsql_reason('ping')\"")
+          kill \${MOCK_PID} 2>/dev/null || true
+          echo "reason reply=\${REPLY}"
+          test "\${REPLY}" = "pong-from-mock" \
+              || { echo "FAIL: reasoning round-trip returned '\${REPLY}'"; exit 1; }
+          echo "ok: reasoning round-trip via mock endpoint (pg\${PG_VER})"
+
+          # --- tests/*.py suite -----------------------------------------
+          # These were previously local-run-only (never wired into any
+          # workflow). They need a REAL CREATE EXTENSION'd install (not
+          # build_test.sh's throwaway no-root cluster, which registers
+          # functions directly and has no fractalsql.control on disk) --
+          # this job already has exactly that, via the .deb install above.
+          # One PG major is enough (same Python/SQL logic every major;
+          # build_test.sh's --cross already covers cross-version C
+          # behavior) -- gate to pg16 to avoid 5x redundant runs.
+          # test_text_to_sql_smoke.py needs a real LLM endpoint and is
+          # intentionally excluded -- it self-skips without one anyway.
+          if [ "\${PG_VER}" = "16" ]; then
+            apt-get install -qq -y python3-pip build-essential
+            pip install --break-system-packages --quiet 'psycopg[binary]'
+
+            # reasoning_plugin/http_url are already set from the block
+            # above (needed there; harmless here since ensure_ctx() only
+            # validates config shape at load, it doesn't probe the now-
+            # dead mock server). test_text_to_sql_fuzz.py and
+            # test_text_to_sql_evil_nonterminating.py reconfigure the
+            # GUCs themselves via _t2s_common.configure_reasoning() with
+            # their own mocks/adversarial plugins -- don't fight that
+            # here. Local-socket auth is peer, so these run via
+            # su postgres -c same as everything else in this script.
+            for t in test_text_to_sql_schema_context.py test_scout.py \
+                     test_text_to_sql_evil_nonterminating.py test_text_to_sql_fuzz.py; do
+              echo "--- tests/\${t} ---"
+              su postgres -c "cd /work && FRACTALSQL_DSN='postgresql:///postgres' FRACTALSQL_REASONING_PLUGIN='\${PLUGIN}' python3 tests/\${t}" \
+                || { echo "FAIL: tests/\${t}"; exit 1; }
+            done
+          fi
+          SCRIPT
+          chmod +x test-deb.sh
+          docker run --rm \
+              -e PG_VER=${PG_VER} \
+              -v "${{ github.workspace }}:/work" -w /work \
+              ubuntu:24.04 bash /work/test-deb.sh
+
+  rpm-install:
+    name: RHEL (Rocky 9) — install + CREATE EXTENSION (pg${{ matrix.pg }})
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install + verify in rockylinux:9 with postgresql${{ matrix.pg }}-server
+        env:
+          PG_VER: ${{ matrix.pg }}
+        run: |
+          cat > test-rpm.sh <<SCRIPT
+          set -euo pipefail
+          # PGDG yum repo for RHEL 9 — the .rpm depends on
+          # postgresql\${PG_VER}-server which only PGDG ships.
+          dnf install -qy https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+          # Disable the el9 default postgresql module so it doesn't
+          # shadow PGDG's per-major package.
+          dnf -qy module reset postgresql 2>/dev/null || true
+          dnf -qy module disable postgresql 2>/dev/null || true
+
+          dnf install -qy postgresql\${PG_VER}-server postgresql\${PG_VER}
+
+          # Start postgres.
+          PGBIN=/usr/pgsql-\${PG_VER}/bin
+          PGDATA=/var/lib/pgsql/\${PG_VER}/data
+          mkdir -p "\${PGDATA}"
+          chown -R postgres:postgres /var/lib/pgsql
+          su postgres -c "\${PGBIN}/initdb -D \${PGDATA}"
+          su postgres -c "\${PGBIN}/pg_ctl -D \${PGDATA} -l /tmp/pg.log start"
+
+          export PATH="\${PGBIN}:\$PATH"
+          for i in \$(seq 1 60); do
+              su postgres -c "psql -c 'SELECT 1'" >/dev/null 2>&1 && break
+              sleep 1
+          done
+
+          dnf install -qy ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.rpm
+
+          # Verify files landed in the PGDG tree.
+          EXT_DIR=/usr/pgsql-\${PG_VER}/share/extension
+          test -f "\${EXT_DIR}/fractalsql.control" \
+              || { echo "FAIL: fractalsql.control missing"; ls -la "\${EXT_DIR}" || true; exit 1; }
+
+          su postgres -c "psql -c 'CREATE EXTENSION fractalsql;'"
+
+          EDITION=\$(su postgres -c "psql -At -c 'SELECT fractal_edition();'")
+          VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
+          echo "edition=\$EDITION version=\$VERSION"
+          test "\$EDITION" = "Community"
+          test "\$VERSION" = "2.0.0"
+          echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
+
+          # --- Reasoning smoke test against a mock LLM endpoint --------
+          dnf install -qy python3
+
+          PLUGIN=/usr/pgsql-\${PG_VER}/lib/fractalsql-reasoning-http.so
+          test -f "\${PLUGIN}" \
+              || { echo "FAIL: reasoning plugin missing at \${PLUGIN}"; exit 1; }
+
+          # .rpm requires libcurl.so.4 (satisfied by libcurl / libcurl-minimal).
+          ldd "\${PLUGIN}" | grep -qi libcurl \
+              || { echo "FAIL: reasoning plugin not linked to libcurl"; ldd "\${PLUGIN}"; exit 1; }
+
+          # Mock OpenAI-compatible endpoint (fixed canned reply).
+          python3 /work/scripts/ci/mock_llm.py 18080 &
+          MOCK_PID=\$!
+          for i in \$(seq 1 50); do
+              (echo > /dev/tcp/127.0.0.1/18080) >/dev/null 2>&1 && break
+              sleep 0.2
+          done
+
+          # Wire the extension to the plugin + mock endpoint. SIGHUP GUCs;
+          # a fresh backend loads the plugin lazily on the first reason call.
+          su postgres -c "psql -c \"ALTER SYSTEM SET fractalsql.reasoning_plugin = '\${PLUGIN}'\""
+          su postgres -c "psql -c \"ALTER SYSTEM SET fractalsql.http_url = 'http://127.0.0.1:18080/v1/chat/completions'\""
+          su postgres -c "psql -c \"ALTER SYSTEM SET fractalsql.http_allow_plaintext = on\""
+          su postgres -c "psql -c 'SELECT pg_reload_conf()'"
+
+          REPLY=\$(su postgres -c "psql -At -c \"SELECT fractalsql_reason('ping')\"")
+          kill \${MOCK_PID} 2>/dev/null || true
+          echo "reason reply=\${REPLY}"
+          test "\${REPLY}" = "pong-from-mock" \
+              || { echo "FAIL: reasoning round-trip returned '\${REPLY}'"; exit 1; }
+          echo "ok: reasoning round-trip via mock endpoint (pg\${PG_VER})"
+          SCRIPT
+          chmod +x test-rpm.sh
+          docker run --rm \
+              -e PG_VER=${PG_VER} \
+              -v "${{ github.workspace }}:/work" -w /work \
+              rockylinux:9 bash /work/test-rpm.sh
+
+  macos-install:
+    name: macOS — build + install + CREATE EXTENSION + reason (pg17, arm64)
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install PostgreSQL 17 (Homebrew)
+        run: |
+          set -euo pipefail
+          brew install postgresql@17
+          echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
+
+      - name: Build + package the darwin tarball (arm64 native)
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package-darwin.sh scripts/macos/install.sh
+          PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config" \
+            ./scripts/package-darwin.sh
+          ls -l dist/packages
+
+      - name: Extract + install into the Homebrew PostgreSQL
+        run: |
+          set -euo pipefail
+          TARBALL=$(ls dist/packages/*-pg17-darwin-arm64.tar.gz)
+          tar xzf "${TARBALL}" -C /tmp
+          DIR=$(basename "${TARBALL}" .tar.gz)
+          PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config" /tmp/"${DIR}"/install.sh
+          # File landed where CREATE EXTENSION looks.
+          test -f "$(pg_config --sharedir)/extension/fractalsql.control"
+
+      - name: Start PostgreSQL
+        run: |
+          set -euo pipefail
+          brew services start postgresql@17
+          for i in $(seq 1 30); do
+              psql -d postgres -c 'SELECT 1' >/dev/null 2>&1 && break
+              sleep 1
+          done
+
+      - name: CREATE EXTENSION + search + reason (mock endpoint)
+        run: |
+          set -euo pipefail
+          psql -d postgres -c 'CREATE EXTENSION fractalsql;'
+          EDITION=$(psql -d postgres -Atc 'SELECT fractal_edition();')
+          VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
+          echo "edition=${EDITION} version=${VERSION}"
+          test "${EDITION}" = "Community"
+          test "${VERSION}" = "2.0.0"
+
+          # Search works with no further config.
+          psql -d postgres -Atc \
+              "SELECT fractal_search(ARRAY[0.6,0.8,0.0]::float8[], iterations => 20);"
+
+          # Reasoning round-trip against a mock OpenAI-compatible endpoint.
+          python3 scripts/ci/mock_llm.py 18080 &
+          MOCK_PID=$!
+          for i in $(seq 1 50); do
+              nc -z 127.0.0.1 18080 >/dev/null 2>&1 && break
+              sleep 0.2
+          done
+          PLUGIN="$(pg_config --pkglibdir)/fractalsql-reasoning-http.so"
+          test -f "${PLUGIN}" || { echo "FAIL: plugin missing at ${PLUGIN}"; exit 1; }
+          psql -d postgres -c "ALTER SYSTEM SET fractalsql.reasoning_plugin = '${PLUGIN}'"
+          psql -d postgres -c "ALTER SYSTEM SET fractalsql.http_url = 'http://127.0.0.1:18080/v1/chat/completions'"
+          psql -d postgres -c "ALTER SYSTEM SET fractalsql.http_allow_plaintext = on"
+          psql -d postgres -c "SELECT pg_reload_conf()"
+          REPLY=$(psql -d postgres -Atc "SELECT fractalsql_reason('ping')")
+          kill "${MOCK_PID}" 2>/dev/null || true
+          echo "reason reply=${REPLY}"
+          test "${REPLY}" = "pong-from-mock" \
+              || { echo "FAIL: reasoning round-trip returned '${REPLY}'"; exit 1; }
+          echo "ok: macOS build + install + search + reasoning round-trip"

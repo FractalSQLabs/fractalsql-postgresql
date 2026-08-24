@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1.7
+#
+# fractalsql-postgresql test image — runs build_test.sh's gate matrix
+# for ONE PostgreSQL major inside the same base image family the
+# release Dockerfile ships against. A successful `docker build` IS the
+# test result: gates run as a RUN step, so a gate failure fails the
+# build with a non-zero exit and the log in the build output.
+#
+# postgres:<major>-bookworm already pins the toolchain/glibc per
+# major, so there's only one axis here (PG_MAJOR), not a full
+# (libc x arch x profile) matrix.
+#
+# Usage (single major):
+#   docker build -f docker/Dockerfile.test --build-arg PG_MAJOR=16 \
+#       -t fractalsql-postgresql-test:pg16 .
+#
+# Usage (all majors): see run_build_test.sh at the repo root.
+
+ARG PG_MAJOR=16
+ARG FSQL_TEST_TIMEOUT_MULT=1
+# "" (default) | "asan" | "ubsan" -- passed through to build_test.sh as
+# --asan/--ubsan. See run_build_test.sh for the --asan/--ubsan CLI flags
+# that set this.
+#
+# --asan is broken on this Bookworm image: LD_PRELOADing libasan.so
+# into the system postgres binary hangs the dynamic linker (Debian
+# Bookworm glibc 2.36 bug; does not reproduce on Ubuntu 24.04 / glibc
+# 2.39). --ubsan does not hit it. Both flags are correct in
+# build_test.sh; CI's linux-asan/linux-ubsan jobs
+# (.github/workflows/build-test.yml) run on ubuntu-latest via PGDG apt
+# packages rather than through this Dockerfile (only --asan strictly
+# needs it, but both use the ubuntu path for consistency).
+ARG FSQL_SAN_MODE=""
+FROM postgres:${PG_MAJOR}-bookworm
+ARG PG_MAJOR
+ARG FSQL_TEST_TIMEOUT_MULT
+ARG FSQL_SAN_MODE
+
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        build-essential \
+        binutils \
+        file \
+        postgresql-server-dev-${PG_MAJOR} \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . /build
+RUN chown -R postgres:postgres /build
+
+# build_test.sh's pg_setup() runs initdb, which refuses to run as root.
+USER postgres
+ENV PG_MAJOR=${PG_MAJOR}
+ENV FSQL_TEST_TIMEOUT_MULT=${FSQL_TEST_TIMEOUT_MULT}
+
+RUN chmod +x build_test.sh \
+ && ./build_test.sh --pg ${PG_MAJOR} \
+      $(case "${FSQL_SAN_MODE}" in asan) echo --asan ;; ubsan) echo --ubsan ;; esac)

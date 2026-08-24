@@ -1,4 +1,4 @@
-name: Release postgresql-fractalsql Packages
+name: Release fractalsql-postgresql Packages
 
 on:
   push:
@@ -12,30 +12,42 @@ env:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # One build cell per {PG major, arch}. Each cell produces a single
   # fractalsql_pg${VER}.so, validates it in-container, and (amd64 only)
   # runs a smoke test inside a real postgres:${VER} image.
   build:
     name: build pg${{ matrix.pg }} / ${{ matrix.arch }}
-    runs-on: ubuntu-latest
+    # Native arm64 via GitHub's ubuntu-24.04-arm runner. Earlier
+    # iterations used ubuntu-latest + QEMU, which paid the cost of
+    # x86->aarch64 instruction translation for every build cell.
+    # With 5 PG majors × 2 archs = 10 cells, the saved minutes add up.
+    # Native arm64 runners (GA mid-2025) run the same Docker + buildx
+    # stack at native speed; no QEMU shim needed.
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         pg:   [14, 15, 16, 17, 18]
         arch: [amd64, arm64]
+        # The `include` entries match the existing arch axis and
+        # fan runner across every (pg, arch) cell automatically.
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Build fractalsql_pg${{ matrix.pg }}.so for ${{ matrix.arch }}
         run: |
@@ -83,15 +95,29 @@ jobs:
           docker exec pg psql -U postgres -v ON_ERROR_STOP=1 \
               -c "CREATE EXTENSION fractalsql;"
 
+          # Dependent fractalsql_agents extension (pure PL/pgSQL,
+          # requires='fractalsql'). Stage its .control + install SQL and
+          # CREATE EXTENSION it to exercise the requires gate end-to-end.
+          docker cp fractalsql_agents/fractalsql_agents.control \
+              "pg:/usr/share/postgresql/${PG_VER}/extension/fractalsql_agents.control"
+          docker cp fractalsql_agents/sql/fractalsql_agents--1.0.sql \
+              "pg:/usr/share/postgresql/${PG_VER}/extension/fractalsql_agents--1.0.sql"
+          docker exec pg psql -U postgres -v ON_ERROR_STOP=1 \
+              -c "CREATE EXTENSION fractalsql_agents;"
+          AGENTS_VER=$(docker exec pg psql -U postgres -tAc \
+              "SELECT extversion FROM pg_extension WHERE extname='fractalsql_agents';")
+          echo "agents extversion: ${AGENTS_VER}"
+          test "${AGENTS_VER}" = "1.0"
+
           EDITION=$(docker exec pg psql -U postgres -tAc \
-              "SELECT fractalsql_edition();")
+              "SELECT fractal_edition();")
           echo "edition: ${EDITION}"
           test "${EDITION}" = "Community"
 
           VERSION=$(docker exec pg psql -U postgres -tAc \
-              "SELECT fractalsql_version();")
+              "SELECT fractal_version();")
           echo "version: ${VERSION}"
-          test "${VERSION}" = "1.0.0"
+          test "${VERSION}" = "2.0.0"
 
           # Convergence sanity check: query = (0.6, 0.8), objective is
           # cosine distance. Cosine distance is magnitude-invariant,
@@ -122,7 +148,7 @@ jobs:
           docker rm -f pg
 
       - name: Upload .so artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: fractalsql-pg${{ matrix.pg }}-${{ matrix.arch }}-so
           path: dist/${{ matrix.arch }}/fractalsql_pg${{ matrix.pg }}.so
@@ -142,34 +168,34 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Download pg14 .so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: fractalsql-pg14-${{ matrix.arch }}-so
           path: dist/${{ matrix.arch }}
 
       - name: Download pg15 .so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: fractalsql-pg15-${{ matrix.arch }}-so
           path: dist/${{ matrix.arch }}
 
       - name: Download pg16 .so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: fractalsql-pg16-${{ matrix.arch }}-so
           path: dist/${{ matrix.arch }}
 
       - name: Download pg17 .so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: fractalsql-pg17-${{ matrix.arch }}-so
           path: dist/${{ matrix.arch }}
 
       - name: Download pg18 .so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: fractalsql-pg18-${{ matrix.arch }}-so
           path: dist/${{ matrix.arch }}
@@ -210,18 +236,127 @@ jobs:
               fi
           done
 
+      - name: Verify extension files land at the right per-distro paths
+        run: |
+          # PostgreSQL extensions live in different trees on Debian
+          # (apt postgresql-<ver>) vs RHEL PGDG (yum postgresql<ver>-server).
+          # The .so + .control + .sql trio must land where the running
+          # server looks, or CREATE EXTENSION fails with
+          # "could not open extension control file".
+          #
+          #   Debian: /usr/lib/postgresql/<ver>/lib/,
+          #           /usr/share/postgresql/<ver>/extension/
+          #   RHEL:   /usr/pgsql-<ver>/lib/,
+          #           /usr/pgsql-<ver>/share/extension/
+          set -euo pipefail
+          for deb in dist/packages/*-${{ matrix.arch }}.deb; do
+              echo "=== ${deb} ==="
+              CONTENTS=$(dpkg-deb -c "${deb}")
+              echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/fractalsql\.so$'
+              echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/fractalsql-reasoning-http\.so$'
+              echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql\.control$'
+              echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql--1\.0\.sql$'
+              echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql_agents\.control$'
+              echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql_agents--1\.0\.sql$'
+          done
+          for rpm in dist/packages/*-${{ matrix.arch }}.rpm; do
+              echo "=== ${rpm} ==="
+              CONTENTS=$(rpm -qlp "${rpm}")
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/fractalsql\.so$'
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/fractalsql-reasoning-http\.so$'
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql\.control$'
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql--1\.0\.sql$'
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql_agents\.control$'
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql_agents--1\.0\.sql$'
+          done
+
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: postgresql-fractalsql-${{ matrix.arch }}
+          name: fractalsql-postgresql-${{ matrix.arch }}
           path: dist/packages/*
           if-no-files-found: error
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/packages/*
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------------------
+  # macOS: fractalsql.dylib for each PG major × (Intel, Apple Silicon).
+  # Homebrew's `postgresql@<MAJOR>` formulas provide per-major headers
+  # (`pg_config --includedir-server`). Install the one we want per
+  # matrix cell, build, verify, package.
+  #
+  # Installation is user-driven: PG's extension tree on macOS depends
+  # on whether you installed from Homebrew (/opt/homebrew/opt/postgresql@X/)
+  # or Postgres.app (/Applications/Postgres.app/Contents/Versions/X/).
+  # We ship .dylib + .control + .sql + README; users `cp` to the
+  # right tree.
+  # ------------------------------------------------------------------
+  # ------------------------------------------------------------------
+  # macOS: per-(major, arch) tarball. Pure-C — builds the extension with
+  # PGXS against a Homebrew PostgreSQL, linking the vendored darwin core
+  # archive (include/darwin-<arch>/), and bundles the reasoning plugin +
+  # install.sh. arm64 native; x86_64 cross-compiled via -arch on Apple
+  # Silicon (the free Intel macos-13 runner was retired Dec 2025).
+  # ------------------------------------------------------------------
+  build-darwin:
+    name: darwin pg${{ matrix.pg }} / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
+        arch: [arm64, x86_64]
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install PostgreSQL ${{ matrix.pg }} (Homebrew)
+        run: |
+          set -euo pipefail
+          brew install postgresql@${{ matrix.pg }}
+          echo "$(brew --prefix postgresql@${{ matrix.pg }})/bin" >> "$GITHUB_PATH"
+
+      - name: Build + package tarball (links vendored pure-C core)
+        env:
+          FSQL_DARWIN_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package-darwin.sh scripts/macos/install.sh
+          PG_CONFIG="$(brew --prefix postgresql@${{ matrix.pg }})/bin/pg_config" \
+            ./scripts/package-darwin.sh
+          ls -l dist/packages
+          # Verify the dependent agents extension (platform-independent
+          # PL/pgSQL) is bundled in the tarball alongside the base files —
+          # mirrors the per-distro package-content checks on Linux.
+          # Same derivation as package-darwin.sh's own VERSION (FSQL_VERSION
+          # in src/fractalsql.c) so this never hardcodes a version that can
+          # drift out of sync with what was actually just built.
+          FSQL_VERSION="$(sed -n 's/^#define FSQL_VERSION "\(.*\)"$/\1/p' src/fractalsql.c)"
+          TARBALL="dist/packages/fractalsql-postgresql-${FSQL_VERSION}-pg${{ matrix.pg }}-darwin-${{ matrix.arch }}.tar.gz"
+          tar -tzf "$TARBALL" | grep -E 'fractalsql_agents\.control$'
+          tar -tzf "$TARBALL" | grep -E 'fractalsql_agents--1\.0\.sql$'
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fractalsql-postgresql-pg${{ matrix.pg }}-darwin-${{ matrix.arch }}
+          path: dist/packages/*-pg${{ matrix.pg }}-darwin-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          files: dist/packages/*-pg${{ matrix.pg }}-darwin-${{ matrix.arch }}.tar.gz
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -236,20 +371,24 @@ jobs:
   #           installer only — there is no "-binaries.zip" variant.
   #           Silent-extracting the .exe to harvest postgres.lib +
   #           server headers is possible but non-trivial; deferring
-  #           arm64 Windows until a post-v1.0.0 iteration.
+  #           arm64 Windows until a post-v2.0.0 iteration.
   #   x64   : full coverage for PG 14-18 via EDB's published
   #           postgresql-<VER>-<ITER>-windows-x64-binaries.zip.
   #
   # Each cell:
   #   1. Pulls EDB's per-PG "binaries" .zip from get.enterprisedb.com
   #      — includes include\server\ and lib\postgres.lib.
-  #   2. Builds static LuaJIT 2.1 via msvcbuild.bat.
-  #   3. Runs scripts\windows\build.bat to produce fractalsql.dll
+  #   2. Runs scripts\windows\build-windows.ps1 to produce fractalsql.dll
   #      against that PG major's server headers (/MT /GL static CRT,
-  #      static libluajit, postgres.lib stub).
-  #   4. Asserts dumpbin /dependents shows no MSVC redistributable
-  #      imports and no dynamic lua51.dll.
-  #   5. Runs scripts\windows\build-msi.bat to produce one MSI
+  #      statically linking the vendored pure-C core archive from
+  #      include\windows-x86_64\ — no LuaJIT anywhere in this path;
+  #      that's scripts\windows\build.bat, kept only for the LuaJIT
+  #      parity oracle, not used for release binaries).
+  #   3. Asserts dumpbin /dependents shows no MSVC redistributable
+  #      imports and no dynamic lua51.dll (build-windows.ps1 runs its
+  #      own export/dependency audit too; this is a second, stricter
+  #      check that treats a dynamic CRT as fatal, not just a warning).
+  #   4. Runs scripts\windows\build-msi.bat to produce one MSI
   #      named FractalSQL-PostgreSQL-<PG_MAJOR>-<MSI_VERSION>-x64.msi.
   # ------------------------------------------------------------------
   build-windows-msi:
@@ -281,10 +420,10 @@ jobs:
     name: windows pg${{ matrix.pg }} / ${{ matrix.arch }}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up MSVC dev cmd (${{ matrix.arch }})
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
         with:
           arch: ${{ matrix.arch }}
 
@@ -320,19 +459,6 @@ jobs:
           Write-Host "WiX bin dir: $wixBin"
           Add-Content -Path $env:GITHUB_PATH -Value $wixBin
 
-      - name: Clone + build static LuaJIT 2.1 with MSVC
-        shell: cmd
-        run: |
-          if not exist deps mkdir deps
-          git clone --depth 1 --branch v2.1 https://github.com/LuaJIT/LuaJIT.git deps\LuaJIT
-          cd deps\LuaJIT\src
-          call msvcbuild.bat static
-          if not exist lua51.lib (
-            echo ==^> LuaJIT static build failed
-            exit /b 1
-          )
-          dir lua51.lib lua.h
-
       - name: Download + unpack EDB PostgreSQL ${{ matrix.edb_version }} ${{ matrix.arch }} binaries
         shell: pwsh
         env:
@@ -351,7 +477,7 @@ jobs:
           Expand-Archive -Path "deps\pg\edb.zip" -DestinationPath "deps\pg" -Force
 
           # The zip unpacks into deps\pg\pgsql\ — normalize to
-          # deps\pg\root so build.bat's PG_DIR is consistent.
+          # deps\pg\root so build-windows.ps1's -PgDir is consistent.
           if (Test-Path "deps\pg\pgsql") {
             Rename-Item -Path "deps\pg\pgsql" -NewName "root"
           } else {
@@ -362,18 +488,11 @@ jobs:
           Test-Path "deps\pg\root\include\server\postgres.h"
           Test-Path "deps\pg\root\lib\postgres.lib"
 
-      - name: Build fractalsql.dll (/MT static CRT, /GL WPO, PG ${{ matrix.pg }})
-        shell: cmd
-        env:
-          PG_MAJOR: ${{ matrix.pg }}
+      - name: Build fractalsql.dll (/MT static CRT, /GL WPO, PG ${{ matrix.pg }}, pure-C vendored core)
+        shell: pwsh
         run: |
-          set LUAJIT_DIR=%CD%\deps\LuaJIT\src
-          set PG_DIR=%CD%\deps\pg\root
-          set OUT_DIR=%CD%\dist\windows\pg%PG_MAJOR%
-          if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
-          call scripts\windows\build.bat
-          if errorlevel 1 exit /b 1
-          dir "%OUT_DIR%\fractalsql.dll"
+          .\scripts\windows\build-windows.ps1 -PgDir "deps\pg\root" -PgMajor ${{ matrix.pg }}
+          Get-Item "dist\windows\pg${{ matrix.pg }}\fractalsql.dll"
 
       - name: Smoke-check fractalsql.dll dependencies (dumpbin)
         shell: pwsh
@@ -391,7 +510,19 @@ jobs:
               Write-Host '==> FAIL: .dll depends on a dynamic LuaJIT'
               exit 1
           }
-          Write-Host '==> OK: static CRT + static LuaJIT posture'
+          Write-Host '==> OK: static CRT, no LuaJIT (pure-C vendored core)'
+
+      # Pins the MSI's Product Version to the release tag on a
+      # tag-triggered run (e.g. refs/tags/v2.0.0 -> 2.0.0), so the
+      # shipped MSI's version can't silently drift from what's actually
+      # being released. On a workflow_dispatch test run (no tag), this
+      # step is skipped and build-msi.bat falls back to its own default.
+      - name: Compute MSI_VERSION from the release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".Substring(1)
+          Add-Content -Path $env:GITHUB_ENV -Value "MSI_VERSION=$ver"
 
       - name: Build MSI (candle + light, PG ${{ matrix.pg }} / ${{ matrix.arch }})
         shell: cmd
@@ -404,15 +535,15 @@ jobs:
           dir dist\windows\*.msi
 
       - name: Upload MSI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: postgresql-fractalsql-windows-pg${{ matrix.pg }}-${{ matrix.arch }}
+          name: fractalsql-postgresql-windows-pg${{ matrix.pg }}-${{ matrix.arch }}
           path: dist/windows/FractalSQL-PostgreSQL-${{ matrix.pg }}-*-${{ matrix.arch }}.msi
           if-no-files-found: error
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/windows/FractalSQL-PostgreSQL-${{ matrix.pg }}-*-${{ matrix.arch }}.msi
           fail_on_unmatched_files: false

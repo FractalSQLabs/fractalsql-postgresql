@@ -2,13 +2,43 @@
 *.so
 *.o
 *.bc
+*.bc.tmp
 *.a
 *.dylib
+*.pdb
 fractalsql.so
 fractal_pg*.so
 
+# MSI packaging intermediates (scripts/windows/build-msi.bat)
+obj/
+*.wixobj
+
+# Python bytecode caches (tests/, scripts/ci/, anywhere else)
+__pycache__/
+*.pyc
+
+# build_test.sh --coverage artifacts
+*.gcno
+*.gcda
+coverage_html/
+
 # NOTE: include/sfs_core_bc.h is a tracked source file
 # (pre-compiled LuaJIT bytecode). Do not add it to this list.
+
+# NOTE: include/ also vendors the foundry's built core archives/shared
+# objects (checked in deliberately, per fleet convention — CI and
+# consumers build against a pinned drop, not a from-source fetch).
+# The blanket *.a/*.so/*.dylib rules above would otherwise silently
+# exclude them even after `git add include/`. Un-ignore explicitly.
+!include/**/*.a
+!include/**/*.so
+!include/**/*.dylib
+
+# Stray scratch dirs under include/ for local-only manual testing (e.g.
+# staging an enterprise-tier .dll/.sig to validate fractalsql.enterprise_lib
+# against a real build) -- must never be committed into this Apache-2.0
+# tree; `git add -A` will otherwise sweep them up like any other new file.
+include/*/tmp/
 
 # Build output trees
 dist/

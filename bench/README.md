@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../FractalSQLforPostgreSQL.jpg" alt="FractalSQL for PostgreSQL" width="720">
+</p>
+
 # FractalSQL benchmark: HNSW vs Scout Mode
 
 Head-to-head comparison of pgvector's HNSW index against FractalSQL's
@@ -100,4 +104,67 @@ matters more than scan throughput.
 --dim      vector dimension (default 768)
 --clusters number of Gaussian islands (default 50)
 --sigma    intra-cluster std (default 0.05)
+```
+
+## fractal_vector vs float8[] at scale
+
+A second, unrelated benchmark: `fractal_vector(n)` vs `float8[]` storage
+size, bulk-load throughput, and search latency, at `data_gen.py`'s real
+scale rather than a hand-picked single row. Distinct from the
+HNSW-vs-Scout comparison above.
+
+```bash
+make bench-vector
+```
+
+Or manually:
+
+```bash
+python3 bench/data_gen.py --with-fractal-vector   # adds bench_vectors.emb_fv
+python3 bench/vector_type_head_to_head.py
+```
+
+Reports four numbers: `pg_column_size` per row (float8[] vs
+fractal_vector), bulk `COPY` throughput for both column types,
+`fractal_search_trajectory` latency old (float8[]) vs new
+(fractal_vector) overload, and peak backend RSS during a full-corpus
+`fractal_vector` scan (a regression tripwire for `spi_scan_corpus`'s
+per-row detoast-then-`pfree()` loop actually keeping memory bounded —
+meaningful only when the benchmark client and the Postgres server share
+a host, since it reads `/proc/<backend_pid>/status`; self-skips
+otherwise).
+
+The storage-size ratio depends on how compressible your actual
+embedding values are: Postgres TOASTs `float8[]` with compression by
+default, while `fractal_vector` uses `STORAGE = external` and skips
+compression deliberately (float mantissas compress poorly). Small
+vectors that never trigger TOAST see close to the full ~2x
+(uncompressed `float4` vs uncompressed `float8`); larger vectors where
+`float8[]`'s TOAST compression kicks in see a smaller realized gap.
+Measure on your own data before treating either number as a promise.
+
+**On sub-benchmark (c)'s absolute numbers**: `fractal_search_trajectory`
+(like every `fractal_search_telemetry`-family function) runs a full SFS
+population search internally (`telemetry_topk_srf`'s hardcoded
+`population_size=50, max_generation=15`), the same cost class as
+`fractal_search_explore`/Scout mode above — it is not a cheap distance-
+sort top-k. The "Scaling notes" table above (20-60s at N=100k, d=768,
+Scout Mode) is the right intuition for sub-benchmark (c) too, and the
+absolute latency you see is dominated by that SFS cost, not by the
+`float8[]`-vs-`fractal_vector` unpack difference this arm is actually
+trying to isolate. Judge fractal_vector's contribution from the relative
+gap between the two rows, not either row's absolute value — and expect
+both to be considerably slower still on a CPU-constrained host (e.g. a
+2-vCPU container) than the table above implies, since that table was
+measured on a real multi-core host.
+
+`vector_type_head_to_head.py`'s own knobs:
+
+```
+--copy-n           row count for the COPY throughput sub-benchmark
+                   (default 20000 -- smaller than the full corpus,
+                   this arm is O(n) by design so a subset is
+                   representative)
+--search-queries   queries to average for the latency sub-benchmark
+                   (default 10)
 ```

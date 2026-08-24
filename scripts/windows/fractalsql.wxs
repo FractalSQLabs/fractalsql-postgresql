@@ -6,7 +6,7 @@
   Driven by three preprocessor vars supplied by build-msi.bat:
     -dPG_MAJOR=14|15|16|17|18
     -dSTAGE_DIR=dist\windows\staging-pg<NN>-<arch>
-    -dMSI_VERSION=1.0.0
+    -dMSI_VERSION=2.0.0
   plus the standard candle -arch <x64|arm64> which populates
   $(sys.BUILDARCH) and picks the right ProgramFiles dir / Package
   Platform.
@@ -66,6 +66,38 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of FractalSQL for PostgreSQL $(var.PG_MAJOR) is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- fractalsql-reasoning-http.dll (x64 only, see c_ReasoningPluginDll
+         below) is built with /MD, unlike fractalsql.dll's /MT: a
+         deliberate choice (matches .NET/Python/Java-style loader CRT
+         expectations, avoids a cross-DLL free()/malloc() heap mismatch),
+         but it means this one DLL genuinely depends on VCRUNTIME140.dll
+         at load time, confirmed directly via `dumpbin /dependents` on a
+         real build. Every other listed dependency (WS2_32, CRYPT32,
+         bcrypt, ADVAPI32, Secur32, IPHLPAPI, KERNEL32, and the
+         api-ms-win-crt-* set) is either a core OS component or already
+         resolved by Windows 10+'s own Universal CRT; VCRUNTIME140.dll
+         specifically comes from the separate VC++ 2015-2022
+         Redistributable, which is common but not guaranteed present on
+         a fresh/minimal Windows install. Without this check, a missing
+         VCRUNTIME140.dll would surface later as a silent
+         reasoning-plugin load failure with no indication why; failing
+         loudly here, at install time, with the actual fix, is much
+         better. `Installed OR ...` is the standard WiX idiom so this
+         only gates a fresh install, not a repair/uninstall of an
+         already-installed product. -->
+    <?if $(sys.BUILDARCH) = "x64" ?>
+    <Property Id="VCRUNTIME140PRESENT">
+      <RegistrySearch Id="VCRedistX64Search"
+                       Root="HKLM"
+                       Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+                       Name="Installed"
+                       Type="raw" />
+    </Property>
+    <Condition Message="This installer requires the Microsoft Visual C++ 2015-2022 Redistributable (x64), which was not found on this system. Download and install it from https://aka.ms/vs/17/release/vc_redist.x64.exe, then run this installer again.">
+      <![CDATA[Installed OR VCRUNTIME140PRESENT]]>
+    </Condition>
+    <?endif ?>
+
     <Property Id="WIXUI_INSTALLDIR" Value="PGROOT" />
 
     <!-- We ship only x64 and arm64 MSIs for PG — EDB hasn't produced
@@ -79,6 +111,7 @@
          Directory layout mirrors EDB's default PG install:
            C:\Program Files\PostgreSQL\<PG_MAJOR>\
              lib\                 fractalsql.dll
+                                  fractalsql-reasoning-http.dll (x64)
              share\extension\     fractalsql.control
                                   fractalsql-1.0.sql (install script)
              share\doc\fractalsql\ LICENSE
@@ -118,6 +151,21 @@
               KeyPath="yes" />
       </Component>
 
+      <!-- Reasoning plugin DLL — installs next to fractalsql.dll so the
+           DBA can set fractalsql.reasoning_plugin to a lib\ path. x64
+           only: no Windows arm64 plugin is vendored, and build-msi.bat
+           only stages it for x64, so this component is guarded to match
+           (an arm64 build would otherwise fail on the missing Source). -->
+      <?if $(sys.BUILDARCH) = "x64" ?>
+      <Component Id="c_ReasoningPluginDll"
+                 Directory="LibDir"
+                 Guid="C1A1$(var.PG_MAJOR)07-0000-4000-B000-00000000BE71">
+        <File Id="fractalsql_reasoning_http.dll"
+              Source="$(var.STAGE_DIR)\fractalsql-reasoning-http.dll"
+              KeyPath="yes" />
+      </Component>
+      <?endif ?>
+
       <Component Id="c_FractalSqlControl"
                  Directory="ExtensionDir"
                  Guid="C1A1$(var.PG_MAJOR)02-0000-4000-B000-00000000C710">
@@ -132,6 +180,29 @@
         <File Id="fractalsql__1.0.sql"
               Name="fractalsql--1.0.sql"
               Source="$(var.STAGE_DIR)\fractalsql--1.0.sql"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- Dependent fractalsql_agents extension (pure PL/pgSQL;
+           requires='fractalsql', no DLL). Ships the .control + install SQL
+           in the same ExtensionDir as the base extension so
+           `CREATE EXTENSION fractalsql_agents` works once the base is loaded.
+           GUIDs use the next free per-PG-major suffixes (08, 09). -->
+      <Component Id="c_FractalSqlAgentsControl"
+                 Directory="ExtensionDir"
+                 Guid="C1A1$(var.PG_MAJOR)08-0000-4000-B000-00000000A701">
+        <File Id="fractalsql_agents.control"
+              Name="fractalsql_agents.control"
+              Source="$(var.STAGE_DIR)\fractalsql_agents.control"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="c_FractalSqlAgentsInstallSql"
+                 Directory="ExtensionDir"
+                 Guid="C1A1$(var.PG_MAJOR)09-0000-4000-B000-00000000A702">
+        <File Id="fractalsql_agents__1.0.sql"
+              Name="fractalsql_agents--1.0.sql"
+              Source="$(var.STAGE_DIR)\fractalsql_agents--1.0.sql"
               KeyPath="yes" />
       </Component>
 

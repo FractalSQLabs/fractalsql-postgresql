@@ -1,0 +1,105 @@
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: demo
+    environment:
+      POSTGRES_PASSWORD: fractalsql
+      POSTGRES_DB: fractalsql_demo
+      # Matches docs/reasoning-setup.md's "Slow or constrained hardware"
+      # guidance verbatim. The plugin's request is non-streaming, so a
+      # cold-loading local model on CPU-only hardware shows no partial
+      # progress -- the default 60s CURLOPT_TIMEOUT_MS and 20s slowloris
+      # window (FSQL_REASONING_HTTP_LOW_SPEED_SECS) are tuned for fast
+      # cloud endpoints and will cut off a slow local run before it
+      # finishes. These are process env vars, not fractalsql.* GUCs --
+      # read once at plugin init, so they have to be set here, not via
+      # `-c` below.
+      FSQL_REASONING_HTTP_TIMEOUT_MS: "330000"
+      FSQL_REASONING_HTTP_LOW_SPEED_SECS: "300"
+    ports:
+      - "15432:5432"
+    # fractalsql.http_url/http_embed_url point at the "ollama" service,
+    # which is up by default (no model pulled). Setting these
+    # unconditionally is harmless: nothing calls fractal_reason()/
+    # fractal_text_to_sql()/fractal_embed() unless you do, and if you
+    # try before pulling a model you get a clear model-not-found error,
+    # not a broken install. Pull a model with the `pull-model` profile.
+    command: >
+      postgres
+      -c fractalsql.reasoning_plugin=/usr/lib/postgresql/18/lib/fractalsql-reasoning-http.so
+      -c fractalsql.http_url=http://ollama:11434/v1/chat/completions
+      -c fractalsql.http_allow_plaintext=on
+      -c fractalsql.http_model=gpt-oss:20b
+      -c fractalsql.http_embed_url=http://ollama:11434/v1/embeddings
+      -c fractalsql.http_embed_model=nomic-embed-text
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Ollama is up by DEFAULT (no profile) with NO model pulled -- the bare
+  # minimum turnkey state. Model download is user-initiated: run the
+  # `pull-model` one-shot below (or `docker compose exec ollama ollama pull
+  # <model>`). gpt-oss:20b is the most reliable Apache-2.0 (genuinely open
+  # source) model in FractalSQL's own evaluation set for text-to-sql +
+  # reasoning correctness (see docs/reasoning-setup.md's "Which local
+  # model" section, including why phi4:14b -- smaller, MIT, but with a
+  # measured correctness gap on date-windowed questions -- is a caveated
+  # alternative rather than the default); nomic-embed-text is for
+  # fractal_embed()/the vectorizer demo (see docs/vectorizer-setup.md).
+  # gpt-oss:20b is ~13.8GB (several minutes on a slow connection);
+  # nomic-embed-text is a few hundred MB. CPU-only inference after that
+  # can take up to a few minutes per query -- see docs/reasoning-setup.md.
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # --profile pull-model: opt-in one-shot that pulls gpt-oss:20b +
+  # nomic-embed-text into the ollama_data volume. Run with:
+  #   docker compose --profile pull-model run --rm pull-model
+  # (or skip this and `docker compose exec ollama ollama pull <model>`).
+  pull-model:
+    image: ollama/ollama:latest
+    profiles: ["pull-model"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "ollama:11434"
+    entrypoint: ["/bin/sh", "-c", "ollama pull gpt-oss:20b && ollama pull nomic-embed-text"]
+
+  # --profile pgvector: opt-in one-shot that enables pgvector and stands
+  # up the head-to-head benchmark target DB. pgvector is optional because
+  # ONLY bench/ (HNSW vs Scout) needs it -- the demos use FractalSQL's own
+  # fractal_vector type. This creates fractalsql_bench with both `vector`
+  # and `fractalsql` extensions (bench/README.md's prerequisite) and also
+  # enables `vector` in fractalsql_demo for anyone who wants pgvector
+  # alongside the demos. Run with:
+  #   docker compose --profile pgvector up -d pgvector-init
+  pgvector-init:
+    image: postgres:18-bookworm
+    profiles: ["pgvector"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: fractalsql
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        createdb -h postgres -U postgres fractalsql_bench 2>/dev/null || true;
+        psql -h postgres -U postgres -d fractalsql_bench -v ON_ERROR_STOP=0 -c 'CREATE EXTENSION IF NOT EXISTS vector' -c 'CREATE EXTENSION IF NOT EXISTS fractalsql';
+        psql -h postgres -U postgres -d fractalsql_demo -v ON_ERROR_STOP=0 -c 'CREATE EXTENSION IF NOT EXISTS vector'
+
+volumes:
+  ollama_data:

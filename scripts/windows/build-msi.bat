@@ -1,7 +1,8 @@
 @echo off
 REM scripts/windows/build-msi.bat
 REM
-REM Packages fractalsql.dll (pre-built by build.bat) plus
+REM Packages fractalsql.dll (pre-built by build-windows.ps1, or the
+REM legacy build.bat) plus
 REM fractalsql.control / fractalsql--1.0.sql / LICENSE /
 REM LICENSE-THIRD-PARTY into a Windows MSI using the WiX Toolset.
 REM
@@ -22,12 +23,13 @@ REM
 REM Prerequisites
 REM   * WiX Toolset v3.x installed (candle.exe / light.exe on PATH).
 REM   * dist\windows\pg<PG_MAJOR>\fractalsql.dll already produced by
-REM     scripts\windows\build.bat.
+REM     scripts\windows\build-windows.ps1 (or the legacy build.bat).
 REM
 REM Environment
 REM   PG_MAJOR   14..18 — selects UpgradeCode and install-folder name
 REM   MSI_ARCH   x64 | arm64 — passed to candle -arch
-REM   MSI_VERSION overrides the Product Version (default 1.0.0)
+REM   MSI_VERSION overrides the Product Version (default 2.0.0; release.yml
+REM               passes the real release version derived from the git tag)
 
 setlocal ENABLEEXTENSIONS ENABLEDELAYEDEXPANSION
 
@@ -39,11 +41,11 @@ if "%PG_MAJOR%"==""    (
     popd & exit /b 1
 )
 if "%MSI_ARCH%"=="" set MSI_ARCH=x64
-if "%MSI_VERSION%"=="" set MSI_VERSION=1.0.0
+if "%MSI_VERSION%"=="" set MSI_VERSION=2.0.0
 
 set DLL=dist\windows\pg%PG_MAJOR%\fractalsql.dll
 if not exist "%DLL%" (
-    echo ==^> ERROR: %DLL% missing — run build.bat with PG_MAJOR=%PG_MAJOR% first
+    echo ==^> ERROR: %DLL% missing — run build-windows.ps1 (or build.bat) with PG_MAJOR=%PG_MAJOR% first
     popd & exit /b 1
 )
 
@@ -57,8 +59,27 @@ mkdir "%STAGE%"
 copy /Y "%DLL%"                      "%STAGE%\fractalsql.dll"            > nul
 copy /Y fractalsql.control           "%STAGE%\fractalsql.control"        > nul
 copy /Y sql\fractalsql--1.0.sql      "%STAGE%\fractalsql--1.0.sql"       > nul
+REM Dependent fractalsql_agents extension (pure PL/pgSQL; requires='fractalsql',
+REM no DLL). Ships the .control + install SQL alongside the base extension so
+REM `CREATE EXTENSION fractalsql_agents` works once the base is loaded.
+copy /Y fractalsql_agents\fractalsql_agents.control           "%STAGE%\fractalsql_agents.control"           > nul
+copy /Y fractalsql_agents\sql\fractalsql_agents--1.0.sql     "%STAGE%\fractalsql_agents--1.0.sql"          > nul
 copy /Y LICENSE                      "%STAGE%\LICENSE"                   > nul
-copy /Y LICENSE-THIRD-PARTY          "%STAGE%\LICENSE-THIRD-PARTY"       > nul
+copy /Y THIRD-PARTY-NOTICES.md       "%STAGE%\LICENSE-THIRD-PARTY"       > nul
+
+REM Reasoning plugin DLL — bundled so a DBA can point
+REM fractalsql.reasoning_plugin at it in the same lib\ dir as
+REM fractalsql.dll. x64 only: no Windows arm64 plugin is vendored yet,
+REM and the MSI matrix is x64-only. The DLL links libcurl (see
+REM docs\reasoning-setup.md). The matching wxs component is guarded on
+REM $(sys.BUILDARCH)=x64, so a future arm64 build won't reference it.
+if /I "%MSI_ARCH%"=="x64" (
+    if not exist "include\windows-x86_64\fractalsql-reasoning-http.dll" (
+        echo ==^> ERROR: include\windows-x86_64\fractalsql-reasoning-http.dll missing — re-run the vendored-artifact deploy step
+        popd ^& exit /b 1
+    )
+    copy /Y "include\windows-x86_64\fractalsql-reasoning-http.dll" "%STAGE%\fractalsql-reasoning-http.dll" > nul
+)
 
 REM Per-cell README ships in the MSI so users who only grab the .msi
 REM still see the "which PG, which arch" pairing without hopping to
@@ -72,10 +93,13 @@ REM GitHub.
   echo     C:\Program Files\PostgreSQL\%PG_MAJOR%\lib\fractalsql.dll
   echo     C:\Program Files\PostgreSQL\%PG_MAJOR%\share\extension\fractalsql.control
   echo     C:\Program Files\PostgreSQL\%PG_MAJOR%\share\extension\fractalsql--1.0.sql
+  echo     C:\Program Files\PostgreSQL\%PG_MAJOR%\share\extension\fractalsql_agents.control
+  echo     C:\Program Files\PostgreSQL\%PG_MAJOR%\share\extension\fractalsql_agents--1.0.sql
   echo.
   echo After install, activate the extension once per database:
   echo     psql -U postgres -c "CREATE EXTENSION fractalsql;"
-  echo     psql -U postgres -c "SELECT fractalsql_edition^(^), fractalsql_version^(^);"
+  echo     psql -U postgres -c "CREATE EXTENSION fractalsql_agents;"
+  echo     psql -U postgres -c "SELECT fractal_edition^(^), fractal_version^(^);"
   echo.
   echo PG_MODULE_MAGIC is stamped at build time — do not install a
   echo pg16 MSI against a PostgreSQL 17 server. Pick the MSI whose

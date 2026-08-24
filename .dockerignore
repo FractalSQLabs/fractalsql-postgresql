@@ -1,0 +1,9 @@
+.git/
+dist/
+tmp_check/
+results/
+*.deb
+*.rpm
+packaging/debian/.debhelper/
+packaging/rpm/BUILD/
+packaging/rpm/BUILDROOT/
