@@ -251,8 +251,8 @@ PG_MODULE_MAGIC;
  * Confirmed on real CI hardware (2026-08): without this, PG16-18's
  * headers happened to make _PG_init exported anyway (Postgres server
  * version differences upstream, not anything in this file), but PG14/
- * 15 did not -- dumpbin /exports showed all 71 pg_finfo_*/Pg_magic_func
- * symbols present and _PG_init/_PG_fini absent. Explicit annotation
+ * 15 did not -- dumpbin /exports showed all 71 pg_finfo_* and
+ * Pg_magic_func symbols present, and _PG_init/_PG_fini absent. Explicit annotation
  * here makes this correct on every PG major, not just the ones whose
  * headers happened to cover for its absence.
  */
