@@ -503,6 +503,11 @@ pg_setup() {
     [ -n "$asan_rt" ] && [ -f "$asan_rt" ] || { echo "FAIL: could not resolve libasan.so runtime" >&2; return 2; }
     export "$preload_var"="$asan_rt"
     export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1"
+    if [ "$(uname -s)" = "Darwin" ]; then
+      echo "[asan-diag] DYLD_INSERT_LIBRARIES=$DYLD_INSERT_LIBRARIES"
+      echo "[asan-diag] codesign -dvvv \"$BIN/postgres\":"
+      codesign -dvvv "$BIN/postgres" 2>&1 | sed 's/^/[asan-diag] /' || echo "[asan-diag] codesign failed (unsigned binary?)"
+    fi
   elif [ "$UBSAN" -eq 1 ]; then
     local ubsan_rt; ubsan_rt="$(resolve_san_rt libubsan.so)"
     if [ -n "$ubsan_rt" ] && [ -f "$ubsan_rt" ]; then
