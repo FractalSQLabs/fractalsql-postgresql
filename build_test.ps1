@@ -872,20 +872,34 @@ function Gate06CrashRecovery {
         Fail "06 crash_recovery: expected the connection to drop, got: $r"
     }
 
+    # Pass/fail budget and actual up-detection must not share the same
+    # cutoff -- restoring $Mock below depends on $up, and a near-miss on
+    # the original budget (cluster comes back a few seconds late) left
+    # the deliberately-crashing plugin active for every remaining gate,
+    # cascading into unrelated-looking failures far downstream (confirmed
+    # on real Windows CI: 06 missed a 15s budget by ~4s, then gates
+    # 07/12/13/14/15/17/20 all failed against the still-active crash
+    # plugin). Poll for up to double the budget; report pass/fail against
+    # the original window, but restore the plugin as long as the cluster
+    # comes back at all within the extended one.
     $up = $false
-    for ($i = 0; $i -lt (30 * $TimeoutMult); $i++) {
+    $withinBudget = $false
+    $tries = 30 * $TimeoutMult
+    for ($i = 0; $i -lt ($tries * 2); $i++) {
         $t = Psql -Sql "SELECT 1;"
-        if ($t -eq '1') { $up = $true; break }
+        if ($t -eq '1') { $up = $true; if ($i -lt $tries) { $withinBudget = $true }; break }
         Start-Sleep -Milliseconds 500
     }
-    if ($up) { Pass "06 crash_recovery: cluster auto-restarted" }
-    else { Fail "06 crash_recovery: cluster did not come back within $((30 * $TimeoutMult) / 2)s" }
+    if ($withinBudget) { Pass "06 crash_recovery: cluster auto-restarted" }
+    else { Fail "06 crash_recovery: cluster did not come back within $($tries / 2)s" }
 
     if ($up) {
         $n = Psql -Sql "SELECT count(*) FROM bt_customers WHERE name = 'canary';"
         if ($n -eq '1') { Pass "06 crash_recovery: prior data intact after recovery" }
         else { Fail "06 crash_recovery: canary row missing after recovery (n=$n)" }
         PgSwapPlugin $Mock | Out-Null
+    } else {
+        Fail "06 crash_recovery: cluster never came back -- remaining gates will run against the crash plugin"
     }
 }
 
@@ -1426,14 +1440,24 @@ INSERT INTO bt_embed_crash (body) VALUES ('a'), ('b'), ('c');
         Fail "18 embed_crash: expected the connection to drop, got: $r"
     }
 
+    # See Gate06CrashRecovery's comment on why pass/fail budget and actual
+    # up-detection must not share the same cutoff -- restoring the plugin
+    # below depends on $up, and a near-miss here previously left the
+    # crash plugin active for the rest of the run.
     $up = $false
-    for ($i = 0; $i -lt (30 * $TimeoutMult); $i++) {
+    $withinBudget = $false
+    $tries = 30 * $TimeoutMult
+    for ($i = 0; $i -lt ($tries * 2); $i++) {
         $t = Psql -Sql "SELECT 1;"
-        if ($t -eq '1') { $up = $true; break }
+        if ($t -eq '1') { $up = $true; if ($i -lt $tries) { $withinBudget = $true }; break }
         Start-Sleep -Milliseconds 500
     }
-    if ($up) { Pass "18 embed_crash: cluster auto-restarted" }
-    else { Fail "18 embed_crash: cluster did not come back within $((30 * $TimeoutMult) / 2)s"; return }
+    if ($withinBudget) { Pass "18 embed_crash: cluster auto-restarted" }
+    else { Fail "18 embed_crash: cluster did not come back within $($tries / 2)s" }
+    if (-not $up) {
+        Fail "18 embed_crash: cluster never came back -- remaining gates will run against the crash plugin"
+        return
+    }
 
     $statuses = Psql -Sql "SELECT string_agg(DISTINCT status, ',') FROM fractal_vectorizer_queue WHERE vectorizer_id = $vzid;"
     if ($statuses -eq 'pending') { Pass "18 embed_crash: all 3 rows reverted to 'pending' after the crash (atomic rollback, not stuck 'processing')" }

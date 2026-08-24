@@ -930,12 +930,22 @@ gate_06_crash_recovery() {
     && pass "06 crash_recovery: triggering connection dropped as expected" \
     || fail "06 crash_recovery: expected the connection to drop, got: $r"
 
-  local up=0 i tries=$(( 30 * TIMEOUT_MULT ))
-  for i in $(seq 1 "$tries"); do
-    "${PSQL[@]}" -c "SELECT 1;" >/dev/null 2>&1 && { up=1; break; }
+  # Two concerns share this poll but must NOT share the same cutoff:
+  # whether recovery counts as "fast enough" for the gate's own pass/fail
+  # (the original `tries` budget), and whether the crash plugin gets
+  # swapped back to $MOCK at all -- restoring it was previously gated
+  # behind this same up==1-within-budget check, so a near-miss (cluster
+  # comes back a few seconds late) left the deliberately-crashing plugin
+  # active for every remaining gate in the run, cascading into unrelated-
+  # looking failures far downstream. Poll for up to double the budget;
+  # report pass/fail against the original window, but restore the plugin
+  # as long as the cluster comes back at all within the extended one.
+  local up=0 i tries=$(( 30 * TIMEOUT_MULT )) within_budget=0
+  for i in $(seq 1 $(( tries * 2 ))); do
+    "${PSQL[@]}" -c "SELECT 1;" >/dev/null 2>&1 && { up=1; [ "$i" -le "$tries" ] && within_budget=1; break; }
     sleep 0.5
   done
-  [ "$up" -eq 1 ] && pass "06 crash_recovery: cluster auto-restarted" \
+  [ "$within_budget" -eq 1 ] && pass "06 crash_recovery: cluster auto-restarted" \
                    || fail "06 crash_recovery: cluster did not come back within $(( tries / 2 ))s"
 
   if [ "$up" -eq 1 ]; then
@@ -943,6 +953,8 @@ gate_06_crash_recovery() {
     [ "$n" = "1" ] && pass "06 crash_recovery: prior data intact after recovery" \
                     || fail "06 crash_recovery: canary row missing after recovery (n=$n)"
     pg_swap_plugin "$MOCK"
+  else
+    fail "06 crash_recovery: cluster never came back -- remaining gates will run against the crash plugin"
   fi
 }
 
@@ -1355,14 +1367,21 @@ gate_18_embed_crash() {
     && pass "18 embed_crash: triggering connection dropped as expected" \
     || fail "18 embed_crash: expected the connection to drop, got: $r"
 
-  local up=0 i tries=$(( 30 * TIMEOUT_MULT ))
-  for i in $(seq 1 "$tries"); do
-    "${PSQL[@]}" -c "SELECT 1;" >/dev/null 2>&1 && { up=1; break; }
+  # See gate_06_crash_recovery's comment on why pass/fail budget and
+  # actual up-detection must not share the same cutoff -- restoring the
+  # plugin at the end of this gate depends on `up`, and a near-miss here
+  # previously left the crash plugin active for the rest of the run.
+  local up=0 i tries=$(( 30 * TIMEOUT_MULT )) within_budget=0
+  for i in $(seq 1 $(( tries * 2 ))); do
+    "${PSQL[@]}" -c "SELECT 1;" >/dev/null 2>&1 && { up=1; [ "$i" -le "$tries" ] && within_budget=1; break; }
     sleep 0.5
   done
-  [ "$up" -eq 1 ] && pass "18 embed_crash: cluster auto-restarted" \
+  [ "$within_budget" -eq 1 ] && pass "18 embed_crash: cluster auto-restarted" \
                    || fail "18 embed_crash: cluster did not come back within $(( tries / 2 ))s"
-  [ "$up" -eq 1 ] || return
+  if [ "$up" -ne 1 ]; then
+    fail "18 embed_crash: cluster never came back -- remaining gates will run against the crash plugin"
+    return
+  fi
 
   # The real, empirically-checked claim this gate exists for: the crash
   # rolled back the WHOLE in-flight call, so all 3 rows are back to

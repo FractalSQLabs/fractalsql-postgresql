@@ -150,7 +150,7 @@ jobs:
               -c \"ALTER SYSTEM SET fractalsql.http_allow_plaintext = on\" \
               -c 'SELECT pg_reload_conf();'"
 
-          REPLY=\$(su postgres -c "psql -At -c \"SELECT fractalsql_reason('ping')\"")
+          REPLY=\$(su postgres -c "psql -At -c \"SELECT fractal_reason('ping')\"")
           kill \${MOCK_PID} 2>/dev/null || true
           echo "reason reply=\${REPLY}"
           test "\${REPLY}" = "pong-from-mock" \
@@ -281,7 +281,7 @@ jobs:
           su postgres -c "psql -c \"ALTER SYSTEM SET fractalsql.http_allow_plaintext = on\""
           su postgres -c "psql -c 'SELECT pg_reload_conf()'"
 
-          REPLY=\$(su postgres -c "psql -At -c \"SELECT fractalsql_reason('ping')\"")
+          REPLY=\$(su postgres -c "psql -At -c \"SELECT fractal_reason('ping')\"")
           kill \${MOCK_PID} 2>/dev/null || true
           echo "reason reply=\${REPLY}"
           test "\${REPLY}" = "pong-from-mock" \
@@ -362,7 +362,7 @@ jobs:
           psql -d postgres -c "ALTER SYSTEM SET fractalsql.http_url = 'http://127.0.0.1:18080/v1/chat/completions'"
           psql -d postgres -c "ALTER SYSTEM SET fractalsql.http_allow_plaintext = on"
           psql -d postgres -c "SELECT pg_reload_conf()"
-          REPLY=$(psql -d postgres -Atc "SELECT fractalsql_reason('ping')")
+          REPLY=$(psql -d postgres -Atc "SELECT fractal_reason('ping')")
           kill "${MOCK_PID}" 2>/dev/null || true
           echo "reason reply=${REPLY}"
           test "${REPLY}" = "pong-from-mock" \

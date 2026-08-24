@@ -152,7 +152,13 @@ jobs:
       - name: build_test.ps1 --pg ${{ matrix.pg }}
         shell: pwsh
         run: |
-          .\build_test.ps1 -PgDir "deps\pg\root" -PgMajor ${{ matrix.pg }}
+          # -TimeoutMult 2: confirmed directly (real Windows CI run,
+          # 2026-08-24) that gate 06/18's plain (non-sanitizer) crash-
+          # recovery poll needs more than the 15s default here -- actual
+          # recovery took ~19s. windows-asan already needed -TimeoutMult
+          # 8 for the same reason (slower under instrumentation); this
+          # runner needs modest headroom even uninstrumented.
+          .\build_test.ps1 -PgDir "deps\pg\root" -PgMajor ${{ matrix.pg }} -TimeoutMult 2
           exit $LASTEXITCODE
 
   darwin-gate-matrix:
