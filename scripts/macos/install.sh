@@ -65,8 +65,8 @@ fi
 
 ${INSTALL} -d "${PKGLIBDIR}" "${EXTDIR}"
 
-${INSTALL} -m 0755 "${HERE}/fractalsql.so" \
-    "${PKGLIBDIR}/fractalsql.so"
+${INSTALL} -m 0755 "${HERE}/fractalsql.dylib" \
+    "${PKGLIBDIR}/fractalsql.dylib"
 ${INSTALL} -m 0755 "${HERE}/fractalsql-reasoning-http.so" \
     "${PKGLIBDIR}/fractalsql-reasoning-http.so"
 ${INSTALL} -m 0644 "${HERE}/fractalsql.control" \
@@ -82,7 +82,7 @@ ${INSTALL} -m 0644 "${HERE}/fractalsql_agents--1.0.sql" \
     "${EXTDIR}/fractalsql_agents--1.0.sql"
 
 echo "Installed:"
-echo "  ${PKGLIBDIR}/fractalsql.so"
+echo "  ${PKGLIBDIR}/fractalsql.dylib"
 echo "  ${PKGLIBDIR}/fractalsql-reasoning-http.so"
 echo "  ${EXTDIR}/fractalsql.control"
 echo "  ${EXTDIR}/fractalsql--1.0.sql"

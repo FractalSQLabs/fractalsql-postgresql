@@ -57,15 +57,28 @@ for f in "${REASONING_SO}" "${CORE_A}" LICENSE THIRD-PARTY-NOTICES.md \
         || { echo "missing ${f} — re-run the vendored-artifact deploy step" >&2; exit 1; }
 done
 
-echo "== building fractalsql.so for PG ${PG_MAJOR} / darwin-${ARCH} =="
+echo "== building fractalsql.dylib for PG ${PG_MAJOR} / darwin-${ARCH} =="
 # COPT is appended to both CFLAGS and LDFLAGS by PGXS, so -arch reaches the
 # compile and the link. FSQL_PLATFORM overrides the Makefile's host-derived
 # value so an x86_64 cross build on an arm64 runner still links the
 # darwin-x86_64 vendored archive (not the host's darwin-arm64 one).
-make clean >/dev/null 2>&1 || true
-make FSQL_PLATFORM="${FSQL_PLATFORM}" COPT="-arch ${ARCH}" PG_CONFIG="${PG_CONFIG}"
+#
+# Cross-compiling (ARCH != host arch): PGXS's own -bundle_loader
+# $(pg_bindir)/postgres can't be used -- Homebrew only installs the
+# native-arch Postgres binary, so ld64 silently ignores it on arch
+# mismatch and then hard-errors on every backend symbol instead. See
+# FSQL_DARWIN_XC_LDFLAGS's own comment in the Makefile for the fix.
+# Empty (a no-op) for a native build.
+XC_LDFLAGS=""
+if [ "${ARCH}" != "$(uname -m)" ]; then
+    XC_LDFLAGS="-Wl,-undefined,dynamic_lookup"
+fi
 
-test -f fractalsql.so || { echo "build did not produce fractalsql.so" >&2; exit 1; }
+make clean >/dev/null 2>&1 || true
+make FSQL_PLATFORM="${FSQL_PLATFORM}" COPT="-arch ${ARCH}" PG_CONFIG="${PG_CONFIG}" \
+    FSQL_DARWIN_XC_LDFLAGS="${XC_LDFLAGS}"
+
+test -f fractalsql.dylib || { echo "build did not produce fractalsql.dylib" >&2; exit 1; }
 
 PKG="fractalsql-postgresql-${VERSION}-pg${PG_MAJOR}-darwin-${ARCH}"
 DIST="dist/packages"
@@ -74,7 +87,7 @@ STAGE="${WORK}/${PKG}"
 trap 'rm -rf "${WORK}"' EXIT
 mkdir -p "${STAGE}" "${DIST}"
 
-install -m 0755 fractalsql.so           "${STAGE}/fractalsql.so"
+install -m 0755 fractalsql.dylib           "${STAGE}/fractalsql.dylib"
 install -m 0755 "${REASONING_SO}"       "${STAGE}/fractalsql-reasoning-http.so"
 install -m 0644 fractalsql.control      "${STAGE}/fractalsql.control"
 install -m 0644 sql/fractalsql--1.0.sql "${STAGE}/fractalsql--1.0.sql"

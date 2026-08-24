@@ -45,7 +45,7 @@ if "%MSI_VERSION%"=="" set MSI_VERSION=2.0.0
 
 set DLL=dist\windows\pg%PG_MAJOR%\fractalsql.dll
 if not exist "%DLL%" (
-    echo ==^> ERROR: %DLL% missing — run build-windows.ps1 (or build.bat) with PG_MAJOR=%PG_MAJOR% first
+    echo ==^> ERROR: %DLL% missing -- run build-windows.ps1 or build.bat with PG_MAJOR=%PG_MAJOR% first
     popd & exit /b 1
 )
 
@@ -73,13 +73,17 @@ REM fractalsql.dll. x64 only: no Windows arm64 plugin is vendored yet,
 REM and the MSI matrix is x64-only. The DLL links libcurl (see
 REM docs\reasoning-setup.md). The matching wxs component is guarded on
 REM $(sys.BUILDARCH)=x64, so a future arm64 build won't reference it.
-if /I "%MSI_ARCH%"=="x64" (
-    if not exist "include\windows-x86_64\fractalsql-reasoning-http.dll" (
-        echo ==^> ERROR: include\windows-x86_64\fractalsql-reasoning-http.dll missing — re-run the vendored-artifact deploy step
-        popd ^& exit /b 1
-    )
-    copy /Y "include\windows-x86_64\fractalsql-reasoning-http.dll" "%STAGE%\fractalsql-reasoning-http.dll" > nul
+REM Flattened (not nested) deliberately -- nested if-blocks in batch are
+REM a known fragility spot, and this file already had one real bug from
+REM an unescaped paren desyncing CMD's block parser for everything after
+REM it. goto avoids needing a second level of balanced parens entirely.
+if /I not "%MSI_ARCH%"=="x64" goto :after_reasoning_dll
+if not exist "include\windows-x86_64\fractalsql-reasoning-http.dll" (
+    echo ==^> ERROR: include\windows-x86_64\fractalsql-reasoning-http.dll missing -- re-run the vendored-artifact deploy step
+    popd & exit /b 1
 )
+copy /Y "include\windows-x86_64\fractalsql-reasoning-http.dll" "%STAGE%\fractalsql-reasoning-http.dll" > nul
+:after_reasoning_dll
 
 REM Per-cell README ships in the MSI so users who only grab the .msi
 REM still see the "which PG, which arch" pairing without hopping to

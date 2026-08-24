@@ -243,6 +243,12 @@ if (-not $SkipAudit) {
     $exports = & dumpbin /nologo /exports $Dll | Out-String
     foreach ($sym in @('_PG_init', 'Pg_magic_func')) {
         if ($exports -notmatch [regex]::Escape($sym)) {
+            # Surfaced missing on a PG-major we'd never actually run this
+            # against before (only PG16 had been hardware-verified) --
+            # dump the full export table so a CI failure shows what, if
+            # anything, DID get exported, instead of just the first miss.
+            Write-Host "[build-windows] FULL export table follows (diagnosing missing '$sym'):"
+            Write-Host $exports
             throw "export audit FAILED: '$sym' not exported by $Dll"
         }
     }

@@ -121,7 +121,23 @@ endif
 # Postgres itself already links libcrypto when built --with-openssl (the
 # common case), so this is not a new runtime dependency on the server --
 # only a new link-time one for this extension's own .so.
-SHLIB_LINK  = $(CORE_ARCHIVE) $(FSQL_OPENSSL_LDFLAGS) -lm -lcrypto $(FSQL_DL_LIB) $(FSQL_COV_FLAGS) $(FSQL_SAN_FLAGS)
+# FSQL_DARWIN_XC_LDFLAGS: escape hatch for cross-compiling the Darwin
+# .dylib for an arch other than the build host's (e.g. x86_64 on an
+# arm64 macos-14 CI runner). PGXS's own Darwin link rule adds
+# -bundle_loader $(pg_bindir)/postgres so ld can verify Postgres
+# backend symbols (SPI_*, errmsg, etc.) exist -- but ld64 silently
+# IGNORES that file outright on an arch mismatch ("ignoring file ...
+# found architecture 'arm64', required architecture 'x86_64'",
+# confirmed on a real run), and then falls back to its default
+# undefined-symbol-is-a-hard-error policy for a -bundle target, so
+# every Postgres backend symbol fails to link. -undefined dynamic_lookup
+# defers ALL symbol resolution to dyld at load time instead -- exactly
+# what actually happens anyway once this .dylib is dlopen'd into a real
+# x86_64 postgres process, which is the only place it will ever run.
+# Empty by default -- a no-op for every native (non-cross) build.
+FSQL_DARWIN_XC_LDFLAGS ?=
+
+SHLIB_LINK  = $(CORE_ARCHIVE) $(FSQL_OPENSSL_LDFLAGS) -lm -lcrypto $(FSQL_DL_LIB) $(FSQL_COV_FLAGS) $(FSQL_SAN_FLAGS) $(FSQL_DARWIN_XC_LDFLAGS)
 
 # --- Supply-chain verification (B5) -----------------------------------------
 # The vendored archive is dropped from fractalsql-core's deploy.sh

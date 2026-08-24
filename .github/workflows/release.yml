@@ -76,13 +76,26 @@ jobs:
               -e POSTGRES_HOST_AUTH_METHOD=trust \
               "postgres:${PG_VER}-bookworm"
 
-          # Wait for the server to accept connections.
-          for i in $(seq 1 30); do
+          # Wait for the server to accept connections. 60s budget, not 30 --
+          # a cold image pull (first run on a fresh runner, or a new PG
+          # major never pulled before) leaves disk I/O contended right as
+          # the container starts, and initdb + first boot can occasionally
+          # miss a tighter window. Dump the container's own log on failure
+          # so a real startup problem is diagnosable instead of just
+          # "rejecting connections" with no further context.
+          ready=0
+          for i in $(seq 1 60); do
               if docker exec pg pg_isready -U postgres >/dev/null 2>&1; then
+                  ready=1
                   break
               fi
               sleep 1
           done
+          if [ "$ready" -ne 1 ]; then
+              echo "::group::postgres container log (server never became ready)"
+              docker logs pg || true
+              echo "::endgroup::"
+          fi
           docker exec pg pg_isready -U postgres
 
           docker cp "${SO}" \
