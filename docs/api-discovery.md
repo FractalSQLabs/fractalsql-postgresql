@@ -196,11 +196,11 @@ spreads one result set within a single call. The **Diversify/Repulsion**
 layer adds *stateful* diversity **across searches**: a session records which
 results the user rejected, and subsequent searches actively avoid the
 neighborhoods of those rejected results ("shadows"). This is the real
-differentiator over plain top-K or MMR — neither of which is stateful across
+differentiator over plain top-K or MMR: neither of which is stateful across
 searches.
 
 The layer is **off by default** (bit-for-bit identical to v1.0 behavior); it
-must be enabled per session, and it is session-scoped — shadows do not persist
+must be enabled per session, and it is session-scoped. Shadows do not persist
 across connections.
 
 ### `fractal_diversify_enable()` / `fractal_diversify_disable()`
@@ -243,7 +243,7 @@ disabled.
 ### `fractal_explain_result()` → `jsonb`
 Session-level Diversify diagnostics: `{dq, diversify_enabled, overhead_p99_us}`.
 This is a session health readout, **not** a per-candidate "this result was
-penalized by shadow X" trace — the core ABI does not currently expose
+penalized by shadow X" trace. The core ABI does not currently expose
 shadow attribution at that granularity.
 
 ### `fractal_feedback_report(result_handle, kind, dwell_ms)` → `void`

@@ -4,15 +4,15 @@
 
 # Vectorizer Setup Guide
 
-The Vectorizer is the Cognition tier's automation engine. It enables **Sovereign Data Intelligence** by closing the loop between raw text and semantic embeddings—ensuring your data is always "search-ready" without requiring external middleware or complex ETL pipelines.
+The Vectorizer is the Cognition tier's automation engine. It keeps raw text and semantic embeddings in sync automatically, so your data is always "search-ready" without external middleware or a separate ETL pipeline.
 
-By automating the synchronization of embeddings directly within the PostgreSQL kernel, FractalSQL eliminates the "data shuffle" and ensures that your semantic index is a real-time reflection of your sovereign data.
+By running the embedding sync directly inside the PostgreSQL backend, FractalSQL eliminates the "data shuffle" and ensures that your semantic index is a real-time reflection of your data.
 
 ---
 
 ## Prerequisites
 
-To enable automated embeddings, the following sovereign-tier configuration is required:
+To enable automated embeddings, the following configuration is required (Community edition, no separate tier or license needed):
 
 1. **Reasoning Plugin**: `fractalsql.reasoning_plugin` must be set to a compiled `fractalsql-reasoning-*.so` (see [reasoning-setup.md](reasoning-setup.md)).
 2. **Embeddings Endpoint**: `fractalsql.http_embed_url` must be set to your provider's **embeddings** endpoint. This is a distinct path from the chat endpoint (e.g., `/v1/embeddings` vs `/v1/chat/completions`).
@@ -70,19 +70,24 @@ SELECT * FROM fractal_vectorizer_status;
 
 FractalSQL stores and searches embeddings in one of two column types:
 
-- **`float8[]`** — the plain PostgreSQL array. Universally portable, but the
+- **`float8[]`**: the plain PostgreSQL array. Universally portable, but the
   linear scan must `deconstruct_array` every row to unpack the doubles, and the
   dimension is *unchecked*: a `float8[]` column happily accepts a 384-dim vector
   one day and a 1536-dim vector the next, silently corrupting your index.
-- **`fractal_vector(n)`** — the native type. `n` is a **typmod** (e.g.
+- **`fractal_vector(n)`**: the native type. `n` is a **typmod** (e.g.
   `fractal_vector(768)`), so PostgreSQL **rejects** any vector whose length is
-  not exactly `n` at insert time — dimension-drift protection that prevents a
+  not exactly `n` at insert time: dimension-drift protection that prevents a
   misconfigured or swapped embedding model from writing wrong-width rows. It is
   also a varlena type read directly off the tuple, so the linear scan skips the
-  array-unpack step: a measured **~1.3×–1.7× speedup** over `float8[]`.
+  array-unpack step: close to a **~2x** speedup over `float8[]` for vectors
+  small enough to avoid Postgres's automatic TOAST compression on `float8[]`.
+  The realized gap is smaller for larger vectors, and depends on how
+  compressible your actual embedding values are. See `bench/README.md`'s
+  `fractal_vector vs float8[]` section before treating either number as a
+  promise.
 
 Prefer `fractal_vector(n)` whenever the embedding width is fixed by your model
-(which it almost always is — `768` for `nomic-embed-text`, `1536` for
+(which it almost always is: `768` for `nomic-embed-text`, `1536` for
 `text-embedding-3-small`, `3072` for `text-embedding-3-large`). Use `float8[]`
 only when you genuinely need to store variable-width vectors in one column.
 
@@ -115,7 +120,7 @@ SELECT fractal_vector_dims(embedding) FROM docs LIMIT 1;
 ```
 
 Inserting a wrong-width vector into a `fractal_vector(n)` column raises a
-typmod `ERROR` rather than silently storing garbage — see the dimension-mismatch
+typmod `ERROR` rather than silently storing garbage. See the dimension-mismatch
 assertion in `demo/demo-fractal-vector.sql` (Section 3), which is a deliberate
 regression test of that hard-fail. `demo/demo-fractal-vector.sql` exercises the
 full operator/helper surface above end to end.
@@ -170,7 +175,7 @@ fractalsql.http_embed_url   = 'https://<resource>.openai.azure.com/openai/deploy
 
 ### Google Vertex AI
 Uses the same OAuth access token as the reasoning endpoint (see
-`docs/reasoning-setup.md` — Vertex AI block), only the URL and model change.
+`docs/reasoning-setup.md`, Vertex AI block), only the URL and model change.
 Point the embed path at the `openapi/v1/embeddings` surface of your project's
 region endpoint.
 
@@ -206,7 +211,7 @@ SELECT fractal_vectorizer_create(
 ## Design & Safety
 
 ### The "No-Worker" Architecture
-Unlike traditional extensions that spawn background workers—which can be unstable on Windows or conflict with managed cloud environments—FractalSQL uses a **pull-based queue**. You control exactly when and how often the embedder runs, making it compatible with every PostgreSQL deployment from a laptop to a massive cluster.
+Unlike traditional extensions that spawn background workers (which can be unstable on Windows or conflict with managed cloud environments), FractalSQL uses a **pull-based queue**. You control exactly when and how often the embedder runs, making it compatible with every PostgreSQL deployment from a laptop to a massive cluster.
 
 ### Crash Safety & Authorization
 - **Atomic Recovery**: `process_queue` runs in a single transaction. If the backend crashes mid-batch, all changes revert, and the rows remain `pending` for the next run.

@@ -4,31 +4,30 @@
 
 # FractalSQL Feature Specification
 
-FractalSQL is not a single tool, but a tiered capability framework for **Sovereign Data Intelligence**. It provides a progression from basic vector discovery to autonomous agentic reasoning, all executed natively within the PostgreSQL backend to ensure data sovereignty and eliminate the "data shuffle" between database and LLM.
+FractalSQL is a tiered capability framework that runs discovery, reasoning, and agentic workflows inside the PostgreSQL backend: no external RAG middleware shuffling data between the database and the LLM. It provides a progression from basic vector discovery to autonomous agentic reasoning.
 
 ---
 
 ## 🏗️ Capability Tiering Model
 
-FractalSQL ships in three editions, each unlocking more of the four capability tiers described below (Discovery → Cognition → Agency → Analytics). The editions are a *build/licensing* axis; the capability tiers are a *functional* axis — a single install belongs to one edition and exposes whichever capability tiers that edition includes.
+FractalSQL ships in two editions, each unlocking more of the four capability tiers described below (Discovery → Cognition → Agency → Analytics). The editions are a *build/licensing* axis; the capability tiers are a *functional* axis. A single install belongs to one edition and exposes whichever capability tiers that edition includes.
 
 | Tier | Focus | Key Capabilities | Build / Requirement |
 | --- | --- | --- | --- |
-| **Community** | Discovery | SFS Core, Sniper Search, Scout Discovery | Base extension (`libfractalsql-community`) |
-| **Sovereign** | Cognition & Agency | In-DB Reasoning, Embeddings, Agent Tier | Sovereign build + Reasoning Plugin (`.so`) |
-| **Enterprise** | Governance | QTL (Quantized Ternary Ledger), Audit Logs, SLAs | Enterprise build + License Key |
+| **Community** | Discovery, Cognition, Agency | SFS Core, Sniper Search, Scout Discovery, In-DB Reasoning, Embeddings, 15 of the 16 Agents | Base extension (`libfractalsql-community`), everything most installs need |
+| **Enterprise** | Governance | Tamper-evident decision ledger (hash chain), audit trail, detached-signature verification | Community extension + drop-in enterprise library, gated by a runtime GUC. See [Enterprise Tier](enterprise.md) |
 
 ---
 
 ## 🔍 Tier 1: Discovery
 
-The foundation of FractalSQL is the **Stochastic Fractal Search (SFS)** engine. Unlike standard HNSW or IVFFlat indexes, SFS treats vector search as a continuous optimization problem.
+The foundation of FractalSQL is the **Stochastic Fractal Search (SFS)** engine, which treats vector search as a continuous optimization problem rather than an index lookup like standard HNSW or IVFFlat.
 
 ### Sniper Search (`fractal_search`)
-Converges to the single best point minimizing cosine distance to a query over a unit box. It is a "precision" tool for finding the absolute global minimum.
+Pure SFS convergence to the single best point minimizing cosine distance to a query over a unit box. It is a "precision" tool for finding the absolute global minimum.
 
 ### Scout Discovery (`fractal_search_explore`)
-Scans a stored corpus and returns a diverse population of results. It uses a brute-force relevance scan followed by **Maximal Marginal Relevance (MMR)** to ensure the results cover the data's distinct basins of attraction, preventing the "mode collapse" common in top-K search.
+Scans a stored corpus and returns a diverse population of results: an SFS population search blended with **Maximal Marginal Relevance (MMR)** re-ranking, so the results cover the data's distinct basins of attraction instead of the "mode collapse" common in top-K search.
 
 ### Table-Backed Telemetry (`fractal_search_telemetry`)
 A deterministic primitive that returns the $K$ nearest real table rows to a query. This is the ground-truth layer used by all higher-order agentic functions.
@@ -37,12 +36,12 @@ A deterministic primitive that returns the $K$ nearest real table rows to a quer
 
 ## 🧠 Tier 2: Cognition
 
-The Cognition tier adds a Virtual File System (VFS) surface to the SFS core, allowing it to communicate with LLMs and embedding models via a high-performance C-bridge. This enables intelligence to happen *beside* the data.
+The Cognition tier adds a reasoning bridge to the SFS core, allowing it to call LLMs and embedding models via a pluggable C provider interface. This enables reasoning to happen *beside* the data.
 
 ### In-Database Reasoning (`fractal_reason`)
 Dispatches a query and a context payload to a configured LLM provider. Because it runs inside the backend, you can feed it the results of a Scout search or a SQL query in one statement. 
 
-**Universal Connectivity**: The reasoning VFS provides a provider-agnostic bridge to the world's leading models, including **AWS Bedrock (SigV4)**, **Azure OpenAI**, **GCP Vertex AI**, and **local Ollama** for air-gapped sovereignty. You can switch providers via config without changing a single line of SQL.
+**Provider-agnostic**: the same `fractal_reason()` call works against **AWS Bedrock (SigV4)**, **Azure OpenAI**, **GCP Vertex AI**, or **local Ollama**. Switch providers via config without changing a single line of SQL. Local providers keep data on your own infrastructure; cloud providers send it to that provider under your own account and agreement (BAA-covered where your compliance posture requires it).
 
 ### Semantic Embeddings (`fractal_embed`)
 Generates vectors from text using a purpose-trained embedding model. This removes the need for an external embedding pipeline for many RAG use cases.
@@ -102,14 +101,14 @@ FractalSQL provides optimized routines for pre-extracted biological and technica
 ## 📈 Benchmarks & Scaling
 
 ### HNSW vs. Scout Discovery
-In a benchmark of 100k vectors across 50 clusters:
-- **HNSW** (top-50) typically discovered **1-2 clusters**.
-- **Scout** (pop=50) typically discovered **6-8 clusters**.
+In a benchmark of 100k vectors across 50 Gaussian clusters (see `bench/README.md` for the full methodology and how to reproduce it):
+- **HNSW** (top-50) typically discovered **1-2 clusters**, at millisecond latency.
+- **Scout** (pop=50) typically discovered **20-35 clusters**, at multi-second latency, roughly **6000x slower** than HNSW at this scale.
 
-While Scout is $O(N \times d)$ (linear scan), it is the only way to guarantee that your LLM receives a diverse set of perspectives rather than a single, collapsed cluster.
+That tradeoff is the whole point of Scout Mode, not a hidden cost: it's $O(N \times d)$ (linear scan) by design, and it's the only way here to guarantee your LLM receives a genuinely diverse set of perspectives rather than a single collapsed cluster. It is not a drop-in replacement for HNSW. Use it where diversity matters more than latency (e.g. curated sub-corpora, not full-corpus top-k at scale).
 
 ### Storage: `float8[]` vs `fractal_vector`
-Using the native `fractal_vector` type provides a $\sim 1.3x$ to $1.7x$ speedup over `float8[]` by skipping the array-unpack step during the linear scan.
+Using the native `fractal_vector` type gives close to a **~2x** speedup over `float8[]` for small vectors that never trigger Postgres's automatic TOAST compression (uncompressed `float4` vs uncompressed `float8`). Larger vectors where `float8[]`'s TOAST compression kicks in see a smaller realized gap. The ratio depends on how compressible your actual embedding values are; measure on your own data before treating either number as a promise (see `bench/README.md`'s `fractal_vector vs float8[]` section).
 
 ---
 

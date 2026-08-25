@@ -4,7 +4,7 @@
 
 # Sovereign Agency
 
-FractalSQL is bundled with **sixteen installable agents** — autonomous,
+FractalSQL is bundled with **sixteen installable agents**: autonomous,
 self-correcting routines that compose the extension's Discovery, Analytics, and
 Cognition primitives into end-to-end workflows. Each agent is a *recipe* for a
 recurring agentic pattern: "drift on a metric series," "match a task to the best
@@ -20,11 +20,11 @@ If you want to build a recipe that isn't in the box, see
 blocks further down.
 
 > **What's an "installable agent" vs. a "Universal Agent" vs. a "Domain Agent"?**
-> The **installable agents** (below) are the productized recipes — `CREATE
+> The **installable agents** (below) are the productized recipes: `CREATE
 > EXTENSION fractalsql_agents` and call them. The **Universal Agents** (lower
 > down) are the six C-level building blocks the installable agents compose. The
 > **Domain Agents** are the original reference blueprints in the
-> `demo/demo-agentic-*.sql` scripts — the installable agents are their
+> `demo/demo-agentic-*.sql` scripts; the installable agents are their
 > productized form.
 
 ---
@@ -37,16 +37,16 @@ CREATE EXTENSION fractalsql_agents;   -- refuses if fractalsql isn't present
 ```
 
 `fractalsql_agents` is a second-tier, **optional** dependent extension
-(`requires = 'fractalsql'`, `relocatable = true`). It is pure PL/pgSQL — no C,
-no shared library, no `MODULE_PATHNAME` — so it co-locates with the base
+(`requires = 'fractalsql'`, `relocatable = true`). It is pure PL/pgSQL: no C,
+no shared library, no `MODULE_PATHNAME`, so it co-locates with the base
 extension and resolves the unqualified `fractal_*` primitive calls via the same
 `search_path` the base's own PL/pgSQL functions use.
 
 Thirteen are **cognition** agents that end in a `fractal_reason` step and need
-reasoning configured — see [`reasoning-setup.md`](reasoning-setup.md). Three are
+reasoning configured (see [`reasoning-setup.md`](reasoning-setup.md)). Three are
 **pure retrieval/analytics** with no LLM step (`recall_hybrid`,
 `recommend_diverse`, `feedback_audit`) and need no endpoint. One
-(`diverse_portfolios`) is enterprise tier — see its recipe below. Confirm
+(`diverse_portfolios`) is enterprise tier; see its recipe below. Confirm
 reasoning before running the cognition agents:
 
 ```sql
@@ -99,7 +99,7 @@ Pick by the problem shape, not by the function name.
 
 Use it when you have a per-entity metric series in a table (latency, error rate,
 vitals, sensor reading) and want to know whether that entity has drifted into a
-new regime — Cybersecurity host triage, DevOps incident triage, MedTech patient
+new regime: Cybersecurity host triage, DevOps incident triage, MedTech patient
 monitoring, Smart-Cities sensor regime change. For a single series you already
 hold as an array (no per-row table), use [regime_triage](#regime-triage--fractal_agent_regime_triage)
 instead.
@@ -120,7 +120,7 @@ instead.
 for the regime-change drift exponent. (3) Calls `fractal_reason` to synthesize a
 human-readable triage over the drift result.
 
-**Returns** `(threat_score float8, anomaly_type text, triage_summary text)` —
+**Returns** `(threat_score float8, anomaly_type text, triage_summary text)`:
 `threat_score` is the real drift exponent; `anomaly_type` is the literal
 `'vector_drift'` label; `triage_summary` is the LLM's read.
 
@@ -147,7 +147,7 @@ and returns `rc=-1`; 32 is safe).
 **Cardinality-constrained portfolio allocation.**
 
 Use it when you want the best allocation of a fixed number of assets from a
-universe — Quant-Finance portfolios, Sovereign-Edge resource allocation, FinTech
+universe: Quant-Finance portfolios, Sovereign-Edge resource allocation, FinTech
 rebalancing. You supply expected returns (`mu`) and risk (`cov`); the agent runs
 the SFS Sharpe maximizer and reasons a rationale.
 
@@ -160,11 +160,11 @@ the SFS Sharpe maximizer and reasons a rationale.
 | `cardinality` | `int` | — | how many assets to hold |
 | `context` | `text` | `NULL` | optional label passed to the reason call |
 
-**How it works.** (1) `fractal_optimize_portfolio(mu, cov, cardinality)` — the
+**How it works.** (1) `fractal_optimize_portfolio(mu, cov, cardinality)`: the
 SFS cardinality-constrained Sharpe maximizer. (2) Extracts the real Sharpe from
 the optimizer's own output. (3) `fractal_reason` explains the allocation.
 
-**Returns** `(allocation jsonb, sharpe float8, rationale text)` — `allocation` is
+**Returns** `(allocation jsonb, sharpe float8, rationale text)`: `allocation` is
 the optimizer's `{sharpe, weights}` jsonb; `sharpe` is the real risk-adjusted
 return; `rationale` is the LLM's explanation.
 
@@ -179,8 +179,8 @@ FROM fractal_agent_allocate(
     '{"portfolio": "agents-demo"}'::text);
 ```
 
-**Gotchas.** `cov` must be a **flattened 1-D row-major** matrix, not a 2-D array
-— the primitive reads it via `float8_array_to_doubles` and rejects 2-D. A
+**Gotchas.** `cov` must be a **flattened 1-D row-major** matrix, not a 2-D array.
+The primitive reads it via `float8_array_to_doubles` and rejects 2-D. A
 mismatched `cov` length surfaces the primitive's clean `cov length` ERROR.
 
 ---
@@ -188,7 +188,7 @@ mismatched `cov` length surfaces the primitive's clean `cov length` ERROR.
 ### Route task — `fractal_agent_route_task`
 **Match an incoming task to the best capable sub-agent.**
 
-Use it as a sub-agent dispatcher — DevOps task routing, Customer Support
+Use it as a sub-agent dispatcher: DevOps task routing, Customer Support
 intent routing, Cybersecurity analyst routing, Sovereign-Edge orchestration. You
 pass the task as an embedding (the agent does not embed it for you); it finds the
 nearest capability row and accounts a token budget.
@@ -235,7 +235,7 @@ FROM fractal_agent_route_task(
 ### Outlier intercept — `fractal_agent_outlier_intercept`
 **Pre-commit safety barrier against known-bad states.**
 
-Use it as a pre-commit screen on a proposed action's state vector — DevOps action
+Use it as a pre-commit screen on a proposed action's state vector: DevOps action
 screening, Cybersecurity known-bad-state interception, MedTech out-of-range
 vital interception, Sovereign-Edge anomalous command interception. It measures
 the distance from the proposed state to the nearest known-bad state and intercepts
@@ -251,8 +251,8 @@ if that distance is within a threshold.
 | `threshold` | `float8` | — | intercept if the nearest bad state is within this cosine distance |
 
 **How it works.** (1) `fractal_search_telemetry(history_table, emb_col, state_vec, 1)`
-for the distance to the nearest known-bad state. (2) `intercepted = distance < threshold`
-— a real comparison of a real distance. (3) `fractal_reason` justifies the
+for the distance to the nearest known-bad state. (2) `intercepted = distance < threshold`,
+a real comparison of a real distance. (3) `fractal_reason` justifies the
 decision in one sentence.
 
 **Returns** `(intercepted boolean, reason text)`.
@@ -275,7 +275,7 @@ FROM fractal_agent_outlier_intercept(
     ARRAY[0.0, 1.0, 0.0]::float8[], 'agents_demo_badstates', 'emb', 0.5);
 ```
 
-**Gotchas.** Cosine distance **ignores magnitude** — `[0.1,0.1,0.1]` vs
+**Gotchas.** Cosine distance **ignores magnitude**: `[0.1,0.1,0.1]` vs
 `[0.9,0.9,0.9]` are parallel (distance 0, "near"), not far. To build a "far"
 known-bad fixture, point a *different direction* (e.g. `[0,1,0]` vs `[1,0,0]` →
 distance 1). Raises `no bad-state rows in …` if the history table is empty.
@@ -285,7 +285,7 @@ distance 1). Raises `no bad-state rows in …` if the history table is empty.
 ### Recall hybrid — `fractal_agent_recall_hybrid`
 **Cohort-restricted vector recall (no LLM).**
 
-Use it for memory recall restricted by a metadata filter — Customer Support memory
+Use it for memory recall restricted by a metadata filter: Customer Support memory
 recall, MedTech cohort-restricted patient search, Smart-Cities zone-filtered
 sensor recall. The "hybrid" is the cohort: a strict SQL filter applied *before*
 the vector search so `k` is respected within the cohort.
@@ -308,7 +308,7 @@ optional filter via the [ctid mapping](#a-note-on-id-resolution). (2)
 `fractal_hybrid_clinical_search` restricts the vector search to that cohort. (3)
 Joins the returned `doc_id`s back to your named id and content columns.
 
-**Returns** `(mem_id bigint, content text)` — the real recalled row's id and
+**Returns** `(mem_id bigint, content text)`: the real recalled row's id and
 content (not canned `generate_series` ids or `"recalled memory snippet N"`).
 
 **Example**
@@ -328,7 +328,7 @@ FROM fractal_agent_recall_hybrid(
 
 **Gotchas.** Raises `filter matched no rows in …` if the filter matches nothing.
 `id_col` must be bigint-castable. This agent takes a single
-`(filter_col, filter_val)` — for a multi-predicate cohort (e.g.
+`(filter_col, filter_val)`. For a multi-predicate cohort (e.g.
 `age>65 AND condition='sepsis'`), build the cohort yourself and use [patient_deterioration_triage](#patient-deterioration-triage--fractal_agent_patient_deterioration_triage),
 which accepts a caller-built `cohort_doc_ids`.
 
@@ -337,7 +337,7 @@ which accepts a caller-built `cohort_doc_ids`.
 ### Recommend diverse — `fractal_agent_recommend_diverse`
 **Feedback-aware diverse top-k recommendations (no LLM).**
 
-Use it when you want diverse candidates that avoid recently-rejected items —
+Use it when you want diverse candidates that avoid recently-rejected items:
 Customer Support diverse recovery strategies, Recommendation "you might also
 like," Smart-Cities diverse representative-zone sampling. It enables the
 session-global Diversify/Repulsion layer, then runs a repulsion-diverse top-k.
@@ -352,13 +352,13 @@ session-global Diversify/Repulsion layer, then runs a repulsion-diverse top-k.
 | `k` | `int` | `10` | how many results |
 | `id_col` | `text` | `'id'` | the column to return as the id (must be bigint-castable) |
 
-**How it works.** (1) `fractal_diversify_enable()` — session-global repulsion, so
+**How it works.** (1) `fractal_diversify_enable()`: session-global repulsion, so
 re-searches avoid recently-rejected items reported via
 `fractal_feedback_report`. (2) `fractal_search_telemetry` for the top-k, which the
 primitive applies repulsion to when diversify is enabled. (3) Resolves the
 0-indexed `doc_id` to your named id via the [ctid mapping](#a-note-on-id-resolution).
 
-**Returns** `(item_id bigint, score float8)` — `score = 1 − cosine_distance`,
+**Returns** `(item_id bigint, score float8)`: `score = 1 − cosine_distance`,
 real from the primitive (not canned `0.95 − i*0.01`).
 
 **Example**
@@ -377,7 +377,7 @@ FROM fractal_agent_recommend_diverse(
 SELECT fractal_diversify_disable();
 ```
 
-**Gotchas.** `fractal_diversify_enable()` is a **session-global side effect** —
+**Gotchas.** `fractal_diversify_enable()` is a **session-global side effect**:
 this agent leaves it on; you are responsible for `fractal_diversify_disable()`
 when done. (Contrast [feedback_audit](#feedback-audit--fractal_agent_feedback_audit), which
 self-disables.) `id_col` must be bigint-castable.
@@ -387,7 +387,7 @@ self-disables.) `id_col` must be bigint-castable.
 ### Data analyst — `fractal_agent_data_analyst`
 **Natural-language analytics over any of your tables.**
 
-The horizontal catch-all — the closest thing to a general-purpose agent in the
+The horizontal catch-all: the closest thing to a general-purpose agent in the
 roster. Use it when no vertical agent fits and you just want to ask a
 natural-language question over your tables and get a reasoned answer. It composes
 `fractal_sql_agent` (NL→SQL→execute, with its own retry loop) then `fractal_reason`
@@ -402,12 +402,12 @@ to synthesize a read of the result. No vertical demo is wired to it.
 | `max_retries` | `int` | `2` | how many correction loops on EXPLAIN/execution failure |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
 
-**How it works.** (1) `fractal_sql_agent(question, table_names, max_retries, true)`
-— NL→SQL→execute with `auto_execute=true` so `result_json` carries the real row
+**How it works.** (1) `fractal_sql_agent(question, table_names, max_retries, true)`:
+NL→SQL→execute with `auto_execute=true` so `result_json` carries the real row
 count (or a captured execution-failure reason); with `false`, `result_json` is
 always NULL. (2) `fractal_reason` writes a one-paragraph analysis over the result.
 
-**Returns** `(analysis text, generated_sql text, result_json jsonb)` —
+**Returns** `(analysis text, generated_sql text, result_json jsonb)`:
 `analysis` is the LLM's read; `generated_sql` and `result_json` are the SQL
 agent's own real outputs (no canned constants).
 
@@ -425,7 +425,7 @@ FROM fractal_agent_data_analyst(
     ARRAY['agents_demo_data'], 2);
 ```
 
-**Gotchas.** No empty-table guard — there is no fixed table to pre-check;
+**Gotchas.** No empty-table guard: there is no fixed table to pre-check;
 `fractal_sql_agent` handles its own errors and reports empty/failed results via
 `execution_status`. Guard the LLM-facing `fractal_sql_agent` step with a
 restricted role (see [Safe Agency & Guardrails](#safe-agency--guardrails)).
@@ -454,7 +454,7 @@ that [recall_hybrid](#recall-hybrid--fractal_agent_recall_hybrid)'s single
 | `k` | `int` | `5` | how many cohort neighbors |
 | `id_col` | `text` | `'id'` | the column to return as the id (must be bigint-castable) |
 
-**How it works.** (1) Builds the cohort — from `cohort_doc_ids` if supplied, else
+**How it works.** (1) Builds the cohort: from `cohort_doc_ids` if supplied, else
 every row mapped to 0-indexed scan positions. (2)
 `fractal_hybrid_clinical_search` for the nearest patient in the cohort. (3)
 `fractal_search_trajectory` for the baseline→current drift. (4) Resolves the
@@ -494,11 +494,11 @@ matched no rows in …` if the cohort is empty. `id_col` must be bigint-castable
 ### Feedback audit — `fractal_agent_feedback_audit`
 **Recommender diversity audit (pure analytics, no LLM).**
 
-Use it to audit a recommender's diversity health — a self-contained cycle that
+Use it to audit a recommender's diversity health: a self-contained cycle that
 enables session-global repulsion, warms the rolling diversity window with varied
 queries, reports negative feedback on a target result, then reads back the
 diversity quotient and session diagnostics. Unlike [recommend_diverse](#recommend-diverse--fractal_agent_recommend_diverse),
-this agent **self-disables** diversify — it is a complete audit cycle that
+this agent **self-disables** diversify: it is a complete audit cycle that
 leaves the session clean.
 
 **Inputs**
@@ -518,11 +518,11 @@ with audit defaults. (2) Warms the `D_q` rolling window by running
 `fractal_search_telemetry` over `warmup_count` varied vectors from the warmup
 table (the window is empty until several searches have run; `detect_collapse`
 returns NaN otherwise). (3) Captures the audit target's top `doc_id` and calls
-`fractal_isolate_background(doc_id)` — the **doc_id is the handle**. (4) Reads back
+`fractal_isolate_background(doc_id)`: the **doc_id is the handle**. (4) Reads back
 `fractal_detect_collapse()` and `fractal_explain_result()`. (5) Self-disables
 diversify.
 
-**Returns** `(diversity_quotient float8, explanation jsonb)` — the real
+**Returns** `(diversity_quotient float8, explanation jsonb)`: the real
 `detect_collapse` reading (not NaN once the window is warm) and the real
 `fractal_explain_result` diagnostics.
 
@@ -554,7 +554,7 @@ warmup table with enough varied vectors to fill the window, or
 
 Use it for Sovereign-Edge node scheduling, or any "refine a task vector, then
 find the nearest capable node" workflow. Like [route_task](#route-task--fractal_agent_route_task)
-but with a `fractal_search` refinement step that route_task lacks — the "sniper
+but with a `fractal_search` refinement step that route_task lacks: the "sniper
 search" in the abstract search space before the nearest-node lookup.
 
 **Inputs**
@@ -570,14 +570,14 @@ search" in the abstract search space before the nearest-node lookup.
 | `k` | `int` | `5` | how many nearest nodes |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
 
-**How it works.** (1) `fractal_search(task_vec, iterations, population, 2)` —
+**How it works.** (1) `fractal_search(task_vec, iterations, population, 2)`:
 refines the task vector (diffusion factor 2). (2)
 `fractal_search_telemetry(node_table, node_emb_col, refined, 1)` for the nearest
 node. (3) Resolves the scan position to the named node id via the
 [ctid mapping](#a-note-on-id-resolution). (4) `fractal_reason` writes a one-line
 placement rationale.
 
-**Returns** `(assigned_node text, confidence float8, rationale text)` —
+**Returns** `(assigned_node text, confidence float8, rationale text)`:
 `confidence = 1/(1+distance)`.
 
 **Example**
@@ -601,7 +601,7 @@ FROM fractal_agent_schedule_workload(
 ### Rebalance sibling — `fractal_agent_rebalance_sibling`
 **Rebalance a portfolio and compare to the nearest historical allocation.**
 
-Use it for Quant-Finance rebalancing — run the SFS cardinality-constrained
+Use it for Quant-Finance rebalancing: run the SFS cardinality-constrained
 optimizer, then find the nearest historical allocation pattern in a snapshots
 table, then reason over both. Generalizes the fintech-MCTS reference blueprint.
 
@@ -649,7 +649,7 @@ FROM fractal_agent_rebalance_sibling(
 ```
 
 **Gotchas.** `cov` is a **flattened 1-D row-major** matrix. `id_col` must be
-bigint-castable — `nearest_alloc_id` is returned as `bigint`, so a text label
+bigint-castable: `nearest_alloc_id` is returned as `bigint`, so a text label
 column won't do (pass the numeric PK). Raises `no allocation rows in …` if the
 allocation table is empty.
 
@@ -660,11 +660,11 @@ allocation table is empty.
 cardinality-constrained portfolio, return several structurally distinct good
 ones.
 
-Use it when a single "best" portfolio understates the real decision — a
+Use it when a single "best" portfolio understates the real decision: a
 portfolio manager usually wants to see a few genuinely different ways to hit a
 similar risk-adjusted return, not one point estimate. Runs
 `fractal_optimize_portfolio_multimodal` (multiple restarts, diverse-selected,
-same entropy engine as the single-best optimizer — a licensed capability
+same entropy engine as the single-best optimizer, a licensed capability
 gate, not a different algorithm) and reasons once over all the candidates'
 tradeoffs.
 
@@ -680,7 +680,7 @@ tradeoffs.
 | `quality_frac` | `float8` | `0.90` | candidates must be within this fraction of the best Sharpe found |
 | `seed` | `bigint` | `NULL` | optimizer RNG seed (NULL = nondeterministic) |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
-| `objective_mode` | `text` | `'sharpe'` | `'sharpe'` or `'pareto'` — selection strategy, see below |
+| `objective_mode` | `text` | `'sharpe'` | `'sharpe'` or `'pareto'`: selection strategy, see below |
 
 **How it works.** `objective_mode = 'sharpe'` (default): (1)
 `fractal_optimize_portfolio_multimodal(mu, cov, cardinality, n_restarts,
@@ -689,19 +689,19 @@ distinct candidates, sharpe-threshold + asset-overlap selected. (2) One
 `fractal_reason` call summarizing the tradeoffs across all of them.
 `objective_mode = 'pareto'` instead runs
 `fractal_optimize_portfolio_multimodal_pareto(mu, cov, cardinality,
-n_restarts, n_restarts, seed)` — the same `n_restarts` independent searches,
+n_restarts, n_restarts, seed)`: the same `n_restarts` independent searches,
 but scored by decomposed return/risk and reduced to a genuine non-dominated
 Pareto front (NSGA-II crowding-distance truncation, not sharpe-threshold +
 overlap selection); `overlap_threshold`/`quality_frac` are ignored in this
 mode. Either mode calls `fractal_reason` once over all the candidates (not
-one call per candidate) — the prompt framing differs by mode (Sharpe-band
+one call per candidate); the prompt framing differs by mode (Sharpe-band
 language vs. return/risk-dominance language).
 
 **Returns** one row per candidate: `(candidate_id int, sharpe float8, weights
-jsonb, rationale text)` — `rationale` repeats per row since it's a single
+jsonb, rationale text)`. `rationale` repeats per row since it's a single
 reasoning call covering every candidate. In `'sharpe'` mode `weights` is a
 bare array, same as `allocate`. In `'pareto'` mode `weights` is instead
-`{"weights": [...], "return": r, "risk": v}` — a richer object so per-row
+`{"weights": [...], "return": r, "risk": v}`: a richer object so per-row
 return/risk are machine-queryable straight from the agent's output, without
 a second call to `fractal_optimize_portfolio_multimodal_pareto` directly.
 
@@ -728,7 +728,7 @@ FROM fractal_agent_diverse_portfolios(
 ```
 
 **Gotchas.** `cov` is a **flattened 1-D row-major** matrix, same as
-`allocate`/`rebalance_sibling`. Enterprise tier — errors with `enterprise
+`allocate`/`rebalance_sibling`. Enterprise tier: errors with `enterprise
 tier not loaded` until `fractalsql.enterprise_lib` is set; dormant on the
 community image by default (see `demo/enterprise-qtl-audit.sql` for
 activation). In `'sharpe'` mode, raises `no candidates found` if the
@@ -805,7 +805,7 @@ FROM fractal_agent_detour_classify(
 **Triage a track anomaly: trajectory deviation + heading-change DFA.**
 
 Use it for Maritime track-deviation detection or Cybersecurity beaconing/C2
-detection — any trajectory-drift + heading-change-DFA workflow. It combines the
+detection: any trajectory-drift + heading-change-DFA workflow. It combines the
 track-deviation search across the fleet with the DFA long-range-correlation
 exponent of the heading-change series.
 
@@ -859,7 +859,7 @@ FROM fractal_agent_track_anomaly(
     5, 'id');
 ```
 
-**Gotchas.** `dfa_exponent` may be `-1` (insufficient window) — passed through;
+**Gotchas.** `dfa_exponent` may be `-1` (insufficient window), passed through;
 the reason step notes it. Raises `no track rows in …` if the track table is
 empty. `id_col` must be bigint-castable.
 
@@ -915,7 +915,7 @@ FROM fractal_agent_network_coverage_alert(
 succeed (a 20×20 grid = 400 points works; 100 or a scattered 60 fail with
 `rc=-1`). `point_cloud` is a flat `n_points × dim` interleaved array. Raises
 `point_cloud and drift_series are required` if either is NULL. The `drift` field
-is a **signed numeric**, not a boolean — `drift_detected` is the boolean
+is a **signed numeric**, not a boolean: `drift_detected` is the boolean
 comparison.
 
 ---
@@ -923,8 +923,8 @@ comparison.
 ### Regime triage — `fractal_agent_regime_triage`
 **Triage a regime change in a single series (array-in, no table).**
 
-Use it for any single-series regime-change triage — Quant-Finance market regime,
-Cybersecurity traffic regime, Smart-Cities sensor regime — when you already hold
+Use it for any single-series regime-change triage (Quant-Finance market regime,
+Cybersecurity traffic regime, Smart-Cities sensor regime) when you already hold
 the series as an array and don't have a per-row time/metric table (that's
 [anomaly_triage](#anomaly-triage--fractal_agent_anomaly_triage)). It runs the DFA
 long-range-correlation exponent and the regime-change drift, then reasons.
@@ -957,7 +957,7 @@ FROM fractal_agent_regime_triage(
     64, 0.5);
 ```
 
-**Gotchas.** `dfa_exponent` may be `-1` (insufficient window) — passed through.
+**Gotchas.** `dfa_exponent` may be `-1` (insufficient window), passed through.
 Raises `series is required` if `series` is NULL. The `drift` field is a **signed
 numeric** (`recent_alpha − baseline_alpha`), not a boolean; `drift_detected` is
 the boolean comparison.
@@ -971,10 +971,10 @@ as a **0-indexed row position** in the C code's heap scan, not a primary key.
 The table-searching agents (`recall_hybrid`, `recommend_diverse`,
 `patient_deterioration_triage`, `schedule_workload`, `rebalance_sibling`,
 `detour_classify`, `track_anomaly`) resolve that position to your named id column
-(`id_col`) via `row_number() OVER (ORDER BY ctid) - 1` — the same robust mapping
+(`id_col`) via `row_number() OVER (ORDER BY ctid) - 1`: the same robust mapping
 the maritime/cybersecurity demos and the C source use internally for cohort
 construction. `id_col` must be **bigint-castable** (e.g. `rebalance_sibling`
-returns `nearest_alloc_id bigint`, so a text label column won't do — pass the
+returns `nearest_alloc_id bigint`, so a text label column won't do; pass the
 numeric PK).
 
 `recommend_diverse` calls `fractal_diversify_enable()` as a session-global side
@@ -989,14 +989,14 @@ clean without caller cleanup.
 ## Building blocks: the six Universal Agents
 
 The installable agents above are productized recipes. Underneath them are six **Universal
-Agents** — C-level functions bound to their symbols in
+Agents**: C-level functions bound to their symbols in
 `sql/fractalsql--1.0.sql` (`CREATE FUNCTION ... AS 'MODULE_PATHNAME', 'fractal_*'`),
 callable as soon as `CREATE EXTENSION fractalsql` runs. These are the building
 blocks the PL/pgSQL agents compose; you can also call them directly or compose
 them into your own agents (see [Composing your own](#composing-your-own)). They
 require a reasoning plugin plus an OpenAI-compatible chat endpoint (and, for the
 agents that embed a query, an embeddings endpoint) configured via the
-`fractalsql.*` GUCs — see [`reasoning-setup.md`](reasoning-setup.md). Signatures
+`fractalsql.*` GUCs. See [`reasoning-setup.md`](reasoning-setup.md). Signatures
 mirror the C in `src/fractalsql.c` exactly (argument order, types, defaults, and
 `STRICT`ness).
 
@@ -1016,8 +1016,8 @@ The reasoning step synthesizes its answer over the **retrieved rows'
 content**, not the raw vectors. After the Scout search the agent maps each
 top-k result position back to its physical row (by `ctid`, captured during
 the corpus scan) and fetches the matched rows' non-vector columns as a JSON
-array — that compact, LLM-readable context is what `fractal_reason` consumes.
-(The raw Scout result, by contrast, contains the top-k *embeddings* —
+array. That compact, LLM-readable context is what `fractal_reason` consumes.
+(The raw Scout result, by contrast, contains the top-k *embeddings*,
 useless to an LLM and large enough, at `pop_size × dim` floats, to exceed a
 local model's context window and fail the chat call.) `source_doc_ids` are the
 0-based positions of the retrieved rows in the corpus scan.
@@ -1070,12 +1070,12 @@ fractal_agent_plan_explore(
 LANGUAGE C VOLATILE STRICT
 ```
 
-`max_branches` is required (no default). `initial_state` is `text` — the
+`max_branches` is required (no default). `initial_state` is `text`: the
 exploration seeds from the vector nearest to this state label, not from a
 raw vector. The function is `STRICT`: a `NULL` argument returns no rows
 rather than executing.
 
-Each returned branch carries its own `plan_trajectory` — the **matched
+Each returned branch carries its own `plan_trajectory`: the **matched
 strategy's** embedding (the corpus row at that branch's result index), so the
 branches are distinct rather than all echoing the query vector.
 `confidence_score` is `1.0 − distance`. The result is materialized in the
@@ -1125,7 +1125,7 @@ fractal_agent_detect_loop(
 LANGUAGE C VOLATILE STRICT
 ```
 
-`log_arr` is an `int8[]` (a `bigint[]`) of ordered agent state hashes —
+`log_arr` is an `int8[]` (a `bigint[]`) of ordered agent state hashes:
 typically `array_agg(state_hash ORDER BY event_ts)` from an agent event
 log. A loop is flagged when **either** signal fires:
 
@@ -1142,11 +1142,11 @@ log. A loop is flagged when **either** signal fires:
 ### `fractal_rag_agent`
 **Hybrid Retrieve-Reason Agent**
 
-Embeds a query, Scout-searches a corpus, then reasons over the retrieved context to produce a single answer — a focused, single-turn RAG pattern.
+Embeds a query, Scout-searches a corpus, then reasons over the retrieved context to produce a single answer: a focused, single-turn RAG pattern.
 
 Like `fractal_search_agent`, the reasoning step consumes the **retrieved rows'
 content** (their non-vector columns, fetched by `ctid`) rather than the raw
-top-k vectors — see that function's note for why. The chat-dispatch return
+top-k vectors. See that function's note for why. The chat-dispatch return
 code is checked: a reasoning-endpoint failure raises a clean
 `rag_agent reasoning failed (rc=…)` `ERROR` with the plugin's detail, instead
 of returning a NULL/garbage answer.
@@ -1170,11 +1170,11 @@ currently accepted but not yet applied to the search.
 ## Reference blueprints: Domain Agents
 
 Before the installable agents existed, the vertical demos shipped inline PL/pgSQL
-**Domain Agent** reference blueprints — self-contained functions at the top of
+**Domain Agent** reference blueprints: self-contained functions at the top of
 each `demo/demo-agentic-*.sql` script. The installable agents above are the
 productized form of those blueprints: parameterized so your tables and columns
 are arguments instead of hardcoded, and installed by `CREATE EXTENSION
-fractalsql_agents` rather than copy-pasted. The demos are now **presets** —
+fractalsql_agents` rather than copy-pasted. The demos are now **presets**:
 their raw-primitive sections are preserved as commented blueprints above a call
 to the shipped agent that generalizes them. Every demo is a clean, re-runnable
 regression test: it drops and recreates its tables and vectorizer config at the
@@ -1207,26 +1207,26 @@ Six Domain Agent blueprints ship across the three agentic verticals:
 > agents above) stub their inner reasoning/retrieval calls so the demo runs
 > without a model. A few (`route_task`, `outlier_intercept`, `recall_hybrid`)
 > simulate the inner embed/Scout call with canned data. The composition
-> *wiring* — which primitive calls into which, in what order — is the part to
+> *wiring* (which primitive calls into which, in what order) is the part to
 > copy; swap the canned step for the real `fractal_search_agent` /
 > `fractal_search_telemetry` call against your own corpus. The shipped agents
 > are the real, non-stubbed form of these same blueprints.
 
 ### Getting started with the blueprints
 
-1. **Prerequisites** — the extension installed (`CREATE EXTENSION fractalsql`)
+1. **Prerequisites**: the extension installed (`CREATE EXTENSION fractalsql`)
    and reasoning configured; the agents call `fractal_reason` / `fractal_embed`,
    so follow [`reasoning-setup.md`](reasoning-setup.md) first. The two
    embed-coupled demos (DevOps, FinTech) also need an embeddings endpoint and a
-   vectorized column — see [`vectorizer-setup.md`](vectorizer-setup.md).
-2. **Run a demo** end to end — each is a single `psql -f`:
+   vectorized column. See [`vectorizer-setup.md`](vectorizer-setup.md).
+2. **Run a demo** end to end: each is a single `psql -f`:
    ```sh
    psql -d <your_database> -f demo/demo-vertical-agentic-customer-support.sql
    ```
-3. **Read the composition** — the `CREATE OR REPLACE FUNCTION` blocks for every
+3. **Read the composition**: the `CREATE OR REPLACE FUNCTION` blocks for every
    Domain Agent above sit at the top of their demo file under a
    `DOMAIN AGENT IMPLEMENTATIONS (PL/pgSQL Compositions)` header. Copy that
-   pattern into your own schema and swap in your tables and columns — or just
+   pattern into your own schema and swap in your tables and columns, or just
    `CREATE EXTENSION fractalsql_agents` and call the shipped agent.
 
 ---
@@ -1235,23 +1235,23 @@ Six Domain Agent blueprints ship across the three agentic verticals:
 
 The six Universal Agents above are the C-level building blocks; the installable agents and
 Domain Agent blueprints show them composed into vertical workflows with PL/pgSQL.
-The composition principle is simple — every primitive is an ordinary SQL
+The composition principle is simple: every primitive is an ordinary SQL
 function, so a custom agent is just a `CREATE FUNCTION ... LANGUAGE plpgsql`
 that calls them in sequence, feeds one's output into the next's input, and
 returns a shaped result row.
 
-For the full guide — the building-block pick-list, the four-stage pipeline
-(retrieve → reason → act → guard), three worked patterns (single-turn RAG,
-self-correcting analyst, multi-step agent with a safety barrier), the Safe
-Agency & Guardrails rules for `fractal_sql_agent`, and a copy-paste skeleton —
-see **[composition-guide.md](composition-guide.md)**.
+For the full guide, see **[composition-guide.md](composition-guide.md)**: the
+building-block pick-list, the four-stage pipeline (retrieve → reason → act →
+guard), three worked patterns (single-turn RAG, self-correcting analyst,
+multi-step agent with a safety barrier), the Safe Agency & Guardrails rules
+for `fractal_sql_agent`, and a copy-paste skeleton.
 
 ---
 
 ## Validate
 
 `demo/demo-agents.sql` exercises all sixteen agents end-to-end via the real
-`CREATE EXTENSION` path on a live install — every example on this page is drawn
+`CREATE EXTENSION` path on a live install. Every example on this page is drawn
 from that demo. Run it with:
 
 ```sh

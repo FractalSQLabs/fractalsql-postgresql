@@ -5,14 +5,17 @@
 # Getting Started: From Zero to Your First Agent
 
 This guide takes you from a fresh checkout to a running agentic database in
-about five minutes — no Postgres install, no compiler, no model download
+about five minutes: no Postgres install, no compiler, no model download
 required to start. By the end you will have:
 
 - a Postgres 18 server with the `fractalsql` **and** `fractalsql_agents`
   extensions loaded,
 - a diverse vector search that runs with **no model** connected,
 - a live reasoning call against a real LLM, and
-- all 15 agents demoable on demand.
+- all 16 agents demoable on demand (15 run on Community; the 16th,
+  `fractal_agent_diverse_portfolios`, needs the enterprise library
+  (see [Enterprise Tier](enterprise.md)) and returns a clear
+  "not available" error without it, not a silent failure).
 
 The fastest path is Docker. If you are putting this into a real Postgres
 cluster instead, jump to [Install without Docker](#5-install-without-docker)
@@ -35,7 +38,7 @@ docker compose up -d
 
 That starts a Postgres 18 container with both extensions **enabled by init**
 plus an Ollama container with **no model pulled** (you add a model when you
-want reasoning — see [step 3](#3-turn-on-reasoning)). All the demo SQL ships
+want reasoning, see [step 3](#3-turn-on-reasoning)). All the demo SQL ships
 inside the image at `/demo/`, ready to run on demand.
 
 Verify FractalSQL is alive and both extensions are loaded:
@@ -67,9 +70,9 @@ You should see `fractalsql` and `fractalsql_agents` in the extension list, and:
 FractalSQL's core is a **Stochastic Fractal Search** optimizer. It comes in
 two flavours that solve different problems:
 
-- **Sniper** (`fractal_search`) — converge to the single best point in a
+- **Sniper** (`fractal_search`): converge to the single best point in a
   continuous space.
-- **Scout** (`fractal_search_explore`) — discover the *diverse* structure of
+- **Scout** (`fractal_search_explore`): discover the *diverse* structure of
   your own data, finding distinct "islands" instead of collapsing to one
   nearest neighbour.
 
@@ -94,7 +97,7 @@ sql
 ```
 
 You'll get back a spread of vectors drawn from the distinct clusters in your
-table — the opposite of a `top-K` query that would return three rows all from
+table: the opposite of a `top-K` query that would return three rows all from
 the same neighbourhood. Re-running it is safe and gives similar diverse
 coverage.
 
@@ -106,12 +109,12 @@ section).
 
 ## 3. Turn on reasoning
 
-Search finds data; **reasoning** turns it into insight. Reasoning is opt-in —
-it calls an LLM through a high-performance HTTP bridge, so you point it at a
+Search finds data; **reasoning** turns it into insight. Reasoning is opt-in.
+It calls an LLM through a high-performance HTTP bridge, so you point it at a
 provider (Ollama locally, or AWS Bedrock / Azure OpenAI / GCP Vertex in the
 cloud).
 
-**With the bundled Ollama** — pull a model once, then reason:
+**With the bundled Ollama**: pull a model once, then reason:
 
 ```bash
 # one-time model pull (~13.8 GB for gpt-oss:20b; a few hundred MB for the embedder)
@@ -146,9 +149,12 @@ the slow-hardware timeout notes).
 ## 4. Your first agent
 
 The **Agent Tier** composes Discovery + Cognition into self-correcting
-routines. The image ships a single script that exercises all **15 agents**
-end-to-end — anomaly triage, portfolio allocation, hybrid recall,
-route planning, deterioration triage, regime detection, and the rest:
+routines. The image ships a single script that exercises all **16 agents**
+end-to-end (15 run on Community; `fractal_agent_diverse_portfolios` needs
+the enterprise library, see [Enterprise Tier](enterprise.md), and returns
+a clear "not available" error without it): anomaly triage, portfolio
+allocation, hybrid recall, route planning, deterioration triage, regime
+detection, and the rest:
 
 ```bash
 docker compose exec postgres psql -U postgres -d fractalsql_demo \
@@ -160,7 +166,7 @@ first, so it's re-runnable) and calls one agent. With a model pulled you get
 real reasoned output for every section; without one, the retrieval/optimization
 parts still run and only the closing narrative is missing.
 
-Prefer a specific industry? The vertical demos are one command each — e.g.
+Prefer a specific industry? The vertical demos are one command each, e.g.
 cybersecurity threat detection:
 
 ```bash
@@ -201,7 +207,7 @@ sudo -u postgres psql -d mydb -c "CREATE EXTENSION fractalsql_agents;"
 ```
 
 `fractalsql_agents` is pure PL/pgSQL and `requires='fractalsql'`, so it loads
-the instant the base extension is present — no extra library, no compile.
+the instant the base extension is present: no extra library, no compile.
 
 On **macOS** there is no `.deb`/`.rpm` equivalent, so releases ship a
 per-(major, arch) tarball with an `install.sh`:
@@ -224,7 +230,8 @@ agents files into the target server's own extension dir, then you run the two
 
 ## Where next
 
-The documentation is a linear path. You just finished step 2.
+The documentation is a linear path. You just finished this guide, step 2 of
+the path in the [README](../README.md#from-zero-to-your-first-agent).
 
 | Step | Question | Go to |
 |------|----------|-------|

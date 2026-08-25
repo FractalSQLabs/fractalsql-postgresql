@@ -4,7 +4,7 @@
 
 # Cognition API Reference
 
-The Cognition tier provides the Virtual File System (VFS) surface that connects the SFS core to Large Language Models (LLMs) and embedding providers.
+The Cognition tier provides the provider bridge that connects the SFS core to Large Language Models (LLMs) and embedding providers.
 
 ---
 

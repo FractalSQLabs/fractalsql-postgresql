@@ -8,13 +8,13 @@ You have run the [industry starter kits](starter-kits.md) and read the
 [sixteen agent recipes](api-agency.md#the-sixteen-recipes). Now the question
 is: **how do I build a proprietary agent that isn't in the box?**
 
-The good news: there is no framework to learn. Every FractalSQL primitive —
-the search functions, the reasoning bridge, the six Universal Agents — is an
+The good news: there is no framework to learn. Every FractalSQL primitive
+(the search functions, the reasoning bridge, the six Universal Agents) is an
 **ordinary SQL function**. A custom agent is just a `CREATE FUNCTION ...
 LANGUAGE plpgsql` that calls them in sequence, feeds one's output into the
 next's input, and returns a shaped result row. The shipped agents and
 the [Domain Agent blueprints](api-agency.md#reference-blueprints-domain-agents)
-are exactly this — PL/pgSQL compositions — productized. You write the same
+are exactly this: PL/pgSQL compositions, productized. You write the same
 kind of function, for your tables and your workflow.
 
 ---
@@ -23,7 +23,7 @@ kind of function, for your tables and your workflow.
 
 These are the C-level **Universal Agents**, callable as soon as
 `CREATE EXTENSION fractalsql` runs (they need a reasoning plugin + an
-OpenAI-compatible endpoint configured — see
+OpenAI-compatible endpoint configured; see
 [reasoning-setup.md](reasoning-setup.md)). Full signatures and behaviour are
 in [api-agency.md → Building blocks](api-agency.md#building-blocks-the-six-universal-agents);
 here is the pick-list.
@@ -49,15 +49,15 @@ you need.
 
 A composition is a pipeline with up to four stages:
 
-1. **Retrieve** — find the relevant rows (Scout for diversity, or a trajectory
+1. **Retrieve**: find the relevant rows (Scout for diversity, or a trajectory
    search for "what changed"). Either call a Discovery primitive directly or
    let `fractal_search_agent` / `fractal_rag_agent` do embed→search for you.
-2. **Reason** — `fractal_reason(query, context)` over the retrieved rows'
-   *content* (not their raw vectors — the Universal Agents fetch the matched
+2. **Reason**: `fractal_reason(query, context)` over the retrieved rows'
+   *content* (not their raw vectors; the Universal Agents fetch the matched
    rows' non-vector columns by `ctid` and pass that compact JSON to the LLM).
-3. **Act** (optional) — `fractal_sql_agent` with `auto_execute => true` when
+3. **Act** (optional): `fractal_sql_agent` with `auto_execute => true` when
    the agent must run a query, under a guardrailed role (below).
-4. **Guard** (optional) — `fractal_agent_detect_loop` on the agent's state-hash
+4. **Guard** (optional): `fractal_agent_detect_loop` on the agent's state-hash
    log, and/or `fractal_agent_outlier_intercept`-style screening of a proposed
    action against known-bad states.
 
@@ -70,7 +70,7 @@ agent must *do* something. Add 4 any time the agent is autonomous.
 
 ### Pattern A — "Answer my corpus" (single-turn RAG)
 
-The simplest useful agent, and you usually don't even need to compose it —
+The simplest useful agent, and you usually don't even need to compose it:
 call the block directly:
 
 ```sql
@@ -116,7 +116,7 @@ SELECT generated_sql, execution_status, result_json
     ARRAY['invoices'], max_retries => 2, auto_execute => true);
 ```
 
-The `data_analyst` agent is the productized version of this —
+The `data_analyst` agent is the productized version of this:
 NL→SQL inside its own composition, with the retry loop and a reasoned summary
 of the result row.
 
@@ -159,9 +159,9 @@ BEGIN
 END $$;
 ```
 
-> The skeleton is illustrative — `hashtextextended` is a stand-in; your state-hash scheme is yours
-> to define. The wiring — retrieve, fall back to `fractal_sql_agent`, reason,
-> then `fractal_agent_detect_loop` on the state log — is the part to copy. The
+> The skeleton is illustrative. `hashtextextended` is a stand-in; your state-hash scheme is yours
+> to define. The wiring (retrieve, fall back to `fractal_sql_agent`, reason,
+> then `fractal_agent_detect_loop` on the state log) is the part to copy. The
 > shipped `route_task` + `outlier_intercept` +
 > `detect_loop` composition in
 > `demo/demo-vertical-agentic-ops-devops.sql` is the full, runnable form.
@@ -201,12 +201,12 @@ These bit the shipped agents; they'll bite yours too.
   `schedule_workload`, `rebalance_sibling`, `detour_classify`,
   `track_anomaly`) resolve the C code's 0-indexed row position to your named
   id column via `row_number() OVER (ORDER BY ctid) - 1`. A text label column
-  won't do — pass the numeric PK. See
+  won't do; pass the numeric PK. See
   [api-agency.md → A note on id resolution](api-agency.md#a-note-on-id-resolution).
 - **Diversify is session-global.** `recommend_diverse` calls
   `fractal_diversify_enable()` as a session side effect so re-searches avoid
   recently-rejected items. Reset it with `fractal_diversify_disable()` when
-  your session is done — or call `feedback_audit`, which runs the
+  your session is done, or call `feedback_audit`, which runs the
   whole audit cycle and self-disables.
 
 ---

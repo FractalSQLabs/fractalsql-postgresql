@@ -4,9 +4,9 @@
 
 # Sovereign Reasoning Setup Guide
 
-The **Cognition Tier** is the intelligence layer of FractalSQL. It provides a high-performance Virtual File System (VFS) bridge that allows PostgreSQL to communicate with Large Language Models (LLMs) and embedding providers. 
+The **Cognition Tier** is the intelligence layer of FractalSQL. It provides a pluggable bridge that lets PostgreSQL call Large Language Models (LLMs) and embedding providers directly from SQL.
 
-By bringing reasoning directly into the database kernel, FractalSQL enables **Sovereign Data Intelligence**: the ability to synthesize, analyze, and reason over your data without the risk and latency of exporting it to external application middleware.
+By bringing reasoning directly into the PostgreSQL backend, FractalSQL lets you synthesize, analyze, and reason over your data without an external application-middleware hop. Sovereignty here is a deployment choice, not a guarantee baked into every provider: local models (Ollama/vLLM) keep data on your own infrastructure, while cloud providers (Bedrock, Azure OpenAI, Vertex) send it to that provider under your own account and compliance agreement.
 
 ---
 
@@ -53,7 +53,7 @@ fractalsql.reasoning_plugin = '/usr/lib/postgresql/17/lib/fractalsql-reasoning-h
 Then reload the configuration: `SELECT pg_reload_conf();`. The plugin loads lazily upon the first reasoning call in a session.
 
 ## Step 2: Universal LLM Connectivity
-One of the core strengths of the Sovereign tier is **Zero Provider Lock-in**. The reasoning VFS abstracts the provider's API, meaning your SQL calls to `fractal_reason()` remain identical whether you are using a local model for privacy or a cloud giant for scale.
+One of the core strengths of this design is **zero provider lock-in**: the provider bridge abstracts each provider's API, so your SQL calls to `fractal_reason()` remain identical whether you're using a local model for privacy or a cloud provider for scale.
 
 Pick your provider and add the corresponding block to your configuration. Only one block should be active at a time.
 
@@ -99,7 +99,7 @@ fractalsql.http_model = 'gpt-4o'
 Vertex AI exposes an OpenAI-compatible endpoint on the `openai/v1` path of your
 project's region endpoint. Auth is a Google **service-account OAuth access
 token** (a short-lived bearer), supplied via `http_token` exactly like an API
-key — no SigV4-style signing is needed.
+key. No SigV4-style signing is needed.
 
 ```ini
 # postgresql.conf (GUCs)
@@ -121,7 +121,7 @@ The token is short-lived (~1 hour). For a long-running install, refresh it on a
 schedule (e.g. `pg_cron` or a sidecar that re-runs `print-access-token` and
 `ALTER SYSTEM SET fractalsql.http_token = '...'`). The `fractalsql.http_token`
 value is read on every reasoning call, so a reload (`pg_reload_conf()`) is not
-strictly required after rotating it — but `ALTER SYSTEM` still needs a reload
+strictly required after rotating it. But `ALTER SYSTEM` still needs a reload
 to persist, and the env-var form (`FSQL_REASONING_HTTP_TOKEN`) is read once at
 plugin load, so prefer the GUC form for rotating tokens.
 
@@ -177,7 +177,7 @@ GRANT SELECT (id, title, body) ON TABLE documents TO fsql_reasoning_role;
 Enable RLS to ensure that the context subquery only returns rows the current session's user is permitted to see. This prevents "cross-tenant" data leakage to the LLM.
 
 ### Prompt Injection (OWASP LLM01)
-FractalSQL is **secure by default**. The plugin prepends a baseline anti-injection instruction to every system message. To replace this, set `FSQL_REASONING_HTTP_SYSTEM_PROMPT`.
+The plugin prepends a baseline anti-injection instruction to every system message as a best-effort mitigation. No system-prompt instruction can fully prevent prompt injection from untrusted context, since the model still can't reliably distinguish instructions from data. Treat it as raising the bar, not closing the door. The real defense is architectural: RLS and column-level grants restricting what the context subquery can see (above), and treating every LLM response as untrusted output, never executed as SQL (see the checklist below). To replace the baseline instruction, set `FSQL_REASONING_HTTP_SYSTEM_PROMPT`.
 
 ---
 

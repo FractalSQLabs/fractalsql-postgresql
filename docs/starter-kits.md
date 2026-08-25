@@ -7,7 +7,7 @@
 You have the extension running ([getting-started.md](getting-started.md)). Now:
 **which end-to-end example do I run for *my* problem?**
 
-FractalSQL ships eleven runnable industry walkthroughs — eight **domain
+FractalSQL ships eleven runnable industry walkthroughs: eight **domain
 verticals** (a single `psql -f` each, mostly no-model) and three **agentic
 verticals** (composed multi-step agents, model-on). Each kit is a
 self-contained script: it builds its own synthetic dataset, runs the agents
@@ -34,7 +34,7 @@ all ship inside the Docker image at `/demo/`.
 | Fleet logistics / detour detection | `demo-vertical-fleet-logistics.sql` | `detour_classify`, `recommend_diverse`, `fractal_search_trajectory`, `fractal_dimension_boxcount` | [detour_classify](api-agency.md#detour-classify--fractal_agent_detour_classify), [recommend_diverse](api-agency.md#recommend-diverse--fractal_agent_recommend_diverse) |
 | Smart cities / IoT sensor grids | `demo-vertical-smart-cities-iot.sql` | `network_coverage_alert`, `fractal_dimension_dfa`/`_drift`/`_boxcount`, `fractal_morphological_complexity`, Scout | [network_coverage_alert](api-agency.md#network-coverage-alert--fractal_agent_network_coverage_alert) |
 | Cybersecurity / network behavior analytics | `demo-vertical-cybersecurity-threat-detection.sql` | `track_anomaly`, `recommend_diverse`, `fractal_search_trajectory`, `fractal_dimension_dfa`/`_drift`, Scout | [track_anomaly](api-agency.md#track-anomaly--fractal_agent_track_anomaly) |
-| **Agentic:** DevOps / SRE dispatch + safety | `demo-vertical-agentic-ops-devops.sql` | `route_task`, `outlier_intercept`, `anomaly_triage` + `detect_loop`, `threat_triage` blueprint (a composed-agent reference design — see Step 4) | [route_task](api-agency.md#route-task--fractal_agent_route_task), [outlier_intercept](api-agency.md#outlier-intercept--fractal_agent_outlier_intercept), [anomaly_triage](api-agency.md#anomaly-triage--fractal_agent_anomaly_triage) |
+| **Agentic:** DevOps / SRE dispatch + safety | `demo-vertical-agentic-ops-devops.sql` | `route_task`, `outlier_intercept`, `anomaly_triage` + `detect_loop`, `threat_triage` blueprint (a composed-agent reference design, see Step 4) | [route_task](api-agency.md#route-task--fractal_agent_route_task), [outlier_intercept](api-agency.md#outlier-intercept--fractal_agent_outlier_intercept), [anomaly_triage](api-agency.md#anomaly-triage--fractal_agent_anomaly_triage) |
 | **Agentic:** FinTech portfolio rebalance + MCTS | `demo-vertical-agentic-fintech-mcts.sql` | `rebalance_sibling`, `plan_explore`, `portfolio_rebalance` blueprint, `fractal_optimize_portfolio` | [rebalance_sibling](api-agency.md#rebalance-sibling--fractal_agent_rebalance_sibling), [plan_explore](api-agency.md#building-blocks-the-six-universal-agents) |
 | **Agentic:** Customer support recall + recommend | `demo-vertical-agentic-customer-support.sql` | `recall_hybrid`, `recommend_diverse`, `trajectory_predict`, Scout | [recall_hybrid](api-agency.md#recall-hybrid--fractal_agent_recall_hybrid), [recommend_diverse](api-agency.md#recommend-diverse--fractal_agent_recommend_diverse) |
 
@@ -44,11 +44,11 @@ all ship inside the Docker image at `/demo/`.
 
 ## Domain kits (run with no model)
 
-These eight run almost entirely **without a reasoning endpoint** — only the
+These eight run almost entirely **without a reasoning endpoint**: only the
 closing `fractal_reason()` narrative needs one, so you can see the
 retrieval/optimization/geometry results immediately and pull a model later
 just for the summary. Four (MedTech, Maritime, Fleet, Cybersecurity) store
-vectors as the native `fractal_vector(n)` type — see
+vectors as the native `fractal_vector(n)` type. See
 [vectorizer-setup.md](vectorizer-setup.md) for that type.
 
 ### Quantitative Finance — `demo-vertical-quant-finance.sql`
@@ -56,7 +56,7 @@ A 25-asset factor-model portfolio where `fractal_optimize_portfolio` picks the
 best 8, and a 300-point price series with a deliberate volatility regime
 change at t=150 that `fractal_dimension_dfa`/`_drift` detect automatically.
 `fractal_search_trajectory` then finds which of 10 historical quarterly
-rebalances the new allocation most resembles — the productized form is
+rebalances the new allocation most resembles: the productized form is
 `rebalance_sibling` and `regime_triage`.
 
 ### MedTech / Clinical — `demo-vertical-medtech-clinical.sql`
@@ -70,13 +70,13 @@ fixtures (vessel graph, reference mesh, nerve skeleton).
 ### Recommendation / Search — `demo-vertical-recommendation-search.sql`
 A 300-item, 6-genre catalog for diverse "you might also like" discovery, and
 the **full stateful-diversity loop**: enable Diversify, search, report negative
-feedback on the top result, re-search the same query, confirm it's now avoided
-— the real differentiator over plain top-K or MMR. Productized form:
+feedback on the top result, re-search the same query, confirm it's now avoided:
+the real differentiator over plain top-K or MMR. Productized form:
 `recommend_diverse` and `feedback_audit`. Also covers
 `fractal_cross_modal_search` (content + behavior vectors, weighted).
 
 ### Sovereign / Edge AI — `demo-vertical-sovereign-edge-ai.sql`
-FractalSQL's whole story fits this vertical natively — search, reasoning, and
+FractalSQL's whole story fits this vertical natively: search, reasoning, and
 optimization all run as pure C inside the same Postgres process, no external
 vector-DB service. A 50-node edge fleet: Sniper for an ideal node profile,
 Scout for diverse fleet profiles, `fractal_dimension_boxcount` over a
@@ -106,7 +106,7 @@ sampling via Scout. Productized form: `network_coverage_alert`.
 
 ### Cybersecurity — `demo-vertical-cybersecurity-threat-detection.sql`
 A 35-host fleet across three zones (`fractal_vector(4)`), one host showing a
-stealthy compromise — outbound connections, destination ports, and DNS query
+stealthy compromise: outbound connections, destination ports, and DNS query
 volume all spike while failed-auth stays flat (not a brute-force signature).
 Diverse traffic-profile clustering for threat hunting, a zone-restricted
 ("DMZ only") search, compromise detection via `fractal_search_trajectory`, and
@@ -116,7 +116,7 @@ Productized form: `track_anomaly` and `recommend_diverse`.
 ## Agentic kits (model-on, composed agents)
 
 These three compose the six C-level **Universal Agents** into multi-step
-**Domain Agents** with PL/pgSQL — every section needs reasoning configured
+**Domain Agents** with PL/pgSQL. Every section needs reasoning configured
 ([reasoning-setup.md](reasoning-setup.md)). The `CREATE OR REPLACE FUNCTION`
 blocks at the top of each file are the composition wiring to copy; the
 shipped agents are the productized, non-stubbed form of the same
@@ -128,7 +128,7 @@ A sub-agent dispatcher (`route_task`), a pre-commit safety barrier
 (`outlier_intercept`), SOC incident triage (`anomaly_triage`
 + the `threat_triage` blueprint), and a loop-safety monitor
 (`detect_loop`). This is the kit to read if you want to see **guardrails
-composed in** — the intercept + detect-loop pattern is the template for any
+composed in**: the intercept + detect-loop pattern is the template for any
 autonomous agent that acts on real systems.
 
 ### FinTech — `demo-vertical-agentic-fintech-mcts.sql`
@@ -142,7 +142,7 @@ the weight shift.
 Hybrid memory recall (`recall_hybrid`), feedback-aware
 recommendation (`recommend_diverse`), and state-drift forecasting
 (`trajectory_predict`). Read this kit to see **retrieval composed with
-stateful diversify** — the enable-diversify / search / feedback / re-search
+stateful diversify**: the enable-diversify / search / feedback / re-search
 loop wired into a real agent.
 
 ## Where next
@@ -150,7 +150,7 @@ loop wired into a real agent.
 - **"How does a specific agent work, and what are its inputs?"** → the
   per-agent recipes in [api-agency.md](api-agency.md#the-sixteen-recipes).
 - **"How do I build a proprietary agent that isn't in the box?"** →
-  [composition-guide.md](composition-guide.md) — the six Universal Agents as
+  [composition-guide.md](composition-guide.md): the six Universal Agents as
   building blocks and worked composition patterns.
 - **All sixteen agents end-to-end** → `psql -f /demo/demo-agents.sql`
   (the regression demo every recipe example is drawn from).

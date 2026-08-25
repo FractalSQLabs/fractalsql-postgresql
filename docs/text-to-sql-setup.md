@@ -4,7 +4,7 @@
 
 # Production-Safe Text-to-SQL
 
-`fractal_text_to_sql` is a core primitive of the **Cognition Tier**. It transforms natural-language questions into mechanically validated SQL statements, providing a safe bridge between human intent and database execution.
+`fractal_text_to_sql` is a core primitive of the **Cognition Tier**. It transforms natural-language questions into mechanically validated SQL statements, providing a safe bridge between intent and execution.
 
 Unlike naive LLM-to-SQL wrappers, FractalSQL treats SQL generation as a **hard-constrained engineering problem**, not a probabilistic one. It employs a multi-stage validation pipeline to ensure that every returned statement is syntactically correct, semantically valid, and policy-compliant before it ever reaches your application.
 
@@ -12,7 +12,7 @@ Unlike naive LLM-to-SQL wrappers, FractalSQL treats SQL generation as a **hard-c
 
 ## Quick Start
 
-By default, `fractal_text_to_sql` auto-discovers every table the calling role can `SELECT` from—the simplest and most effective default for most use cases.
+By default, `fractal_text_to_sql` auto-discovers every table the calling role can `SELECT` from. That's the simplest, most effective default for most use cases.
 
 ```sql
 SELECT fractal_text_to_sql('How many orders does customer ''acme'' have?');

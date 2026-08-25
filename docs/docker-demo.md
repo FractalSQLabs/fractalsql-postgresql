@@ -23,16 +23,16 @@ One command, no flags, gives you the bare minimum:
 
 - **Postgres 18** running, DB `fractalsql_demo`, with **both** `fractalsql` and
   `fractalsql_agents` enabled (the base extension + the sixteen agents).
-- **Ollama** running with **no model pulled** (model download is opt-in — step 2).
+- **Ollama** running with **no model pulled** (model download is opt-in, step 2).
 - Every demo + the `bench/` head-to-head benchmarks inside the container (`/demo/`,
-  `/bench/`). Demos are **demoable on demand** — they are not run at init, because
+  `/bench/`). Demos are **demoable on demand**: they are not run at init, because
   reasoning is inert until a model is pulled and the demos are re-runnable.
 
 ```bash
 docker compose up -d
 ```
 
-**Quick test** (works with no model — base Sniper search needs no LLM):
+**Quick test** (works with no model; base Sniper search needs no LLM):
 ```bash
 docker compose exec postgres psql -U postgres -d fractalsql_demo -c \
   "SELECT fractal_search(ARRAY[0.6, 0.8, 0.0]::float8[], iterations => 100);"
@@ -44,7 +44,7 @@ docker compose exec postgres psql -U postgres -d fractalsql_demo -c "\dx"
 # expect: fractalsql, fractalsql_agents
 ```
 
-Run any demo (re-runnable — each recreates its own fixture tables):
+Run any demo (re-runnable; each recreates its own fixture tables):
 ```bash
 docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/<demo>.sql
 ```
@@ -59,8 +59,8 @@ docker compose --profile pull-model run --rm pull-model
 …or, equivalently, `docker compose exec ollama ollama pull gpt-oss:20b` (and
 `nomic-embed-text`). This pulls ~13.8GB (gpt-oss:20b) + a few hundred MB
 (nomic-embed-text). CPU-only inference may take several minutes per query on
-modest hardware — see [docs/reasoning-setup.md](reasoning-setup.md)'s hardware
-section. (Or point `fractalsql.http_url` at a cloud endpoint instead — see
+modest hardware. See [docs/reasoning-setup.md](reasoning-setup.md)'s hardware
+section. (Or point `fractalsql.http_url` at a cloud endpoint instead; see
 [Reasoning Setup](reasoning-setup.md).)
 
 **Quick test** (now that a model is present):
@@ -69,7 +69,7 @@ docker compose exec postgres psql -U postgres -d fractalsql_demo -c \
   "SELECT fractal_reason('summarize this', '{\"note\": \"hello from the demo\"}');"
 ```
 
-Re-run any cognition demo now for full reasoning output — e.g. the sixteen-agent
+Re-run any cognition demo now for full reasoning output: e.g. the sixteen-agent
 validation:
 ```bash
 docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/demo-agents.sql
@@ -77,7 +77,7 @@ docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/demo-a
 
 ### 3. Vectorizer automation
 
-No extra containers — reuse the model from step 2. Enables automatic embedding
+No extra containers: reuse the model from step 2. Enables automatic embedding
 pipelines:
 ```bash
 docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/demo-vectorizer.sql
@@ -151,7 +151,7 @@ does and when to use it.
 
 ### Scout vs. HNSW (in-database demo)
 See how Scout Discovery captures more distinct clusters than standard top-K search.
-This uses FractalSQL's own `fractal_vector` type — no pgvector needed:
+This uses FractalSQL's own `fractal_vector` type. No pgvector needed:
 ```bash
 docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/benchmark.sql
 ```
@@ -164,7 +164,7 @@ docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/benchm
 
 ### Head-to-head benchmark vs. pgvector (optional)
 `bench/` runs the real HNSW-vs-Scout head-to-head from `bench/README.md`. pgvector is
-**optional** because only this benchmark needs it — the demos don't. Its Python deps
+**optional** because only this benchmark needs it; the demos don't. Its Python deps
 are pre-installed in `/bench/.venv`. Enable pgvector and stand up the benchmark DB
 with the `pgvector` profile (creates `fractalsql_bench` with both `vector` and
 `fractalsql` extensions):
@@ -190,5 +190,5 @@ docker compose --profile pull-model down -v  # also remove the pulled-model volu
 docker compose --profile pgvector down -v    # also remove the bench DB volume
 ```
 
-The `-v` flag removes the named volumes (Postgres data, the Ollama model cache) —
-drop it if you want to keep them for next time.
+The `-v` flag removes the named volumes (Postgres data, the Ollama model cache).
+Drop it if you want to keep them for next time.

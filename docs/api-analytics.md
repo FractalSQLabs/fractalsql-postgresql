@@ -55,8 +55,8 @@ Finds the best $K$ assets in a large universe without brute-force exponential co
 
 **Signature**: `fractal_optimize_portfolio(mu float8[], cov float8[], k int4, seed int8 DEFAULT NULL, use_obl boolean DEFAULT false, diffusion_mode text DEFAULT 'gaussian') RETURNS jsonb`
 **Return**: `{sharpe, weights}`.
-**`use_obl`**: apply Opposition-Based Learning to each SFS trial candidate — also evaluate its bound-reflected opposite and keep whichever fits better. Off by default; doubles the fitness-eval cost of the affected diffusion step when enabled.
-**`diffusion_mode`**: `'gaussian'` (default, canonical SFS) or `'levy'` — substitutes a heavy-tailed Lévy-flight step (Mantegna's algorithm) for the Gaussian walk, which can help escape local optima on highly multimodal problems at the cost of occasional very large steps.
+**`use_obl`**: apply Opposition-Based Learning to each SFS trial candidate. Also evaluate its bound-reflected opposite and keep whichever fits better. Off by default; doubles the fitness-eval cost of the affected diffusion step when enabled.
+**`diffusion_mode`**: `'gaussian'` (default, canonical SFS) or `'levy'`: substitutes a heavy-tailed Lévy-flight step (Mantegna's algorithm) for the Gaussian walk, which can help escape local optima on highly multimodal problems at the cost of occasional very large steps.
 
 ### `fractal_optimize_portfolio_multimodal`
 **Enterprise tier.** Diverse-candidate variant of `fractal_optimize_portfolio`: runs `n_restarts` independent single-best searches and greedy-selects up to `n_restarts` structurally distinct candidates instead of one.
@@ -65,13 +65,13 @@ Finds the best $K$ assets in a large universe without brute-force exponential co
 **Return**: `{candidates: [{sharpe, weights}, ...], n_found}`.
 **`overlap_threshold`**: max allowed selected-asset overlap (0.0–1.0, Jaccard-style) between any two returned candidates.
 **`quality_frac`**: a candidate must reach at least `quality_frac` × the best Sharpe found to be kept.
-**`use_obl`/`diffusion_mode`**: same knobs as `fractal_optimize_portfolio`, applied uniformly to every restart. Requires an enterprise core build with OBL/Lévy-flight support — errors with a clear "predates support" hint against an older `fractalsql.enterprise_lib` if you pass non-default values.
+**`use_obl`/`diffusion_mode`**: same knobs as `fractal_optimize_portfolio`, applied uniformly to every restart. Requires an enterprise core build with OBL/Lévy-flight support: errors with a clear "predates support" hint against an older `fractalsql.enterprise_lib` if you pass non-default values.
 
 ### `fractal_optimize_portfolio_multimodal_pareto`
-**Enterprise tier.** Pareto-front sibling of `fractal_optimize_portfolio_multimodal`: runs the same `n_restarts` independent searches, but scores each by decomposed **(return, risk)** instead of scalar Sharpe and reduces them to a genuine non-dominated Pareto front (NSGA-II crowding-distance truncation if the front exceeds `max_front`) — not the sharpe-threshold + asset-overlap selection the sibling above uses. Purely additive: does not change that function's selection semantics.
+**Enterprise tier.** Pareto-front sibling of `fractal_optimize_portfolio_multimodal`: runs the same `n_restarts` independent searches, but scores each by decomposed **(return, risk)** instead of scalar Sharpe and reduces them to a genuine non-dominated Pareto front (NSGA-II crowding-distance truncation if the front exceeds `max_front`). This is not the sharpe-threshold + asset-overlap selection the sibling above uses. Purely additive: does not change that function's selection semantics.
 
 **Signature**: `fractal_optimize_portfolio_multimodal_pareto(mu float8[], cov float8[], k int4, n_restarts int4 DEFAULT 8, max_front int4 DEFAULT 8, seed int8 DEFAULT NULL, use_obl boolean DEFAULT false, diffusion_mode text DEFAULT 'gaussian') RETURNS jsonb`
-**Return**: `{candidates: [{return, risk, sharpe, weights}, ...], n_found}` — `sharpe = return/risk` is informational, not the selection criterion.
+**Return**: `{candidates: [{return, risk, sharpe, weights}, ...], n_found}`: `sharpe = return/risk` is informational, not the selection criterion.
 **`max_front`**: cap on returned front size, `1 <= max_front <= n_restarts`.
 
 ---
