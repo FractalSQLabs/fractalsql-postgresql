@@ -141,10 +141,12 @@ attribution for the published method each implementation follows, per
 standard practice for algorithm-based (rather than code-derived)
 components. Mirrors core's own THIRD-PARTY-NOTICES-COMMUNITY.md.
 
-- **HNSW** (retrieval index backing `fractal_search`/`fractal_search_explore`)
-  -- Malkov, Y. A., & Yashunin, D. A. (2016, revised 2018). "Efficient and
-  Robust Approximate Nearest Neighbor Search Using Hierarchical Navigable
-  Small World Graphs."
+- **HNSW** -- Malkov, Y. A., & Yashunin, D. A. (2016, revised 2018).
+  "Efficient and Robust Approximate Nearest Neighbor Search Using
+  Hierarchical Navigable Small World Graphs." Implemented in the vendored
+  core for a planned persistent-index feature; not currently used by
+  `fractal_search`/`fractal_search_explore`, which do an exact brute-force
+  scan (see `bench/README.md`).
 - **DFA -- Detrended Fluctuation Analysis** (`fractal_dimension_dfa`,
   `fractal_dimension_drift`) -- Peng, C.-K., Buldyrev, S. V., Havlin, S.,
   Simons, M., Stanley, H. E., & Goldberger, A. L. (1994). "Mosaic

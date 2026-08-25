@@ -22,7 +22,9 @@ container, so no local PostgreSQL installation or compiler is required.
 One command, no flags, gives you the bare minimum:
 
 - **Postgres 18** running, DB `fractalsql_demo`, with **both** `fractalsql` and
-  `fractalsql_agents` enabled (the base extension + the sixteen agents).
+  `fractalsql_agents` enabled (the base extension + the sixteen agents; 15
+  run on Community, `fractal_agent_diverse_portfolios` needs the enterprise
+  library, see [Enterprise Tier](enterprise.md)).
 - **Ollama** running with **no model pulled** (model download is opt-in, step 2).
 - Every demo + the `bench/` head-to-head benchmarks inside the container (`/demo/`,
   `/bench/`). Demos are **demoable on demand**: they are not run at init, because

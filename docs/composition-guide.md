@@ -108,7 +108,7 @@ in [Safe Agency](#safe-agency--guardrails):
 
 ```sql
 -- run as a least-privilege role; restrict the statement classes the agent may emit
-ALTER ROLE fractal_analyst SET text_to_sql_allowed_statements = 'SELECT';
+ALTER ROLE fractal_analyst SET fractalsql.text_to_sql_allowed_statements = 'select';
 
 SELECT generated_sql, execution_status, result_json
   FROM fractal_sql_agent(
@@ -177,9 +177,9 @@ you'd treat any NL→SQL surface:
 - **Run it under a least-privilege role.** Grant the connecting role only the
   schema/table privileges you want the agent to be able to read or write.
   Pattern B's `fractal_analyst` role is the model.
-- **Restrict the allowed statements.** The `text_to_sql_allowed_statements`
+- **Restrict the allowed statements.** The `fractalsql.text_to_sql_allowed_statements`
   GUC gates which statement classes the agent may emit; tighten it to the set
-  your workload needs (e.g. `SELECT` only for a read-only analyst).
+  your workload needs (e.g. `select` only for a read-only analyst).
 - **Prefer `auto_execute => false` for exploratory use.** Let the caller
   review `generated_sql` and run it themselves. The cognition agents (e.g.
   `data_analyst`) pass `true` deliberately, *inside* their own composition with

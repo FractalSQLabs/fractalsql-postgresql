@@ -63,6 +63,7 @@ The Agent Tier composes the Discovery and Cognition primitives into autonomous r
 | Agent Function | Dependencies | Capability Provided |
 | --- | --- | --- |
 | `fractal_search_agent` | Embed $\rightarrow$ Scout $\rightarrow$ Reason | End-to-end synthesis of diverse context into a final answer. |
+| `fractal_rag_agent` | Embed $\rightarrow$ Scout $\rightarrow$ Reason | Single-turn RAG: the lighter, focused form of the above. |
 | `fractal_sql_agent` | T2S $\rightarrow$ Parser $\rightarrow$ EXPLAIN $\rightarrow$ LLM | Robust SQL generation with automatic self-correction via retries. |
 | `fractal_agent_plan_explore` | SFS Core $\rightarrow$ Diversify/Repulsion | MCTS-style exploration of non-overlapping strategy trajectories. |
 | `fractal_agent_trajectory_predict` | Telemetry $\rightarrow$ Delta-Vector Logic | Preemptive forecast of state drift by searching the delta vector. |
@@ -101,9 +102,9 @@ FractalSQL provides optimized routines for pre-extracted biological and technica
 ## 📈 Benchmarks & Scaling
 
 ### HNSW vs. Scout Discovery
-In a benchmark of 100k vectors across 50 Gaussian clusters (see `bench/README.md` for the full methodology and how to reproduce it):
-- **HNSW** (top-50) typically discovered **1-2 clusters**, at millisecond latency.
-- **Scout** (pop=50) typically discovered **20-35 clusters**, at multi-second latency, roughly **6000x slower** than HNSW at this scale.
+In a benchmark of 100k vectors across 50 Gaussian clusters, measured directly against current Scout (see `bench/README.md` for the full methodology and how to reproduce it):
+- **HNSW** (top-50) typically discovered **1 cluster**, in single-digit milliseconds.
+- **Scout** (pop=50) typically discovered **6-9 clusters**, in roughly 1.5-1.7 seconds, on the order of **100x+ slower** than HNSW at this scale (measured 130-270x across repeated runs).
 
 That tradeoff is the whole point of Scout Mode, not a hidden cost: it's $O(N \times d)$ (linear scan) by design, and it's the only way here to guarantee your LLM receives a genuinely diverse set of perspectives rather than a single collapsed cluster. It is not a drop-in replacement for HNSW. Use it where diversity matters more than latency (e.g. curated sub-corpora, not full-corpus top-k at scale).
 
@@ -128,6 +129,7 @@ Using the native `fractal_vector` type gives close to a **~2x** speedup over `fl
 
 **Agency**
 - `fractal_search_agent(...)`: End-to-end synthesis. $\rightarrow$ **[api-agency.md](api-agency.md)**
+- `fractal_rag_agent(...)`: Single-turn RAG. $\rightarrow$ **[api-agency.md](api-agency.md)**
 - `fractal_sql_agent(...)`: Self-correcting SQL execution. $\rightarrow$ **[api-agency.md](api-agency.md)**
 - `fractal_agent_plan_explore(...)`: Strategy exploration. $\rightarrow$ **[api-agency.md](api-agency.md)**
 - `fractal_agent_trajectory_predict(...)`: Drift projection. $\rightarrow$ **[api-agency.md](api-agency.md)**

@@ -95,7 +95,7 @@ macOS (arm64/x86_64). See the compatibility table below.
 
 Everything above is Community edition and fully functional on its own.
 Discovery, Cognition, and Agency don't depend on anything in this section. For regulated
-environments (finance, healthcare, defense) that need to **prove, not just
+environments that need to **prove, not just
 claim**, what an autonomous agent decided and why, an optional drop-in
 library adds a tamper-evident, hash-chained decision ledger: no rebuild, no
 extension reload, activated by a single GUC. See
@@ -114,7 +114,9 @@ what the hash chain can and can't prove.
 | 17 | ✓ | ✓ | ✓ |
 | 18 | ✓ | ✓ | ✓ |
 
-**License**: Apache-2.0 AND BSD-2-Clause. See `LICENSE`.
+**License**: Apache-2.0. See `LICENSE`. Third-party components are under
+their own permissive licenses (BSD-2-Clause, MIT, and others) --
+see `THIRD-PARTY-NOTICES.md`.
 
 For enterprise editions, licensing, and support, contact
 **enterprise@fractalsqlabs.com**.

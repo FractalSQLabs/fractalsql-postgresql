@@ -10,7 +10,8 @@ and island recall on a synthetic Gaussian-cluster dataset.
 
 ## Prerequisites
 
-- PostgreSQL 16 with `pgvector` and `fractalsql` installed
+- PostgreSQL 14-18 with `pgvector` and `fractalsql` installed (the example
+  output below is from a PG18 run; nothing here is version-specific)
 - Python 3.9+
 - A database you can create/drop tables in (default DSN expects
   a database named `fractalsql_bench`)
@@ -45,38 +46,50 @@ python3 bench/head_to_head.py            # ~1–3 min for 5 queries
 
 ## What you should see
 
-The output is a per-query table followed by an average:
+The output is a per-query table followed by an average. This example is
+from an actual run, not a hand-written estimate:
 
 ```
-qi  anchor      |       HNSW ms   HNSW recall    |       SFS ms   SFS recall
--------------------------------------------------------------------------
- 0  cluster  12 |        3.2      1 / 50         |    18400.1    28 / 50
- 1  cluster   7 |        2.8      1 / 50         |    18100.4    31 / 50
+Benchmark: 100000 stored vectors, 50 clusters, dim=128
+  HNSW: ef_search=40, LIMIT 50
+  Scout: population=50, iterations=8, mdn=2, walk=0.0 (brute-force relevance scan + MMR), col=emb_arr
+
+qi  anchor      |       HNSW ms   HNSW recall    |     Scout ms   Scout recall
+------------------------------------------------------------------------------
+ 0  cluster  23 |        8.4      1 / 50     |     1629.6      5 / 50
+ 1  cluster  25 |        7.2      1 / 50     |     1532.9      8 / 50
 ...
 
 Averages over 5 queries:
-  HNSW:      3.0 ms   recall  1.0 / 50
-  SFS :  18200.0 ms   recall 29.4 / 50
-  SFS is 6000x slower and discovers 29x more distinct clusters
+  HNSW:     11.8 ms   recall  1.0 / 50
+  Scout:  1553.4 ms   recall  6.2 / 50
+  Scout is 131.7x slower and discovers 6.2x more distinct clusters
 ```
 
 The shape of the result will vary run to run, but the pattern is robust:
-HNSW finds ~1–2 clusters at millisecond latency; Scout Mode finds 20–35
-clusters at multi-second latency. This is the intended comparison —
-different algorithms solving different problems.
+HNSW finds 1 cluster at single-digit-millisecond latency; Scout Mode finds
+6-9 clusters at 1.5-1.7 seconds. This is the intended comparison: different
+algorithms solving different problems.
+
+The head-to-head above runs at `data_gen.py`'s own default, `d=128`. The
+Scaling notes table below uses `d=768` instead (a common real embedding
+width), which is most of why its per-query times are ~6-7x higher at the
+same N (Scout's cost is O(N × D)).
 
 ## Scaling notes
 
 The SFS fitness is `min over stored_set of ||candidate - v||²`, evaluated
 brute-force. Per-fitness cost is O(N × D), and SFS makes ~2500 evaluations
-in a population=50, iterations=8 run. That scales linearly with the
-stored-set size:
+in a population=50, iterations=8 run. That scales roughly linearly with the
+stored-set size; the first two rows below are measured directly. The third
+is a linear extrapolation, not measured, so treat it as a rough order of
+magnitude, not a promise:
 
-| N (stored vectors) | Approx per-query SFS time at d=768 |
-| ------------------ | ---------------------------------- |
-| 10 000             |   2–5 seconds                      |
-| 100 000 (default)  |  20–60 seconds                     |
-| 1 000 000          |   3–10 minutes                     |
+| N (stored vectors) | Approx per-query Scout time at d=768 |
+| ------------------- | ------------------------------------- |
+| 10 000              | ~0.85 seconds (measured)              |
+| 100 000 (default)   | ~10 seconds (measured)                |
+| 1 000 000           | ~100 seconds (extrapolated)           |
 
 HNSW is approximately N-independent in comparison. For production use
 beyond ~100k vectors, a future version of `fractal_search_explore`
@@ -148,7 +161,7 @@ Measure on your own data before treating either number as a promise.
 population search internally (`telemetry_topk_srf`'s hardcoded
 `population_size=50, max_generation=15`), the same cost class as
 `fractal_search_explore`/Scout mode above — it is not a cheap distance-
-sort top-k. The "Scaling notes" table above (20-60s at N=100k, d=768,
+sort top-k. The "Scaling notes" table above (~10s at N=100k, d=768,
 Scout Mode) is the right intuition for sub-benchmark (c) too, and the
 absolute latency you see is dominated by that SFS cost, not by the
 `float8[]`-vs-`fractal_vector` unpack difference this arm is actually
