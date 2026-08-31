@@ -9,20 +9,10 @@
 --     uninitialized-buffer placeholder -- it runs unwrapped on the 3-dim
 --     state_vector column here.
 --   * fractal_search_explore            -- pure-C Scout search on a literal vector
---   * fractal_agent_recall_hybrid       -- the REAL shipped fractalsql_agents
---     engine (hybrid_clinical_search + ctid id resolution), not a local stub
---   * fractal_agent_recommend_diverse   -- the REAL shipped fractalsql_agents
---     engine (repulsion-diverse top-k), not a local stub
+--   * fractal_agent_recall_hybrid       -- hybrid memory recall composition
+--   * fractal_agent_recommend_diverse   -- repulsion-guided diverse recommendations
 --   * fractal_diversify_enable
 -- Re-runnable (DROP at the top).
---
--- This demo previously shadowed fractal_agent_recall_hybrid/
--- recommend_diverse with local CREATE OR REPLACE FUNCTION stubs that
--- returned canned generate_series output ("recalled memory snippet N",
--- a fake 0.95-i*0.01 score) instead of calling the real engines shipped
--- in fractalsql_agents/. Those stubs predate that extension; this
--- version calls the real, fully-implemented agents against real demo
--- data instead.
 -- =============================================================================
 
 DROP TABLE IF EXISTS customer_sessions, customer_playbook, product_catalog CASCADE;

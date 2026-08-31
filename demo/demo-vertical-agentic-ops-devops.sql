@@ -11,19 +11,11 @@
 --   * fractal_dimension_drift     -- non-degenerate drifting latency series
 --   * fractal_vectorizer_*        -- vectorizes the incident text
 --   * fractal_agent_route_task, fractal_agent_outlier_intercept,
---     fractal_agent_anomaly_triage -- the REAL shipped fractalsql_agents
---     engines, not the local stubs this file used to define
+--     fractal_agent_anomaly_triage -- task routing, outlier interception,
+--     and drift+reason threat triage compositions
 -- Re-runnable: tear down a prior run's vectorizer config + queue (the config
 -- outlives the table in v1 -- there is no fractal_vectorizer_drop), then drop
 -- the demo tables. The unconditional DELETEs are no-ops on a first run.
---
--- This demo previously shadowed three real agents with local
--- CREATE OR REPLACE FUNCTION stubs: fractal_agent_route_task and
--- fractal_agent_outlier_intercept returned hardcoded values regardless
--- of input, and fractal_agent_threat_triage duplicated real drift+reason
--- logic under a name fractalsql_agents/'s own comments say was later
--- promoted into the real fractal_agent_anomaly_triage. This version
--- calls the three real, fully-implemented engines instead.
 -- =============================================================================
 
 DELETE FROM fractal_vectorizer_rate_window WHERE vectorizer_id IN

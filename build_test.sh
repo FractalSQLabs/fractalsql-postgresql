@@ -650,7 +650,7 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$("${PSQL[@]}" -c "SELECT fractal_version();" 2>&1)
-  [ "$ver" = "2.0.4" ] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.4)"
+  [ "$ver" = "2.0.5" ] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.5)"
   # fractal_search convergence: cosine similarity to query ~1
   local r; r=$("${PSQL[@]}" -c "
      WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)

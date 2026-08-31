@@ -788,14 +788,10 @@ BEGIN
             patient_table;
     END IF;
 
-    -- 2. Real Analytics: up to k nearest patients in the cohort (hybrid
-    -- search), resolved to the named patient id via the ctid mapping in the
-    -- same query -- the fractal_agent_recall_hybrid pattern above, adapted
-    -- here so the cohort-search and id-resolution steps aren't two separate
-    -- round trips. Ranked ascending by distance; nearest_cohort_id/
-    -- cohort_distance below are always cohort_matches[0], kept for
-    -- backward compatibility with callers written against the old
-    -- single-match return shape.
+    -- 2. Real Analytics: up to k nearest patients in the cohort, ranked
+    -- ascending by distance and resolved to the named patient id in one
+    -- query. nearest_cohort_id/cohort_distance below stay cohort_matches[0]
+    -- for backward compatibility.
     EXECUTE format(
         'SELECT jsonb_agg(jsonb_build_object(''id'', x.idv, ''distance'', r.distance) ORDER BY r.distance) '
         'FROM fractal_hybrid_clinical_search(%L, %L, $1, $2, %L) r '
@@ -810,17 +806,13 @@ BEGIN
     resolved_id := (cohort_matches->0->>'id')::bigint;
     cohort_dist := (cohort_matches->0->>'distance')::float8;
 
-    -- 3. Real Analytics: drift from baseline to current (trajectory
-    -- search). Always a single result by design: this is a scalar "how far
-    -- did this patient move" question, not a k-NN one, so k does not apply
-    -- here.
+    -- 3. Real Analytics: drift from baseline to current. Always a single
+    -- result; k applies only to the cohort search above.
     SELECT doc_id, distance INTO traj_doc, traj_dist
       FROM fractal_search_trajectory(patient_table, vec_col, baseline_vec, current_vec, 1);
 
-    -- 4. Real Cognition: reason a triage over both signals. Reasons only
-    -- over the single nearest cohort match plus the drift distance, not
-    -- over every entry in cohort_matches, to keep this call's cost and
-    -- wording unchanged regardless of k.
+    -- 4. Real Cognition: reason a triage over the nearest match and drift
+    -- only, not every entry in cohort_matches.
     rationale := fractal_reason(
         'Triage this patient: nearest cohort match is id ' || COALESCE(resolved_id::text, '?') ||
         ' at cosine distance ' || cohort_dist || '; baseline->current drift distance is ' || traj_dist ||
@@ -848,14 +840,13 @@ COMMENT ON FUNCTION fractal_agent_patient_deterioration_triage(text, text, float
   'fractal_hybrid_clinical_search for the k nearest cohort patients and '
   'fractal_search_trajectory for the baseline->current drift, resolves each '
   'cohort match to its named patient id (id_col) via a ctid-row_number '
-  'mapping, and calls fractal_reason to synthesize a triage over the single '
+  'mapping, and calls fractal_reason to synthesize a triage over the '
   'nearest match and the drift. Returns (nearest_cohort_id, '
   'cohort_distance, drift_distance, rationale, cohort_matches), where '
   'cohort_matches is a jsonb array of up to k {"id":..,"distance":..} '
-  'entries ranked ascending by distance and nearest_cohort_id/ '
-  'cohort_distance are always cohort_matches[0]. k controls only the '
-  'cohort-search width; the drift search is always a single result. The '
-  'cohort_doc_ids parameter lets the caller pass a multi-predicate cohort '
+  'entries ranked ascending by distance; nearest_cohort_id/cohort_distance '
+  'are always cohort_matches[0]. The cohort_doc_ids parameter lets the '
+  'caller pass a multi-predicate cohort '
   '(e.g. age>65 AND condition=sepsis) that fractal_agent_recall_hybrid''s '
   'single (filter_col, filter_val) cannot express. Raises a clean ERROR if the '
   'patient table is empty or the cohort matches no rows. id_col must be '

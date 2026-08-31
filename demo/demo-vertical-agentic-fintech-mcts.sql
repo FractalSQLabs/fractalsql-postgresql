@@ -11,20 +11,11 @@
 --                                       ERROR is caught and surfaced as
 --                                       execution_status='execution_failed',
 --                                       not propagated to abort the call)
---   * fractal_agent_rebalance_sibling -- the REAL shipped fractalsql_agents
---                                       engine (optimizer + trajectory search),
---                                       not a local fractal_agent_portfolio_
---                                       rebalance stub
+--   * fractal_agent_rebalance_sibling -- portfolio rebalance (optimizer +
+--                                       trajectory search) composition
 --   * fractal_reason                 -- rationale synthesis
 --   * fractal_vectorizer_*           -- vectorizes strategy descriptions
 -- Re-runnable (see the teardown block at the top).
---
--- This demo previously shadowed the rebalance step with a local
--- CREATE OR REPLACE FUNCTION fractal_agent_portfolio_rebalance stub that
--- hardcoded drift_score = 0.042 instead of computing anything. That stub
--- predates fractalsql_agents/, whose own comments note it was promoted
--- into the real fractal_agent_rebalance_sibling engine; this version
--- calls that real engine against a real historical-allocations table.
 -- =============================================================================
 
 DELETE FROM fractal_vectorizer_rate_window WHERE vectorizer_id IN
