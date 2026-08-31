@@ -178,7 +178,7 @@ static char *fractal_text_to_sql_internal(const char *question, ArrayType *table
 #include "parser/analyze.h"   /* parse_analyze_fixedparams, Query.hasModifyingCTE */
 
 #define FSQL_EDITION "Community"
-#define FSQL_VERSION "2.0.3"
+#define FSQL_VERSION "2.0.4"
 
 /* B4-extended (H3) — supply-side DoS guards.
  *
