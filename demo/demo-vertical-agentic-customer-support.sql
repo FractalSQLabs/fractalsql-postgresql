@@ -9,13 +9,23 @@
 --     uninitialized-buffer placeholder -- it runs unwrapped on the 3-dim
 --     state_vector column here.
 --   * fractal_search_explore            -- pure-C Scout search on a literal vector
---   * fractal_agent_recall_hybrid       -- hybrid memory recall composition
---   * fractal_agent_recommend_diverse   -- repulsion-guided diverse recommendations
+--   * fractal_agent_recall_hybrid       -- the REAL shipped fractalsql_agents
+--     engine (hybrid_clinical_search + ctid id resolution), not a local stub
+--   * fractal_agent_recommend_diverse   -- the REAL shipped fractalsql_agents
+--     engine (repulsion-diverse top-k), not a local stub
 --   * fractal_diversify_enable
 -- Re-runnable (DROP at the top).
+--
+-- This demo previously shadowed fractal_agent_recall_hybrid/
+-- recommend_diverse with local CREATE OR REPLACE FUNCTION stubs that
+-- returned canned generate_series output ("recalled memory snippet N",
+-- a fake 0.95-i*0.01 score) instead of calling the real engines shipped
+-- in fractalsql_agents/. Those stubs predate that extension; this
+-- version calls the real, fully-implemented agents against real demo
+-- data instead.
 -- =============================================================================
 
-DROP TABLE IF EXISTS customer_sessions CASCADE;
+DROP TABLE IF EXISTS customer_sessions, customer_playbook, product_catalog CASCADE;
 
 -- 1. Setup customer session telemetry -- a single customer (cust-abc) drifting
 -- from onboarding toward churn across five sessions. session_id is the PK the
@@ -25,7 +35,7 @@ CREATE TABLE customer_sessions (
     session_id        bigint PRIMARY KEY,
     customer_id       text,
     state_vector      float8[],
-    sentiment_score   float8,
+    sentiment_score    float8,
     last_interaction  timestamp
 );
 
@@ -36,45 +46,46 @@ VALUES
 (102, 'cust-abc', ARRAY[0.6, 0.2, 0.1], 0.4, now() - interval '10 days'),
 (103, 'cust-abc', ARRAY[0.8, 0.2, 0.1], 0.2, now());
 
--- -----------------------------------------------------------------------------
--- DOMAIN AGENT IMPLEMENTATIONS (PL/pgSQL Compositions)
--- -----------------------------------------------------------------------------
+-- 2. A playbook of past churn-recovery cases: what worked (or didn't) for
+-- other customers whose state vector, at the point of intervention, looked
+-- like this. fractal_agent_recall_hybrid searches this by real vector
+-- similarity against session 103's current state.
+CREATE TABLE customer_playbook (
+    case_id       bigint PRIMARY KEY,
+    customer_id   text,
+    state_vector  float8[],
+    resolution    text
+);
 
--- Hybrid State Memory: Fuses strict metadata filters with non-linear state drift
-CREATE OR REPLACE FUNCTION fractal_agent_recall_hybrid(query text, mem_table text, alpha float8)
-RETURNS TABLE(mem_id bigint, content text) AS $$
-BEGIN
-    -- In a real impl, this blends a SQL filter with a fractal_search_trajectory call
-    RETURN QUERY SELECT
-        i::bigint,
-        'recalled memory snippet ' || i::text
-    FROM generate_series(1, 5) AS i;
-END;
-$$ LANGUAGE plpgsql;
+INSERT INTO customer_playbook (case_id, customer_id, state_vector, resolution) VALUES
+(1, 'cust-def', ARRAY[0.75, 0.22, 0.12], 'Escalated to a retention specialist with a loyalty discount; saved'),
+(2, 'cust-ghi', ARRAY[0.30, 0.10, 0.05], 'Proactive check-in call resolved early-stage frustration'),
+(3, 'cust-jkl', ARRAY[0.82, 0.18, 0.09], 'Offered a downgrade path instead of cancellation; saved'),
+(4, 'cust-mno', ARRAY[0.05, 0.05, 0.05], 'No intervention needed, healthy customer');
 
--- Feedback-Aware Recommender: Generates diverse recommendations using repulsion
-CREATE OR REPLACE FUNCTION fractal_agent_recommend_diverse(customer_id text, catalog_table text, k int)
-RETURNS TABLE(item_id bigint, score float8) AS $$
-BEGIN
-    -- 1. Enable repulsion to avoid repeating recently rejected items
-    PERFORM fractal_diversify_enable();
+-- 3. A retention-offer catalog for recommend_diverse to pick a diverse,
+-- non-redundant set of interventions from.
+CREATE TABLE product_catalog (
+    item_id  bigint PRIMARY KEY,
+    name     text,
+    emb      float8[]
+);
 
-    -- 2. Use Scout search to find diverse candidate items
-    RETURN QUERY SELECT
-        i::bigint,
-        0.95 - (i * 0.01)::float8
-    FROM generate_series(1, k) AS i;
-END;
-$$ LANGUAGE plpgsql;
+INSERT INTO product_catalog (item_id, name, emb) VALUES
+(1, 'Loyalty Discount 20%',      ARRAY[0.80, 0.20, 0.10]),
+(2, 'Free Premium Upgrade',      ARRAY[0.75, 0.25, 0.15]),
+(3, 'Dedicated Support Line',    ARRAY[0.60, 0.30, 0.20]),
+(4, 'Downgrade to Basic Plan',   ARRAY[0.40, 0.10, 0.05]),
+(5, 'Early Renewal Bonus',       ARRAY[0.20, 0.10, 0.10]);
 
 -- -----------------------------------------------------------------------------
 -- DEMONSTRATION
 -- -----------------------------------------------------------------------------
 
--- 2. Enable stateful diversification to avoid repeating failed scripts
+-- 4. Enable stateful diversification to avoid repeating failed scripts
 SELECT fractal_diversify_enable();
 
--- 3. Forecast trajectory drift toward churn
+-- 5. Forecast trajectory drift toward churn
 -- Searches the corpus for the nearest predicted state to the delta between
 -- the baseline session (100) and the latest session (103). Returns a real
 -- predicted_state_vector (length 3, derived from the data) and a
@@ -85,15 +96,18 @@ SELECT * FROM fractal_agent_trajectory_predict(
     5     -- forecast steps
 );
 
--- 4. Hybrid Memory Recall
--- Recall diverse past interactions to synthesize a recovery plan
-SELECT * FROM fractal_agent_recall_hybrid(
-    'How did we solve churn for similar customer profiles in Q1?',
-    'customer_sessions',
-    0.7 -- alpha blend
+-- 6. Hybrid Memory Recall (the real fractal_agent_recall_hybrid engine)
+-- Recall past playbook cases whose state vector, at intervention time, was
+-- close to this customer's current drifting state (session 103).
+SELECT mem_id, content
+FROM fractal_agent_recall_hybrid(
+    'customer_playbook', 'state_vector',
+    ARRAY[0.8, 0.2, 0.1]::float8[],
+    NULL, NULL,   -- no cohort filter: search the whole playbook
+    5, 'case_id', 'resolution'
 );
 
--- 5. Repulsion-guided intervention
+-- 7. Repulsion-guided intervention
 -- Use fractal_search to find the most diverse (non-redundant) recovery strategies
 SELECT * FROM fractal_search_explore(
     'customer_sessions', 'state_vector',
@@ -101,5 +115,11 @@ SELECT * FROM fractal_search_explore(
     '{"population_size": 5}'
 );
 
--- 6. Diverse Recommendations
-SELECT * FROM fractal_agent_recommend_diverse('cust-abc', 'product_catalog', 5);
+-- 8. Diverse Recommendations (the real fractal_agent_recommend_diverse engine)
+-- Repulsion-diverse top-k retention offers for this customer's current state.
+SELECT item_id, score
+FROM fractal_agent_recommend_diverse(
+    'product_catalog', 'emb',
+    ARRAY[0.8, 0.2, 0.1]::float8[],
+    5, 'item_id'
+);

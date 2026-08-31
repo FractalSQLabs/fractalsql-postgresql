@@ -2103,6 +2103,17 @@ gate_23_agents() {
   grep <<< "$r11" -Eq '^[0-9]+$' \
     && pass "23 agents: patient_deterioration_triage returns the real nearest cohort id (hybrid search + ctid resolution)" \
     || fail "23 agents: expected a numeric nearest_cohort_id, got: $r11"
+  local r11m; r11m=$("${PSQL[@]}" -c "
+     SELECT jsonb_array_length(cohort_matches) FROM fractal_agent_patient_deterioration_triage(
+       'bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[],
+       ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[],
+       (SELECT array_agg(doc_id ORDER BY doc_id) FROM
+          (SELECT row_number() OVER (ORDER BY ctid)-1 AS doc_id
+             FROM bt_agents_patients WHERE age>65 AND condition='sepsis') x),
+       5, 'id');" 2>&1)
+  [ "$r11m" = "2" ] \
+    && pass "23 agents: patient_deterioration_triage cohort_matches now honors k (got 2 of 2 qualifying rows)" \
+    || fail "23 agents: expected cohort_matches length 2, got: $r11m"
   local r11b; r11b=$("${PSQL[@]}" -c "
      SELECT rationale FROM fractal_agent_patient_deterioration_triage(
        'bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[],

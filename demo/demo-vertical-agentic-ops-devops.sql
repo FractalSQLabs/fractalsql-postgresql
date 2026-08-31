@@ -10,9 +10,20 @@
 --   * fractal_rag_agent           -- was a zero-exerciser before this demo
 --   * fractal_dimension_drift     -- non-degenerate drifting latency series
 --   * fractal_vectorizer_*        -- vectorizes the incident text
+--   * fractal_agent_route_task, fractal_agent_outlier_intercept,
+--     fractal_agent_anomaly_triage -- the REAL shipped fractalsql_agents
+--     engines, not the local stubs this file used to define
 -- Re-runnable: tear down a prior run's vectorizer config + queue (the config
 -- outlives the table in v1 -- there is no fractal_vectorizer_drop), then drop
 -- the demo tables. The unconditional DELETEs are no-ops on a first run.
+--
+-- This demo previously shadowed three real agents with local
+-- CREATE OR REPLACE FUNCTION stubs: fractal_agent_route_task and
+-- fractal_agent_outlier_intercept returned hardcoded values regardless
+-- of input, and fractal_agent_threat_triage duplicated real drift+reason
+-- logic under a name fractalsql_agents/'s own comments say was later
+-- promoted into the real fractal_agent_anomaly_triage. This version
+-- calls the three real, fully-implemented engines instead.
 -- =============================================================================
 
 DELETE FROM fractal_vectorizer_rate_window WHERE vectorizer_id IN
@@ -20,7 +31,7 @@ DELETE FROM fractal_vectorizer_rate_window WHERE vectorizer_id IN
 DELETE FROM fractal_vectorizer_queue WHERE vectorizer_id IN
     (SELECT id FROM fractal_vectorizers WHERE source_table = 'incident_logs');
 DELETE FROM fractal_vectorizers WHERE source_table = 'incident_logs';
-DROP TABLE IF EXISTS incident_logs, agent_capabilities CASCADE;
+DROP TABLE IF EXISTS incident_logs, agent_capabilities, known_bad_states CASCADE;
 
 -- 1. Setup synthetic incident telemetry
 CREATE TABLE incident_logs (
@@ -81,62 +92,16 @@ VALUES
 ('root-cause-analyzer', ARRAY[0.1, 0.2, 0.3]),
 ('rollback-executor', ARRAY[0.9, 0.8, 0.7]);
 
--- -----------------------------------------------------------------------------
--- DOMAIN AGENT IMPLEMENTATIONS (PL/pgSQL Compositions)
--- -----------------------------------------------------------------------------
-
--- Sub-Agent Dispatcher: Matches workload to capability
-CREATE OR REPLACE FUNCTION fractal_agent_route_task(task text, cap_map jsonb, budget int)
-RETURNS TABLE(routed_to text, confidence float8, remaining_budget int) AS $$
-BEGIN
-    -- In a real impl, we'd embed the 'task' and search the 'cap_map'
-    -- Here we simulate the routing logic using FractalSQL primitives
-    RETURN QUERY SELECT
-        'root-cause-analyzer'::text,
-        0.92::float8,
-        (budget - 150)::int;
-END;
-$$ LANGUAGE plpgsql;
-
--- Pre-Commit Safety Barrier: Screens action vectors against bad state clusters
-CREATE OR REPLACE FUNCTION fractal_agent_outlier_intercept(state_vec float8[], history_table text, threshold float8)
-RETURNS TABLE(intercepted boolean, reason text) AS $$
-BEGIN
-    -- Use fractal_search_telemetry to find distance to known 'bad' states
-    -- If distance < threshold, we intercept.
-    RETURN QUERY SELECT
-        false::boolean,
-        'state within normal variance'::text;
-END;
-$$ LANGUAGE plpgsql;
-
--- SOC Incident Triage: Combines drift (on the latency metric) with reasoning.
--- Uses latency_ms (a non-degenerate drifting series) rather than state_hash
--- (a period-2 toggle, which is too repetitive for DFA drift analysis).
-CREATE OR REPLACE FUNCTION fractal_agent_threat_triage(host_id text, log_table text, baseline_window int)
-RETURNS TABLE(threat_score float8, anomaly_type text, triage_summary text) AS $$
-DECLARE
-    drift_res jsonb;
-    reasoning_res text;
-BEGIN
-    -- 1. Analyze drift in the latency metric
-    drift_res := fractal_dimension_drift(
-        (SELECT array_agg(latency_ms ORDER BY event_ts) FROM incident_logs WHERE agent_id = host_id),
-        baseline_window
-    );
-
-    -- 2. Reason over the drift result
-    reasoning_res := fractal_reason(
-        'Triage this security anomaly: ' || drift_res::text,
-        '{"host": "' || host_id || '"}'
-    );
-
-    RETURN QUERY SELECT
-        COALESCE((drift_res->>'drift')::float8, 0.0),
-        'vector_drift'::text,
-        reasoning_res;
-END;
-$$ LANGUAGE plpgsql;
+-- A small library of known-bad deployment states for
+-- fractal_agent_outlier_intercept to screen proposed actions against.
+CREATE TABLE known_bad_states (
+    state_id     bigint PRIMARY KEY,
+    description  text,
+    state_vec    float8[]
+);
+INSERT INTO known_bad_states (state_id, description, state_vec) VALUES
+(1, 'auth-service unreachable, retry storm',  ARRAY[0.5, 0.5, 0.5]),
+(2, 'disk pressure cascading restarts',       ARRAY[0.9, 0.1, 0.2]);
 
 -- -----------------------------------------------------------------------------
 -- DEMONSTRATION
@@ -151,26 +116,33 @@ SELECT * FROM fractal_agent_detect_loop(
     (SELECT array_agg(state_hash ORDER BY event_ts) FROM incident_logs WHERE agent_id = 'bot-deploy-01')
 );
 
--- 5. Multi-Agent Routing
-SELECT * FROM fractal_agent_route_task(
-    'High-frequency authentication retry loop detected in us-east-1',
-    '{"root-cause-analyzer": [0.1, 0.2, 0.3], "rollback-executor": [0.9, 0.8, 0.7]}',
+-- 5. Multi-Agent Routing (the real fractal_agent_route_task engine)
+-- Real nearest-capability search over agent_capabilities.embedding, not a
+-- hardcoded routed_to/confidence.
+SELECT routed_to, confidence, remaining_budget, rationale
+FROM fractal_agent_route_task(
+    ARRAY[0.15, 0.25, 0.35]::float8[],
+    'agent_capabilities', 'embedding', 'capability_name',
     1000
 );
--- Result: routed_to = 'root-cause-analyzer', confidence = 0.92
 
--- 6. Outlier Interception
-SELECT * FROM fractal_agent_outlier_intercept(
-    ARRAY[0.5, 0.5, 0.5],
-    'incident_logs',
+-- 6. Outlier Interception (the real fractal_agent_outlier_intercept engine)
+-- Real cosine distance to the nearest known_bad_states row. This state_vec
+-- matches state_id 1 exactly (distance 0), so intercepted = true.
+SELECT intercepted, reason
+FROM fractal_agent_outlier_intercept(
+    ARRAY[0.5, 0.5, 0.5]::float8[],
+    'known_bad_states', 'state_vec',
     0.8
 );
 
--- 7. Threat Triage on the drifting latency metric (runs unwrapped: the
--- latency_ms series is a non-degenerate step-up signal with a 32-point recent
--- window, so fractal_dimension_drift succeeds -- window=16 would be too small
--- for DFA on the recent window and return rc=-1).
-SELECT * FROM fractal_agent_threat_triage('bot-deploy-01', 'incident_logs', 32);
+-- 7. Threat Triage on the drifting latency metric (the real
+-- fractal_agent_anomaly_triage engine, runs unwrapped: the latency_ms
+-- series is a non-degenerate step-up signal with a 32-point recent window,
+-- so fractal_dimension_drift succeeds -- window=16 would be too small for
+-- DFA on the recent window and return rc=-1).
+SELECT threat_score, anomaly_type, triage_summary
+FROM fractal_agent_anomaly_triage('incident_logs', 'latency_ms', 'event_ts', 'agent_id', 'bot-deploy-01', 32);
 
 -- 8. Localized Root-Cause Synthesis via Search Agent
 -- Embeds the query (->768 for nomic-embed-text) and runs a diverse Scout

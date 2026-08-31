@@ -223,10 +223,12 @@ COMMENT ON FUNCTION fractal_agent_plan_explore(initial_state text, strategy_tabl
 
 -- fractal_agent_trajectory_predict: forecast a future state vector by
 -- extrapolating the delta from baseline_id and searching the corpus for
--- the nearest predicted state. NOTE: the current core implementation is a
--- stub -- the predicted/current vectors are not yet read from the table,
--- so the returned state vector is a constant placeholder. The signature
--- is stable; the body will be filled in a later core revision.
+-- the nearest predicted state. Resolves table_name's primary key via
+-- pg_catalog, reads the baseline row (PK = baseline_id) and the current
+-- row (max PK) via SPI, derives dim from the baseline vector, computes a
+-- real delta (current - baseline), and Scout-searches the corpus for the
+-- nearest point to that delta. Returns the real predicted state vector,
+-- the real drift distance, and whether it exceeds the 0.5 risk threshold.
 CREATE FUNCTION fractal_agent_trajectory_predict(
     table_name      text,
     vector_col      text,
@@ -237,7 +239,7 @@ AS 'MODULE_PATHNAME', 'fractal_agent_trajectory_predict'
 LANGUAGE C VOLATILE STRICT;
 
 COMMENT ON FUNCTION fractal_agent_trajectory_predict(table_name text, vector_col text, baseline_id int8, forecast_steps int4) IS
-'Forecast a future state vector by extrapolating the delta from baseline_id and searching the corpus for the nearest predicted state. (Current implementation is a stub.)';
+'Forecast a future state vector by extrapolating the real delta (current - baseline, both read from table_name.vector_col via SPI, keyed by baseline_id and the max primary key) and searching the corpus for the nearest predicted state. Returns (predicted_state_vector, projected_drift_delta, risk_threshold_exceeded), all real computed values.';
 
 -- fractal_agent_detect_loop: DFA-based safety monitor. Analyzes the
 -- scaling exponent (alpha) of an agent state-hash sequence (int8[]) to

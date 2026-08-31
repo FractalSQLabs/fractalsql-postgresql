@@ -264,7 +264,7 @@ INSERT INTO agents_demo_patients VALUES
     (4, 81, 'sepsis',    ARRAY[0.85, -0.75, 0.65, 0.55]);
 
 \echo '=== fractal_agent_patient_deterioration_triage (age>65 sepsis cohort) ==='
-SELECT nearest_cohort_id, cohort_distance, drift_distance, rationale
+SELECT nearest_cohort_id, cohort_distance, drift_distance, rationale, cohort_matches
 FROM fractal_agent_patient_deterioration_triage(
     'agents_demo_patients', 'vitals',
     ARRAY[0.9, -0.8, 0.7, 0.6]::float8[],

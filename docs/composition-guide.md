@@ -192,7 +192,7 @@ action's state vector against known-bad state clusters before the action runs.
 
 ---
 
-## Two gotchas to carry over
+## Two notes to carry over
 
 These bit the shipped agents; they'll bite yours too.
 

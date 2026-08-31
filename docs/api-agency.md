@@ -14,7 +14,7 @@ computed results plus a human-readable read.
 
 This page is written for the **driver**, not the mechanic. For each agent you'll
 find: what problem it solves, when to reach for it, the inputs it needs, how it
-works inside, what it returns, a runnable example, and the non-obvious gotchas.
+works inside, what it returns, a runnable example, and the non-obvious notes.
 If you want to build a recipe that isn't in the box, see
 [Composing your own](#composing-your-own) and the six Universal Agent building
 blocks further down.
@@ -137,7 +137,7 @@ FROM fractal_agent_anomaly_triage(
     'agents_demo_logs', 'metric', 'ts', 'host', 'host-1', 32);
 ```
 
-**Gotchas.** Raises `fractal_agent_anomaly_triage: no rows in …` if the filter
+**Notes.** Raises `fractal_agent_anomaly_triage: no rows in …` if the filter
 matches no rows. `baseline_window` must be large enough for DFA (16 is too small
 and returns `rc=-1`; 32 is safe).
 
@@ -179,7 +179,7 @@ FROM fractal_agent_allocate(
     '{"portfolio": "agents-demo"}'::text);
 ```
 
-**Gotchas.** `cov` must be a **flattened 1-D row-major** matrix, not a 2-D array.
+**Notes.** `cov` must be a **flattened 1-D row-major** matrix, not a 2-D array.
 The primitive reads it via `float8_array_to_doubles` and rejects 2-D. A
 mismatched `cov` length surfaces the primitive's clean `cov length` ERROR.
 
@@ -226,7 +226,7 @@ FROM fractal_agent_route_task(
     'agents_demo_caps', 'emb', 'capability_name', 1000);
 ```
 
-**Gotchas.** Raises `no capability rows in …` if the capability table is empty
+**Notes.** Raises `no capability rows in …` if the capability table is empty
 (the agent pre-checks so its message fires before the C primitive's
 `no corpus rows to search`).
 
@@ -275,7 +275,7 @@ FROM fractal_agent_outlier_intercept(
     ARRAY[0.0, 1.0, 0.0]::float8[], 'agents_demo_badstates', 'emb', 0.5);
 ```
 
-**Gotchas.** Cosine distance **ignores magnitude**: `[0.1,0.1,0.1]` vs
+**Notes.** Cosine distance **ignores magnitude**: `[0.1,0.1,0.1]` vs
 `[0.9,0.9,0.9]` are parallel (distance 0, "near"), not far. To build a "far"
 known-bad fixture, point a *different direction* (e.g. `[0,1,0]` vs `[1,0,0]` →
 distance 1). Raises `no bad-state rows in …` if the history table is empty.
@@ -326,7 +326,7 @@ FROM fractal_agent_recall_hybrid(
     'customer_id', 'cust-a', 2, 'session_id', 'content');
 ```
 
-**Gotchas.** Raises `filter matched no rows in …` if the filter matches nothing.
+**Notes.** Raises `filter matched no rows in …` if the filter matches nothing.
 `id_col` must be bigint-castable. This agent takes a single
 `(filter_col, filter_val)`. For a multi-predicate cohort (e.g.
 `age>65 AND condition='sepsis'`), build the cohort yourself and use [patient_deterioration_triage](#patient-deterioration-triage--fractal_agent_patient_deterioration_triage),
@@ -377,7 +377,7 @@ FROM fractal_agent_recommend_diverse(
 SELECT fractal_diversify_disable();
 ```
 
-**Gotchas.** `fractal_diversify_enable()` is a **session-global side effect**:
+**Notes.** `fractal_diversify_enable()` is a **session-global side effect**:
 this agent leaves it on; you are responsible for `fractal_diversify_disable()`
 when done. (Contrast [feedback_audit](#feedback-audit--fractal_agent_feedback_audit), which
 self-disables.) `id_col` must be bigint-castable.
@@ -425,7 +425,7 @@ FROM fractal_agent_data_analyst(
     ARRAY['agents_demo_data'], 2);
 ```
 
-**Gotchas.** No empty-table guard: there is no fixed table to pre-check;
+**Notes.** No empty-table guard: there is no fixed table to pre-check;
 `fractal_sql_agent` handles its own errors and reports empty/failed results via
 `execution_status`. Guard the LLM-facing `fractal_sql_agent` step with a
 restricted role (see [Safe Agency & Guardrails](#safe-agency--guardrails)).
@@ -456,12 +456,17 @@ that [recall_hybrid](#recall-hybrid--fractal_agent_recall_hybrid)'s single
 
 **How it works.** (1) Builds the cohort: from `cohort_doc_ids` if supplied, else
 every row mapped to 0-indexed scan positions. (2)
-`fractal_hybrid_clinical_search` for the nearest patient in the cohort. (3)
-`fractal_search_trajectory` for the baseline→current drift. (4) Resolves the
-cohort `doc_id` to the named patient id via the [ctid mapping](#a-note-on-id-resolution).
-(5) `fractal_reason` synthesizes the triage over both signals.
+`fractal_hybrid_clinical_search` for up to `k` nearest patients in the cohort,
+ranked ascending by distance, each resolved to its named patient id via the
+[ctid mapping](#a-note-on-id-resolution) in the same query. (3)
+`fractal_search_trajectory` for the baseline→current drift — always a single
+result; `k` does not apply here. (4) `fractal_reason` synthesizes the triage
+over the single nearest cohort match and the drift, not over every entry in
+`cohort_matches`.
 
-**Returns** `(nearest_cohort_id bigint, cohort_distance float8, drift_distance float8, rationale text)`.
+**Returns** `(nearest_cohort_id bigint, cohort_distance float8, drift_distance float8, rationale text, cohort_matches jsonb)`.
+`cohort_matches` is a ranked array of up to `k` `{"id":..,"distance":..}`
+entries; `nearest_cohort_id`/`cohort_distance` are always `cohort_matches[0]`.
 
 **Example**
 ```sql
@@ -473,7 +478,7 @@ INSERT INTO agents_demo_patients VALUES
     (3, 78, 'pneumonia', ARRAY[0.20,  0.20, 0.20, 0.20]),
     (4, 81, 'sepsis',    ARRAY[0.85, -0.75, 0.65, 0.55]);
 
-SELECT nearest_cohort_id, cohort_distance, drift_distance, rationale
+SELECT nearest_cohort_id, cohort_distance, drift_distance, rationale, cohort_matches
 FROM fractal_agent_patient_deterioration_triage(
     'agents_demo_patients', 'vitals',
     ARRAY[0.9, -0.8, 0.7, 0.6]::float8[],
@@ -486,8 +491,11 @@ FROM fractal_agent_patient_deterioration_triage(
     5, 'id');
 ```
 
-**Gotchas.** Raises `no patient rows in …` if the table is empty, or `cohort
+**Notes.** Raises `no patient rows in …` if the table is empty, or `cohort
 matched no rows in …` if the cohort is empty. `id_col` must be bigint-castable.
+`k` controls only the cohort-search width; the drift search always compares a
+single baseline point to a single current point, so it stays fixed at its
+nearest point regardless of `k`.
 
 ---
 
@@ -543,7 +551,7 @@ FROM fractal_agent_feedback_audit(
     'agents_demo_fwarmup', 'center', 8, 3);
 ```
 
-**Gotchas.** Raises `no catalog rows in …` if the catalog is empty. Needs a
+**Notes.** Raises `no catalog rows in …` if the catalog is empty. Needs a
 warmup table with enough varied vectors to fill the window, or
 `diversity_quotient` comes back NaN.
 
@@ -594,7 +602,7 @@ FROM fractal_agent_schedule_workload(
     'agents_demo_nodes', 'capability', 'id', 30, 50, 5);
 ```
 
-**Gotchas.** Raises `no node rows in …` if the node table is empty.
+**Notes.** Raises `no node rows in …` if the node table is empty.
 
 ---
 
@@ -648,7 +656,7 @@ FROM fractal_agent_rebalance_sibling(
     ARRAY[0.25, 0.25, 0.25, 0.25]::float8[], NULL, 5, 'id');
 ```
 
-**Gotchas.** `cov` is a **flattened 1-D row-major** matrix. `id_col` must be
+**Notes.** `cov` is a **flattened 1-D row-major** matrix. `id_col` must be
 bigint-castable: `nearest_alloc_id` is returned as `bigint`, so a text label
 column won't do (pass the numeric PK). Raises `no allocation rows in …` if the
 allocation table is empty.
@@ -727,7 +735,7 @@ FROM fractal_agent_diverse_portfolios(
     2, 6, objective_mode := 'pareto');
 ```
 
-**Gotchas.** `cov` is a **flattened 1-D row-major** matrix, same as
+**Notes.** `cov` is a **flattened 1-D row-major** matrix, same as
 `allocate`/`rebalance_sibling`. Enterprise tier: errors with `enterprise
 tier not loaded` until `fractalsql.enterprise_lib` is set; dormant on the
 community image by default (see `demo/enterprise-qtl-audit.sql` for
@@ -796,7 +804,7 @@ FROM fractal_agent_detour_classify(
     5, 'id', 2);
 ```
 
-**Gotchas.** Raises `no vehicle rows in …` if the vehicle table is empty.
+**Notes.** Raises `no vehicle rows in …` if the vehicle table is empty.
 `id_col` must be bigint-castable.
 
 ---
@@ -859,7 +867,7 @@ FROM fractal_agent_track_anomaly(
     5, 'id');
 ```
 
-**Gotchas.** `dfa_exponent` may be `-1` (insufficient window), passed through;
+**Notes.** `dfa_exponent` may be `-1` (insufficient window), passed through;
 the reason step notes it. Raises `no track rows in …` if the track table is
 empty. `id_col` must be bigint-castable.
 
@@ -911,7 +919,7 @@ FROM fractal_agent_network_coverage_alert(
     2, 48, 0.5);
 ```
 
-**Gotchas.** `point_cloud` needs **~≥256 points** for the morphology estimator to
+**Notes.** `point_cloud` needs **~≥256 points** for the morphology estimator to
 succeed (a 20×20 grid = 400 points works; 100 or a scattered 60 fail with
 `rc=-1`). `point_cloud` is a flat `n_points × dim` interleaved array. Raises
 `point_cloud and drift_series are required` if either is NULL. The `drift` field
@@ -957,7 +965,7 @@ FROM fractal_agent_regime_triage(
     64, 0.5);
 ```
 
-**Gotchas.** `dfa_exponent` may be `-1` (insufficient window), passed through.
+**Notes.** `dfa_exponent` may be `-1` (insufficient window), passed through.
 Raises `series is required` if `series` is NULL. The `drift` field is a **signed
 numeric** (`recent_alpha − baseline_alpha`), not a boolean; `drift_detected` is
 the boolean comparison.

@@ -129,7 +129,7 @@ UPDATE vmc_patients SET age = 70, condition = 'sepsis'
 -- cohort fractal_agent_recall_hybrid's single filter can't express) in
 -- ctid scan order.
 \echo '--- Preset: fractal_agent_patient_deterioration_triage (raw hybrid+trajectory form preserved above) ---'
-SELECT nearest_cohort_id, cohort_distance, drift_distance, rationale
+SELECT nearest_cohort_id, cohort_distance, drift_distance, rationale, cohort_matches
 FROM fractal_agent_patient_deterioration_triage(
     'vmc_patients', 'vitals',
     ARRAY[1, -1, 1, 1, 0.5]::float8[],

@@ -11,10 +11,20 @@
 --                                       ERROR is caught and surfaced as
 --                                       execution_status='execution_failed',
 --                                       not propagated to abort the call)
---   * fractal_optimize_portfolio     -- SFS-based cardinality-constrained allocation
+--   * fractal_agent_rebalance_sibling -- the REAL shipped fractalsql_agents
+--                                       engine (optimizer + trajectory search),
+--                                       not a local fractal_agent_portfolio_
+--                                       rebalance stub
 --   * fractal_reason                 -- rationale synthesis
 --   * fractal_vectorizer_*           -- vectorizes strategy descriptions
 -- Re-runnable (see the teardown block at the top).
+--
+-- This demo previously shadowed the rebalance step with a local
+-- CREATE OR REPLACE FUNCTION fractal_agent_portfolio_rebalance stub that
+-- hardcoded drift_score = 0.042 instead of computing anything. That stub
+-- predates fractalsql_agents/, whose own comments note it was promoted
+-- into the real fractal_agent_rebalance_sibling engine; this version
+-- calls that real engine against a real historical-allocations table.
 -- =============================================================================
 
 DELETE FROM fractal_vectorizer_rate_window WHERE vectorizer_id IN
@@ -22,7 +32,7 @@ DELETE FROM fractal_vectorizer_rate_window WHERE vectorizer_id IN
 DELETE FROM fractal_vectorizer_queue WHERE vectorizer_id IN
     (SELECT id FROM fractal_vectorizers WHERE source_table = 'trade_strategies');
 DELETE FROM fractal_vectorizers WHERE source_table = 'trade_strategies';
-DROP TABLE IF EXISTS trade_strategies, portfolios, assets, restrictions CASCADE;
+DROP TABLE IF EXISTS trade_strategies, portfolios, assets, restrictions, historical_allocations CASCADE;
 
 -- 1. Setup financial strategy space
 CREATE TABLE trade_strategies (
@@ -78,36 +88,19 @@ INSERT INTO restrictions (restriction_id, asset_id, restriction_type) VALUES
     (1, 102, 'ESG-fossil-fuel'),
     (2, 103, 'ESG-weapons');
 
--- -----------------------------------------------------------------------------
--- DOMAIN AGENT IMPLEMENTATIONS (PL/pgSQL Compositions)
--- -----------------------------------------------------------------------------
-
--- Cardinality-Constrained Allocator: Executes Sharpe optimization + drift analysis
-CREATE OR REPLACE FUNCTION fractal_agent_portfolio_rebalance(portfolio_id text, target_cardinality int)
-RETURNS TABLE(new_weights jsonb, drift_score float8, rationale text) AS $$
-DECLARE
-    opt_res jsonb;
-    reason_res text;
-BEGIN
-    -- 1. Run the Core Optimizer (SFS-based). cov must be a FLATTENED 1-D
-    -- array of length n_assets^2 (fractal_optimize_portfolio reads it via
-    -- float8_array_to_doubles, which rejects 2-D matrices); the 2x2 identity
-    -- here is [1,0,0,1] row-major. See demo-vertical-quant-finance.sql for the
-    -- array_agg pattern at real scale.
-    opt_res := fractal_optimize_portfolio(ARRAY[0.05, 0.1], ARRAY[1.0, 0.0, 0.0, 1.0], target_cardinality);
-
-    -- 2. Synthesize the rationale for the shift
-    reason_res := fractal_reason(
-        'Explain why this portfolio rebalance is necessary based on the new weights: ' || opt_res::text,
-        '{"portfolio": "' || portfolio_id || '"}'
-    );
-
-    RETURN QUERY SELECT
-        opt_res,
-        0.042::float8,
-        reason_res;
-END;
-$$ LANGUAGE plpgsql;
+-- 4. A snapshot of past allocation decisions, for fractal_agent_
+-- rebalance_sibling's trajectory-search half: "which prior allocation is
+-- this new one closest to." Weight vectors match mu/cov's 2-asset shape
+-- below.
+CREATE TABLE historical_allocations (
+    alloc_id  bigint PRIMARY KEY,
+    label     text,
+    weights   float8[]
+);
+INSERT INTO historical_allocations (alloc_id, label, weights) VALUES
+(1, 'Q1-2025 momentum tilt',  ARRAY[0.6, 0.4]),
+(2, 'Q2-2025 defensive tilt', ARRAY[0.3, 0.7]),
+(3, 'Q3-2025 balanced',       ARRAY[0.5, 0.5]);
 
 -- -----------------------------------------------------------------------------
 -- DEMONSTRATION
@@ -137,8 +130,22 @@ SELECT * FROM fractal_sql_agent(
     auto_execute => true
 );
 
--- 6. Portfolio Rebalance
-SELECT * FROM fractal_agent_portfolio_rebalance('port-global-01', 2);
+-- 6. Portfolio Rebalance (the real fractal_agent_rebalance_sibling engine)
+-- Runs the SFS optimizer (cov must be a FLATTENED 1-D array of length
+-- n_assets^2 -- fractal_optimize_portfolio rejects a 2-D matrix; the 2x2
+-- identity here is [1,0,0,1] row-major, see demo-vertical-quant-finance.sql
+-- for the array_agg pattern at real scale), then finds the nearest prior
+-- allocation to an equal-weight baseline via trajectory search, then
+-- reasons over both.
+SELECT sharpe, weights, nearest_alloc_id, nearest_distance, rationale
+FROM fractal_agent_rebalance_sibling(
+    ARRAY[0.05, 0.1]::float8[],
+    ARRAY[1.0, 0.0, 0.0, 1.0]::float8[],
+    2,
+    'historical_allocations', 'weights',
+    ARRAY[0.5, 0.5]::float8[],
+    NULL, 5, 'alloc_id', '{"portfolio": "port-global-01"}'
+);
 
 -- 7. Safe Execution in Subtransactions
 -- The auto_execute above runs the generated SQL inside a subtransaction to
