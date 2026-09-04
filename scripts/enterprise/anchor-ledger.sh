@@ -41,7 +41,7 @@ ROW="$("${PSQL}" -X -At -F'|' -c \
     "SELECT id, encode(entry_hash, 'hex'), extract(epoch from updated)::bigint
      FROM fractalsql_ledger WHERE kind = ${KIND} ORDER BY id DESC LIMIT 1;")"
 
-if [ -z "${ROW}" ]; then
+if [[ -z "${ROW}" ]]; then
     echo "anchor-ledger: no rows for kind=${KIND} yet -- nothing to anchor" >&2
     exit 0
 fi

@@ -38,9 +38,9 @@ PG_VERSION="$("${PG_CONFIG}" --version)"
 # mismatch only surfaces later as an opaque PG_MODULE_MAGIC error at
 # CREATE EXTENSION. PG_MAJOR is written into the tarball by package-darwin.sh.
 TARGET_MAJOR="$(printf '%s' "${PG_VERSION}" | sed -E 's/^PostgreSQL[[:space:]]+([0-9]+).*/\1/')"
-if [ -f "${HERE}/PG_MAJOR" ]; then
+if [[ -f "${HERE}/PG_MAJOR" ]]; then
     BUILT_FOR="$(cat "${HERE}/PG_MAJOR")"
-    if [ -n "${BUILT_FOR}" ] && [ "${BUILT_FOR}" != "${TARGET_MAJOR}" ]; then
+    if [[ -n "${BUILT_FOR}" ]] && [[ "${BUILT_FOR}" != "${TARGET_MAJOR}" ]]; then
         echo "error: this tarball is built for PostgreSQL ${BUILT_FOR}, but" >&2
         echo "       ${PG_CONFIG} points at PostgreSQL ${TARGET_MAJOR}." >&2
         echo "       Install the pg${TARGET_MAJOR} tarball instead." >&2
@@ -54,9 +54,9 @@ fi
 # package-darwin.sh already staged the file under whatever name that
 # major actually needs -- just find it, rather than assuming either
 # name and guessing wrong for half our supported majors.
-if [ -f "${HERE}/fractalsql.dylib" ]; then
+if [[ -f "${HERE}/fractalsql.dylib" ]]; then
     SO_FILE="fractalsql.dylib"
-elif [ -f "${HERE}/fractalsql.so" ]; then
+elif [[ -f "${HERE}/fractalsql.so" ]]; then
     SO_FILE="fractalsql.so"
 else
     echo "error: neither fractalsql.dylib nor fractalsql.so found in ${HERE}" >&2
@@ -72,7 +72,7 @@ echo
 # doesn't have it yet; -m sets sane perms. sudo may be needed if the PG
 # prefix is root-owned (Homebrew installs are usually user-writable).
 INSTALL="install"
-if [ ! -w "${PKGLIBDIR}" ] || [ ! -w "${EXTDIR}" ]; then
+if [[ ! -w "${PKGLIBDIR}" ]] || [[ ! -w "${EXTDIR}" ]]; then
     echo "note: ${PKGLIBDIR} or ${EXTDIR} is not writable — re-running file"
     echo "      copies under sudo (you may be prompted for your password)."
     INSTALL="sudo install"

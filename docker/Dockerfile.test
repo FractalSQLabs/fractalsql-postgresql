@@ -39,8 +39,8 @@ ARG FSQL_SAN_MODE
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        build-essential \
         binutils \
+        build-essential \
         file \
         postgresql-server-dev-${PG_MAJOR} \
  && rm -rf /var/lib/apt/lists/*

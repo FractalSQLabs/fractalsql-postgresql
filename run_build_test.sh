@@ -34,11 +34,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
-if [ -t 1 ]; then G="\033[32m"; R="\033[31m"; Z="\033[0m"; else G=""; R=""; Z=""; fi
+if [[ -t 1 ]]; then G="\033[32m"; R="\033[31m"; Z="\033[0m"; else G=""; R=""; Z=""; fi
 
 SAN_MODE=""
 ARGS=()
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --asan)    SAN_MODE="asan" ;;
     --ubsan)   SAN_MODE="ubsan" ;;
@@ -54,9 +54,9 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 MAJORS=(14 15 16 17 18)
-if [ "${1:-}" = "--pg" ]; then
+if [[ "${1:-}" = "--pg" ]]; then
   MAJORS=("$2")
-elif [ $# -gt 0 ]; then
+elif [[ $# -gt 0 ]]; then
   MAJORS=("$@")
 fi
 
@@ -78,6 +78,6 @@ for v in "${MAJORS[@]}"; do
 done
 
 echo ""
-if [ "$FAILED" -eq 0 ]; then printf "${G}run_build_test: PASS${Z}\n"; exit 0
+if [[ "$FAILED" -eq 0 ]]; then printf "${G}run_build_test: PASS${Z}\n"; exit 0
 else printf "${R}run_build_test: FAIL${Z}\n"; exit 1
 fi

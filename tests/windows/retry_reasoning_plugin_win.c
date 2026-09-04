@@ -96,7 +96,7 @@ retry_generate(void *u, const char *p, size_t pl,
     if (response_mode != NULL && strcmp(response_mode, "code") == 0)
         strcpy(resp, sql);
     else
-        sprintf(resp, "```sql\n%s\n```", sql);
+        snprintf(resp, len + 16, "```sql\n%s\n```", sql);
     *response_out         = resp;
     *response_len_out     = strlen(resp);
     *response_free_fn_out = retry_free;

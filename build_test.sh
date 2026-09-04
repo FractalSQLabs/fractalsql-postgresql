@@ -198,16 +198,16 @@ TMPROOT="$(cd /tmp && pwd -P)"
 fsql_pg_dlsuffix() {
   local pg_config="$1" suffix=""
   suffix="$(make PG_CONFIG="$pg_config" show_dl_suffix 2>/dev/null | tail -1)"
-  if [ -n "$suffix" ]; then
+  if [[ -n "$suffix" ]]; then
     printf '%s' "$suffix"
-  elif [ "$(uname -s)" = "Darwin" ]; then
+  elif [[ "$(uname -s)" = "Darwin" ]]; then
     printf '%s' ".dylib"
   else
     printf '%s' ".so"
   fi
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21)
 
@@ -235,23 +235,23 @@ UBSAN=0
 # into 30+ confusing failures. Auto-bumping removes the need to
 # remember FSQL_TEST_TIMEOUT_MULT=4 every time --asan is passed, which
 # is exactly the mistake that caused that cascade in practice.
-if [ -n "${FSQL_TEST_TIMEOUT_MULT:-}" ]; then
+if [[ -n "${FSQL_TEST_TIMEOUT_MULT:-}" ]]; then
   TIMEOUT_MULT="$FSQL_TEST_TIMEOUT_MULT"
-elif [ "$ASAN" -eq 1 ] || [ "$UBSAN" -eq 1 ]; then
+elif [[ "$ASAN" -eq 1 ]] || [[ "$UBSAN" -eq 1 ]]; then
   TIMEOUT_MULT=4
 else
   TIMEOUT_MULT=1
 fi
 
 # --- colours ----------------------------------------------------------
-if [ -t 1 ]; then G="\033[32m"; R="\033[31m"; Y="\033[33m"; Z="\033[0m"; else G=""; R=""; Y=""; Z=""; fi
+if [[ -t 1 ]]; then G="\033[32m"; R="\033[31m"; Y="\033[33m"; Z="\033[0m"; else G=""; R=""; Y=""; Z=""; fi
 pass() { printf "  [${G}PASS${Z}] %s\n" "$1"; }
 fail() { printf "  [${R}FAIL${Z}] %s\n" "$1"; FAILED=1; }
 skip() { printf "  [${Y}SKIP${Z}] %s\n" "$1"; }
 
 usage() { sed -n '4,40p' "$0"; exit 0; }
 
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --quick)   MODE="quick" ;;
     --cross)   MODE="cross" ;;
@@ -269,13 +269,13 @@ while [ $# -gt 0 ]; do
 done
 
 # --- per-major state (set by pg_setup) --------------------------------
-BIN=""; SO=""; MOCK=""; EVIL=""; CRASH=""; LYING=""; RETRY=""; EMBED=""; DATADIR=""; SOCKDIR=""; PORT=""; PSQL=()
+BIN=""; SO=""; MOCK=""; EVIL=""; CRASH=""; LYING=""; RETRY=""; EMBED=""; THINK=""; DATADIR=""; SOCKDIR=""; PORT=""; PSQL=()
 FAILED=0
 
 pg_bindir() {
-  if [ -n "${PG_BINDIR:-}" ]; then
+  if [[ -n "${PG_BINDIR:-}" ]]; then
     echo "$PG_BINDIR"
-  elif [ "$(uname -s)" = "Darwin" ]; then
+  elif [[ "$(uname -s)" = "Darwin" ]]; then
     # Homebrew's postgresql@$MAJOR keg -- matches
     # .github/workflows/install-test.yml's macos-install job exactly
     # (PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config"). `brew
@@ -294,9 +294,9 @@ pg_bindir() {
     else
       brew_bin="/opt/homebrew/opt/postgresql@$1/bin"
     fi
-    if [ -x "$brew_bin/pg_config" ]; then
+    if [[ -x "$brew_bin/pg_config" ]]; then
       echo "$brew_bin"
-    elif [ -x "/Library/PostgreSQL/$1/bin/pg_config" ]; then
+    elif [[ -x "/Library/PostgreSQL/$1/bin/pg_config" ]]; then
       echo "/Library/PostgreSQL/$1/bin"
     else
       echo "$brew_bin"
@@ -313,7 +313,7 @@ pg_bindir() {
 # resolved via ldconfig when that happens.
 resolve_san_rt() {
   local libname="$1"
-  if [ "$(uname -s)" = "Darwin" ]; then
+  if [[ "$(uname -s)" = "Darwin" ]]; then
     # Apple clang's runtime layout is completely different from Linux's
     # -- no libasan.so/libubsan.so at all. `-print-resource-dir` finds
     # the active Xcode/CLT toolchain's compiler-rt tree; the dylib is
@@ -322,7 +322,7 @@ resolve_san_rt() {
     # filename on a real run; Apple has renamed compiler-rt dylibs across major
     # Xcode versions before.
     local resdir; resdir="$(${CC:-cc} -print-resource-dir 2>/dev/null)"
-    [ -n "$resdir" ] || { printf ''; return; }
+    [[ -n "$resdir" ]] || { printf ''; return; }
     case "$libname" in
       libasan.so)  printf '%s' "$resdir/lib/darwin/libclang_rt.asan_osx_dynamic.dylib" ;;
       libubsan.so) printf '%s' "$resdir/lib/darwin/libclang_rt.ubsan_osx_dynamic.dylib" ;;
@@ -332,20 +332,20 @@ resolve_san_rt() {
   fi
   local rt
   rt="$(${CC:-cc} -print-file-name="$libname" 2>/dev/null)"
-  if [ -f "$rt" ] && ! file -b "$rt" | grep -qE 'ELF|shared object'; then
+  if [[ -f "$rt" ]] && ! file -b "$rt" | grep -qE 'ELF|shared object'; then
     local stem="${libname%.so}"
     local cand
     cand="$(ldconfig -p 2>/dev/null \
             | awk -v s="$stem" '$1 ~ "^"s"\\.so\\.[0-9]+$" {print $NF; exit}')"
-    [ -n "$cand" ] && [ -f "$cand" ] && rt="$cand"
+    [[ -n "$cand" ]] && [[ -f "$cand" ]] && rt="$cand"
   fi
   printf '%s' "$rt"
 }
 
 cleanup() {
-  [ -n "$DATADIR" ] && [ -d "$DATADIR" ] && "$BIN/pg_ctl" -D "$DATADIR" -m immediate stop >/dev/null 2>&1
-  [ -n "$DATADIR" ] && rm -rf "$DATADIR"
-  [ -n "$SOCKDIR" ] && rm -rf "$SOCKDIR"
+  [[ -n "$DATADIR" ]] && [[ -d "$DATADIR" ]] && "$BIN/pg_ctl" -D "$DATADIR" -m immediate stop >/dev/null 2>&1
+  [[ -n "$DATADIR" ]] && rm -rf "$DATADIR"
+  [[ -n "$SOCKDIR" ]] && rm -rf "$SOCKDIR"
   rm -f /tmp/fractalsql_bt_sql.txt /tmp/fractalsql_bt_evil_trigger_call.txt
 }
 trap cleanup EXIT
@@ -358,7 +358,7 @@ trap cleanup EXIT
 # isn't hardcoded to one checkout location. Exported unconditionally
 # (harmless no-op without a --coverage build); postmaster/backends
 # inherit it since pg_setup() launches pg_ctl from this same shell.
-if [ "$COVERAGE" -eq 1 ]; then
+if [[ "$COVERAGE" -eq 1 ]]; then
   export GCOV_PREFIX="/tmp/fractalsql_bt_gcov_$$"
   export GCOV_PREFIX_STRIP=$(($(echo "$HERE" | tr -cd '/' | wc -c)))
   mkdir -p "$GCOV_PREFIX"
@@ -370,7 +370,7 @@ fi
 run_coverage_report() {
   local gcda_src
   gcda_src="$(find "$GCOV_PREFIX" -name 'fractalsql.gcda' 2>/dev/null | head -1)"
-  if [ -z "$gcda_src" ]; then
+  if [[ -z "$gcda_src" ]]; then
     fail "coverage: no .gcda produced (was --coverage gate 01 build ok?)"
     return
   fi
@@ -432,7 +432,7 @@ run_coverage_report() {
 pg_setup() {
   local v="$1"
   BIN="$(pg_bindir "$v")"
-  if [ ! -x "$BIN/initdb" ] || [ ! -x "$BIN/pg_config" ]; then
+  if [[ ! -x "$BIN/initdb" ]] || [[ ! -x "$BIN/pg_config" ]]; then
     return 1
   fi
   # Independent of gate_01_build's own detection -- a single non-01
@@ -447,6 +447,7 @@ pg_setup() {
   RETRY="$TMPROOT/fractalsql_bt_retry_$v.so"
   EMBED="$TMPROOT/fractalsql_bt_embed_$v.so"
   EVIL_EMBED="$TMPROOT/fractalsql_bt_evil_embed_$v.so"
+  THINK="$TMPROOT/fractalsql_bt_think_$v.so"
   DATADIR="/tmp/fractalsql_bt_data_$v"
   SOCKDIR="/tmp/fractalsql_bt_sock_$v"
   PORT=$(( 5600 + v ))
@@ -465,6 +466,8 @@ pg_setup() {
   cc -shared -fPIC -std=c99 -Iinclude tests/mock_embed_plugin.c -o "$EMBED" 2>/tmp/fractalsql_bt_setup_$v.log \
     || { cat /tmp/fractalsql_bt_setup_$v.log >&2; return 2; }
   cc -shared -fPIC -std=c99 -Iinclude tests/evil_embed_plugin.c -o "$EVIL_EMBED" 2>/tmp/fractalsql_bt_setup_$v.log \
+    || { cat /tmp/fractalsql_bt_setup_$v.log >&2; return 2; }
+  cc -shared -fPIC -std=c99 -Iinclude tests/think_reasoning_plugin.c -o "$THINK" 2>/tmp/fractalsql_bt_setup_$v.log \
     || { cat /tmp/fractalsql_bt_setup_$v.log >&2; return 2; }
   rm -f /tmp/fractalsql_bt_retry_prompt.txt
   "$BIN/initdb" -D "$DATADIR" -U postgres --auth=trust >/tmp/fractalsql_bt_setup_$v.log 2>&1 \
@@ -497,22 +500,31 @@ pg_setup() {
   # real run and tighten this back to a hard failure if UBSan turns out
   # to need the preload after all.
   local preload_var="LD_PRELOAD"
-  [ "$(uname -s)" = "Darwin" ] && preload_var="DYLD_INSERT_LIBRARIES"
-  if [ "$ASAN" -eq 1 ]; then
+  [[ "$(uname -s)" = "Darwin" ]] && preload_var="DYLD_INSERT_LIBRARIES"
+  if [[ "$ASAN" -eq 1 ]]; then
+    # Darwin: DYLD_INSERT_LIBRARIES-injecting ASan into a postgres that
+    # wasn't itself compiled with -fsanitize=address doesn't reliably
+    # install ASan's malloc/free interceptor table on modern macOS
+    # (chained fixups resolve libSystem calls before the late-injected
+    # runtime can hook them) -- confirmed on real hardware: the dylib
+    # loads fine, then ASan's own runtime aborts with "Interceptors are
+    # not working ... loaded too late (e.g. via dlopen)". Signing has
+    # nothing to do with it. Detect a plain (non-instrumented) binary
+    # up front and skip cleanly instead of hard-failing pg_ctl start.
+    if [[ "$(uname -s)" = "Darwin" ]] \
+       && ! otool -L "$BIN/postgres" 2>/dev/null | grep -qi 'libclang_rt\.asan\|libasan'; then
+      skip "PG$v cluster setup (Darwin ASan needs postgres itself built with -fsanitize=address; run against a source-built ASan postgres to exercise this gate here -- Linux/Windows ASan CI already cover this same portable C source)"
+      return 3
+    fi
     local asan_rt; asan_rt="$(resolve_san_rt libasan.so)"
-    [ -n "$asan_rt" ] && [ -f "$asan_rt" ] || { echo "FAIL: could not resolve libasan.so runtime" >&2; return 2; }
+    [[ -n "$asan_rt" ]] && [[ -f "$asan_rt" ]] || { echo "FAIL: could not resolve libasan.so runtime" >&2; return 2; }
     export "$preload_var"="$asan_rt"
     export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1"
-    if [ "$(uname -s)" = "Darwin" ]; then
-      echo "[asan-diag] DYLD_INSERT_LIBRARIES=$DYLD_INSERT_LIBRARIES"
-      echo "[asan-diag] codesign -dvvv \"$BIN/postgres\":"
-      codesign -dvvv "$BIN/postgres" 2>&1 | sed 's/^/[asan-diag] /' || echo "[asan-diag] codesign failed (unsigned binary?)"
-    fi
-  elif [ "$UBSAN" -eq 1 ]; then
+  elif [[ "$UBSAN" -eq 1 ]]; then
     local ubsan_rt; ubsan_rt="$(resolve_san_rt libubsan.so)"
-    if [ -n "$ubsan_rt" ] && [ -f "$ubsan_rt" ]; then
+    if [[ -n "$ubsan_rt" ]] && [[ -f "$ubsan_rt" ]]; then
       export "$preload_var"="$ubsan_rt"
-    elif [ "$(uname -s)" != "Darwin" ]; then
+    elif [[ "$(uname -s)" != "Darwin" ]]; then
       echo "FAIL: could not resolve libubsan.so runtime" >&2; return 2
     fi
     export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
@@ -520,7 +532,7 @@ pg_setup() {
   "$BIN/pg_ctl" -D "$DATADIR" -w -l "$DATADIR/log" \
      -o "-p $PORT -k $SOCKDIR -c listen_addresses='' -c shared_preload_libraries=$SO" \
      start >/tmp/fractalsql_bt_setup_$v.log 2>&1 \
-    || { tail -20 /tmp/fractalsql_bt_setup_$v.log >&2; [ -f "$DATADIR/log" ] && tail -20 "$DATADIR/log" >&2; return 2; }
+    || { tail -20 /tmp/fractalsql_bt_setup_$v.log >&2; [[ -f "$DATADIR/log" ]] && tail -20 "$DATADIR/log" >&2; return 2; }
   PSQL=("$BIN/psql" -h "$SOCKDIR" -p "$PORT" -U postgres -d postgres -X -tA)
   # register the functions from the freshly built .so
   "${PSQL[@]}" -c "
@@ -590,7 +602,7 @@ pg_setup() {
 }
 
 pg_teardown() {
-  [ -n "$DATADIR" ] && "$BIN/pg_ctl" -D "$DATADIR" -m fast stop >/dev/null 2>&1
+  [[ -n "$DATADIR" ]] && "$BIN/pg_ctl" -D "$DATADIR" -m fast stop >/dev/null 2>&1
   rm -rf "$DATADIR" "$SOCKDIR" "$MOCK" "$EVIL" "$CRASH" "$LYING" "$RETRY" "$EMBED" "$EVIL_EMBED"
   DATADIR=""; SOCKDIR=""
 }
@@ -610,7 +622,7 @@ pg_set_guc() {
   local i v tries=$(( 10 * TIMEOUT_MULT ))
   for i in $(seq 1 "$tries"); do
     v=$("${PSQL[@]}" -c "SELECT current_setting('$1');" 2>/dev/null)
-    [ "$v" = "$3" ] && return 0
+    [[ "$v" = "$3" ]] && return 0
     sleep 0.2
   done
   return 1
@@ -622,25 +634,30 @@ pg_swap_plugin() { pg_set_guc fractalsql.reasoning_plugin "'$1'" "$1"; }
 
 gate_01_build() {
   local v="$1" bin; bin="$(pg_bindir "$v")"
-  if [ ! -x "$bin/pg_config" ]; then skip "01 build (PG$v pg_config absent)"; return; fi
+  if [[ ! -x "$bin/pg_config" ]]; then skip "01 build (PG$v pg_config absent)"; return; fi
   FSQL_DLSUFFIX="$(fsql_pg_dlsuffix "$bin/pg_config")"
-  make clean >/dev/null 2>&1
+  # PG_CONFIG must match the real build below -- without it this falls
+  # back to Makefile's bare "pg_config" default, which silently fails
+  # to resolve PGXS (and thus does nothing) whenever pg_config isn't on
+  # PATH, e.g. a PG_BINDIR override pointing outside PATH. A no-op clean
+  # here leaves stale .o files for the real build to (wrongly) reuse.
+  make clean PG_CONFIG="$bin/pg_config" >/dev/null 2>&1
   local cov_arg=""
   # with_llvm=no: PGXS's separate JIT-bitcode compile (clang -emit-llvm)
   # shares PG_CPPFLAGS with the .o compile, so it also picks up
   # --coverage and (on this toolchain) clobbers gcc's just-written
   # fractalsql.gcno with an incompatible clang-format one afterward.
   # Bitcode is a runtime-JIT concern, irrelevant to a coverage run.
-  [ "$COVERAGE" -eq 1 ] && cov_arg="COVERAGE=1 with_llvm=no"
+  [[ "$COVERAGE" -eq 1 ]] && cov_arg="COVERAGE=1 with_llvm=no"
   local san_arg=""
   # Confirmed on real hardware (this sandbox): unlike COVERAGE, ASan/UBSan
   # don't need with_llvm=no -- the JIT-bitcode compile picks up the same
   # -fsanitize= flags and builds cleanly (no .gcno-class file conflict,
   # since sanitizers don't produce their own on-disk artifacts the way
   # gcov does), so it's left enabled here.
-  [ "$ASAN" -eq 1 ]  && san_arg="ASAN=1"
-  [ "$UBSAN" -eq 1 ] && san_arg="UBSAN=1"
-  if make $cov_arg $san_arg PG_CONFIG="$bin/pg_config" >/tmp/fractalsql_bt_build_$v.log 2>&1 && [ -f "fractalsql$FSQL_DLSUFFIX" ]; then
+  [[ "$ASAN" -eq 1 ]]  && san_arg="ASAN=1"
+  [[ "$UBSAN" -eq 1 ]] && san_arg="UBSAN=1"
+  if make $cov_arg $san_arg PG_CONFIG="$bin/pg_config" >/tmp/fractalsql_bt_build_$v.log 2>&1 && [[ -f "fractalsql$FSQL_DLSUFFIX" ]]; then
     pass "01 build (PG$v)"
   else
     fail "01 build (PG$v) — see /tmp/fractalsql_bt_build_$v.log"
@@ -650,16 +667,16 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$("${PSQL[@]}" -c "SELECT fractal_version();" 2>&1)
-  [ "$ver" = "2.0.5" ] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.5)"
+  [[ "$ver" = "2.0.6" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.6)"
   # fractal_search convergence: cosine similarity to query ~1
   local r; r=$("${PSQL[@]}" -c "
      WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
      SELECT CASE WHEN sqrt(v[1]*v[1]+v[2]*v[2])>1e-9
                   AND (v[1]*0.6+v[2]*0.8)/sqrt(v[1]*v[1]+v[2]*v[2])>0.99
                  THEN 'ok' ELSE 'FAIL' END FROM q;" 2>&1)
-  [ "$r" = "ok" ] && pass "02 smoke: fractal_search convergence" || fail "02 smoke: convergence=$r"
+  [[ "$r" = "ok" ]] && pass "02 smoke: fractal_search convergence" || fail "02 smoke: convergence=$r"
   local ed; ed=$("${PSQL[@]}" -c "SELECT fractal_edition();" 2>&1)
-  [ -n "$ed" ] && ! grep <<< "$ed" -q ERROR && pass "02 smoke: edition=$ed" || fail "02 smoke: edition='$ed'"
+  [[ -n "$ed" ]] && ! grep <<< "$ed" -q ERROR && pass "02 smoke: edition=$ed" || fail "02 smoke: edition='$ed'"
   # fractal_search_debug returns the FULL fsql_search_ptr result JSON
   # (not just the best_point extraction fractal_search uses) -- assert
   # the best_point key survives the jsonb_in round-trip.
@@ -698,7 +715,7 @@ t2s_expect() {
   local canned="$1" want="$2" label="$3"
   echo "$canned" > /tmp/fractalsql_bt_sql.txt
   local r; r=$("${PSQL[@]}" -c "SELECT fractal_text_to_sql('q', ARRAY['bt_customers','bt_orders']);" 2>&1)
-  if [ -z "$want" ]; then
+  if [[ -z "$want" ]]; then
     grep <<< "$r" -q ERROR && fail "$label (expected PASS): $r" || pass "$label → returned"
   else
     if grep <<< "$r" -q "$want"; then pass "$label → rejected ($want)"; else fail "$label: got '$r' (want '$want')"; fi
@@ -714,7 +731,7 @@ gate_04_text_to_sql() {
   t2s_expect "SELECT nope FROM bt_orders"                                      "does not analyze"       "04 bad-column"
   t2s_expect "this is not sql at all ##"                                       "does not parse"         "04 unparseable"
   local n; n=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_orders;" 2>&1)
-  [ "$n" = "0" ] && pass "04 never-executes (bt_orders still empty)" || fail "04 never-executes: row count=$n"
+  [[ "$n" = "0" ]] && pass "04 never-executes (bt_orders still empty)" || fail "04 never-executes: row count=$n"
   # auto-discovery mode (table_names omitted/NULL): the full GENERATE ->
   # ALLOWLIST -> EXPLAIN pipeline must still work off the auto-built
   # schema context, not just the explicit-table_names path every other
@@ -874,7 +891,7 @@ gate_10_dos_and_injection() {
 
   local r2; r2=$("${PSQL[@]}" -c "SELECT fractal_schema_context(ARRAY['bt_customers''; DROP TABLE bt_orders; --']);" 2>&1)
   local n; n=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_orders;" 2>&1)
-  if [ "$n" = "0" ]; then
+  if [[ "$n" = "0" ]]; then
     pass "10 injection: SQL-injection-shaped table name did not execute (bt_orders intact)"
   else
     fail "10 injection: bt_orders row count changed (n=$n) — injection may have executed"
@@ -904,7 +921,7 @@ gate_11_scout() {
      SELECT count(*) FROM fractal_search_explore(
        'bt_scout_docs', 'emb_arr', ARRAY[1.0,0.0,0.0]::float8[],
        '{\"population_size\": 24, \"iterations\": 12}'::jsonb);" 2>&1)
-  [ "$n" = "24" ] && pass "11 scout: returns full population (24 particles)" \
+  [[ "$n" = "24" ]] && pass "11 scout: returns full population (24 particles)" \
                    || fail "11 scout: expected 24 particles, got: $n"
 
   local islands; islands=$("${PSQL[@]}" -c "
@@ -915,7 +932,7 @@ gate_11_scout() {
      FROM fractal_search_explore(
        'bt_scout_docs', 'emb_arr', ARRAY[1.0,0.0,0.0]::float8[],
        '{\"population_size\": 24, \"iterations\": 12}'::jsonb) AS p;" 2>&1)
-  [ "${islands:-0}" -gt 1 ] 2>/dev/null && pass "11 scout: particles disperse across >1 island" \
+  [[ "${islands:-0}" -gt 1 ]] 2>/dev/null && pass "11 scout: particles disperse across >1 island" \
                                           || fail "11 scout: expected dispersion, got islands=$islands"
 
   "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_scout_docs;" >/dev/null 2>&1
@@ -947,15 +964,15 @@ gate_06_crash_recovery() {
   # as long as the cluster comes back at all within the extended one.
   local up=0 i tries=$(( 30 * TIMEOUT_MULT )) within_budget=0
   for i in $(seq 1 $(( tries * 2 ))); do
-    "${PSQL[@]}" -c "SELECT 1;" >/dev/null 2>&1 && { up=1; [ "$i" -le "$tries" ] && within_budget=1; break; }
+    "${PSQL[@]}" -c "SELECT 1;" >/dev/null 2>&1 && { up=1; [[ "$i" -le "$tries" ]] && within_budget=1; break; }
     sleep 0.5
   done
-  [ "$within_budget" -eq 1 ] && pass "06 crash_recovery: cluster auto-restarted" \
+  [[ "$within_budget" -eq 1 ]] && pass "06 crash_recovery: cluster auto-restarted" \
                    || fail "06 crash_recovery: cluster did not come back within $(( tries / 2 ))s"
 
-  if [ "$up" -eq 1 ]; then
+  if [[ "$up" -eq 1 ]]; then
     local n; n=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_customers WHERE name = 'canary';" 2>&1)
-    [ "$n" = "1" ] && pass "06 crash_recovery: prior data intact after recovery" \
+    [[ "$n" = "1" ]] && pass "06 crash_recovery: prior data intact after recovery" \
                     || fail "06 crash_recovery: canary row missing after recovery (n=$n)"
     pg_swap_plugin "$MOCK"
   else
@@ -989,6 +1006,7 @@ gate_12_soak() {
           0) "${PSQL[@]}" -c "SELECT fractal_search(ARRAY[0.6,0.8]::float8[],20,20,2);" >/dev/null 2>&1 || rc=1 ;;
           1) "${PSQL[@]}" -c "SELECT fractal_schema_context(ARRAY['bt_customers','bt_orders']);" >/dev/null 2>&1 || rc=1 ;;
           2) "${PSQL[@]}" -c "SELECT fractal_text_to_sql('q', ARRAY['bt_customers','bt_orders']);" >/dev/null 2>&1 || rc=1 ;;
+          *) ;;   # unreachable: (w+i) % 3 is always 0/1/2
         esac
       done
       echo "$rc" > "$outdir/worker_$w.rc"
@@ -1000,10 +1018,10 @@ gate_12_soak() {
 
   local failed_workers=0
   for w in $(seq 1 "$SOAK_WORKERS"); do
-    [ "$(cat "$outdir/worker_$w.rc" 2>/dev/null)" = "0" ] || failed_workers=$((failed_workers + 1))
+    [[ "$(cat "$outdir/worker_$w.rc" 2>/dev/null)" = "0" ]] || failed_workers=$((failed_workers + 1))
   done
   local total=$(( SOAK_WORKERS * SOAK_ITERS ))
-  [ "$failed_workers" -eq 0 ] \
+  [[ "$failed_workers" -eq 0 ]] \
     && pass "12 soak: $SOAK_WORKERS workers x $SOAK_ITERS iterations ($total calls) all succeeded" \
     || fail "12 soak: $failed_workers/$SOAK_WORKERS workers had a failed call"
 
@@ -1030,7 +1048,7 @@ gate_13_siu_mode() {
   t2s_expect "DELETE FROM bt_orders"         "not permitted" "13 siu-delete-still-rejected"
 
   local n; n=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_orders;" 2>&1)
-  [ "$n" = "0" ] && pass "13 siu_mode: INSERT/UPDATE never execute (bt_orders still empty)" \
+  [[ "$n" = "0" ]] && pass "13 siu_mode: INSERT/UPDATE never execute (bt_orders still empty)" \
                   || fail "13 siu_mode: row count=$n"
 
   pg_set_guc fractalsql.text_to_sql_allowed_statements "'select'" "select"
@@ -1061,7 +1079,7 @@ gate_14_retry() {
     || fail "14 retry: retry prompt missing feedback text: '$prompt'"
 
   local n; n=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_orders;" 2>&1)
-  [ "$n" = "0" ] && pass "14 retry: never-executes held across retries" || fail "14 retry: row count=$n"
+  [[ "$n" = "0" ]] && pass "14 retry: never-executes held across retries" || fail "14 retry: row count=$n"
 
   pg_set_guc fractalsql.text_to_sql_max_attempts 1 1
   pg_swap_plugin "$MOCK"
@@ -1085,7 +1103,7 @@ gate_15_embed() {
     || { fail "15 embed: plugin swap did not take effect"; pg_swap_plugin "$MOCK"; return; }
 
   local r; r=$("${PSQL[@]}" -c "SELECT fractal_embed('test input');" 2>&1)
-  [ "$r" = "{0.1,0.2,0.3}" ] \
+  [[ "$r" = "{0.1,0.2,0.3}" ]] \
     && pass "15 embed: fractal_embed() returned the canned vector" \
     || fail "15 embed: fractal_embed() expected {0.1,0.2,0.3}, got: $r"
 
@@ -1131,7 +1149,7 @@ gate_15_embed() {
   # cast (source_table doesn't resolve) before ever reaching format().
   local rinj; rinj=$("${PSQL[@]}" -c "SELECT fractal_vectorizer_create('bt_embed_docs''; DROP TABLE bt_embed_docs; --', 'body', 'embedding');" 2>&1)
   local ninj; ninj=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_embed_docs;" 2>&1)
-  if [ "$ninj" = "2" ]; then
+  if [[ "$ninj" = "2" ]]; then
     pass "15 embed: injection-shaped source_table did not execute (bt_embed_docs intact)"
   else
     fail "15 embed: bt_embed_docs row count changed (n=$ninj) — injection may have executed"
@@ -1152,15 +1170,15 @@ gate_15_embed() {
     && pass "15 embed: double-create rejected with a clean, specific error" \
     || fail "15 embed: expected a clean double-create rejection naming id=$vzid, got: $rdup"
   local n; n=$("${PSQL[@]}" -c "SELECT fractal_vectorizer_process_queue();" 2>&1)
-  [ "$n" = "2" ] && pass "15 embed: process_queue processed 2 backfilled rows" \
+  [[ "$n" = "2" ]] && pass "15 embed: process_queue processed 2 backfilled rows" \
     || fail "15 embed: process_queue expected 2, got: $n"
 
   local embedded; embedded=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_embed_docs WHERE embedding = '{0.1,0.2,0.3}';" 2>&1)
-  [ "$embedded" = "2" ] && pass "15 embed: both rows got the real embedding written back" \
+  [[ "$embedded" = "2" ]] && pass "15 embed: both rows got the real embedding written back" \
     || fail "15 embed: expected 2 rows with the embedding written back, got: $embedded"
 
   local status; status=$("${PSQL[@]}" -c "SELECT status FROM fractal_vectorizer_status WHERE vectorizer_id = $vzid;" 2>&1)
-  [ "$status" = "done" ] && pass "15 embed: vectorizer status shows done, no failures" \
+  [[ "$status" = "done" ]] && pass "15 embed: vectorizer status shows done, no failures" \
     || fail "15 embed: expected status 'done', got: $status"
 
   "${PSQL[@]}" -c "DELETE FROM fractal_vectorizers WHERE source_table = 'bt_embed_docs';" >/dev/null 2>&1
@@ -1215,7 +1233,7 @@ gate_16_embed_authz() {
      SELECT count(*) FROM fractal_vectorizer_queue q
      JOIN fractal_vectorizers v ON v.id = q.vectorizer_id
      WHERE v.source_table = 'bt_embed_owned' AND q.status = 'pending';" 2>&1)
-  [ "$qn" = "2" ] \
+  [[ "$qn" = "2" ]] \
     && pass "16 embed_authz: backfill + trigger-driven enqueue both succeeded for the owner (2 pending)" \
     || fail "16 embed_authz: expected 2 pending rows (1 backfilled + 1 via trigger), got: $qn"
 
@@ -1224,7 +1242,7 @@ gate_16_embed_authz() {
      SELECT string_agg(DISTINCT q.status, ',') FROM fractal_vectorizer_queue q
      JOIN fractal_vectorizers v ON v.id = q.vectorizer_id
      WHERE v.source_table = 'bt_embed_owned';" 2>&1)
-  [ "$statuses" = "failed" ] \
+  [[ "$statuses" = "failed" ]] \
     && pass "16 embed_authz: outsider's process_queue() call left both rows 'failed', not processed" \
     || fail "16 embed_authz: expected both rows 'failed' after the outsider's call, got statuses: $statuses"
 
@@ -1235,7 +1253,7 @@ gate_16_embed_authz() {
     || fail "16 embed_authz: expected a permission-denied error, got: $errtext"
 
   local leaked; leaked=$("${owner_psql[@]}" -c "SELECT embedding FROM bt_embed_owned WHERE embedding IS NOT NULL;" 2>&1)
-  [ -z "$leaked" ] \
+  [[ -z "$leaked" ]] \
     && pass "16 embed_authz: no embedding was written by the unauthorized outsider's call" \
     || fail "16 embed_authz: an embedding was written despite the outsider lacking SELECT: $leaked"
 
@@ -1275,7 +1293,7 @@ gate_17_embed_soak() {
   local vzid; vzid=$("${PSQL[@]}" -c "SELECT fractal_vectorizer_create('bt_embed_soak', 'body', 'embedding');" 2>&1)
   local queued; queued=$("${PSQL[@]}" -c "
      SELECT count(*) FROM fractal_vectorizer_queue WHERE vectorizer_id = $vzid AND status = 'pending';" 2>&1)
-  if [ "$queued" != "$EMBED_SOAK_ROWS" ]; then
+  if [[ "$queued" != "$EMBED_SOAK_ROWS" ]]; then
     fail "17 embed_soak: setup: expected $EMBED_SOAK_ROWS queued rows, got $queued"
     pg_swap_plugin "$MOCK"; return
   fi
@@ -1308,28 +1326,28 @@ gate_17_embed_soak() {
   for w in $(seq 1 "$EMBED_SOAK_WORKERS"); do
     local line; line=$(cat "$outdir/worker_$w.rc" 2>/dev/null)
     local wrc wtotal; read -r wrc wtotal <<< "$line"
-    [ "$wrc" = "0" ] || failed_workers=$((failed_workers + 1))
+    [[ "$wrc" = "0" ]] || failed_workers=$((failed_workers + 1))
     sum_processed=$(( sum_processed + ${wtotal:-0} ))
   done
   rm -rf "$outdir"
 
-  [ "$failed_workers" -eq 0 ] \
+  [[ "$failed_workers" -eq 0 ]] \
     && pass "17 embed_soak: $EMBED_SOAK_WORKERS concurrent workers, no call errored" \
     || fail "17 embed_soak: $failed_workers/$EMBED_SOAK_WORKERS workers had a failed call"
 
-  [ "$sum_processed" -eq "$EMBED_SOAK_ROWS" ] \
+  [[ "$sum_processed" -eq "$EMBED_SOAK_ROWS" ]] \
     && pass "17 embed_soak: exactly $EMBED_SOAK_ROWS rows processed total (no double-count, none lost)" \
     || fail "17 embed_soak: expected $EMBED_SOAK_ROWS rows processed summed across workers, got $sum_processed"
 
   local done_n; done_n=$("${PSQL[@]}" -c "
      SELECT count(*) FROM fractal_vectorizer_queue WHERE vectorizer_id = $vzid AND status = 'done';" 2>&1)
-  [ "$done_n" = "$EMBED_SOAK_ROWS" ] \
+  [[ "$done_n" = "$EMBED_SOAK_ROWS" ]] \
     && pass "17 embed_soak: all $EMBED_SOAK_ROWS queue rows are 'done', none stuck pending/processing" \
     || fail "17 embed_soak: expected $EMBED_SOAK_ROWS rows 'done', got $done_n"
 
   local embedded_n; embedded_n=$("${PSQL[@]}" -c "
      SELECT count(*) FROM bt_embed_soak WHERE embedding = '{0.1,0.2,0.3}';" 2>&1)
-  [ "$embedded_n" = "$EMBED_SOAK_ROWS" ] \
+  [[ "$embedded_n" = "$EMBED_SOAK_ROWS" ]] \
     && pass "17 embed_soak: all $EMBED_SOAK_ROWS rows got the embedding written back exactly once" \
     || fail "17 embed_soak: expected $EMBED_SOAK_ROWS rows with the embedding, got $embedded_n"
 
@@ -1378,12 +1396,12 @@ gate_18_embed_crash() {
   # previously left the crash plugin active for the rest of the run.
   local up=0 i tries=$(( 30 * TIMEOUT_MULT )) within_budget=0
   for i in $(seq 1 $(( tries * 2 ))); do
-    "${PSQL[@]}" -c "SELECT 1;" >/dev/null 2>&1 && { up=1; [ "$i" -le "$tries" ] && within_budget=1; break; }
+    "${PSQL[@]}" -c "SELECT 1;" >/dev/null 2>&1 && { up=1; [[ "$i" -le "$tries" ]] && within_budget=1; break; }
     sleep 0.5
   done
-  [ "$within_budget" -eq 1 ] && pass "18 embed_crash: cluster auto-restarted" \
+  [[ "$within_budget" -eq 1 ]] && pass "18 embed_crash: cluster auto-restarted" \
                    || fail "18 embed_crash: cluster did not come back within $(( tries / 2 ))s"
-  if [ "$up" -ne 1 ]; then
+  if [[ "$up" -ne 1 ]]; then
     fail "18 embed_crash: cluster never came back -- remaining gates will run against the crash plugin"
     return
   fi
@@ -1394,7 +1412,7 @@ gate_18_embed_crash() {
   local statuses; statuses=$("${PSQL[@]}" -c "
      SELECT string_agg(DISTINCT status, ',') FROM fractal_vectorizer_queue
      WHERE vectorizer_id = $vzid;" 2>&1)
-  [ "$statuses" = "pending" ] \
+  [[ "$statuses" = "pending" ]] \
     && pass "18 embed_crash: all 3 rows reverted to 'pending' after the crash (atomic rollback, not stuck 'processing')" \
     || fail "18 embed_crash: expected all rows 'pending' post-crash, got statuses: $statuses"
 
@@ -1403,12 +1421,12 @@ gate_18_embed_crash() {
   # permanently wedged by the earlier crash.
   pg_swap_plugin "$EMBED" || { fail "18 embed_crash: plugin swap to EMBED did not take effect"; pg_swap_plugin "$MOCK"; return; }
   local n; n=$("${PSQL[@]}" -c "SELECT fractal_vectorizer_process_queue();" 2>&1)
-  [ "$n" = "3" ] && pass "18 embed_crash: post-recovery call processed all 3 previously-crashed rows" \
+  [[ "$n" = "3" ]] && pass "18 embed_crash: post-recovery call processed all 3 previously-crashed rows" \
                   || fail "18 embed_crash: expected 3 rows processed after recovery, got: $n"
 
   local done_n; done_n=$("${PSQL[@]}" -c "
      SELECT count(*) FROM bt_embed_crash WHERE embedding = '{0.1,0.2,0.3}';" 2>&1)
-  [ "$done_n" = "3" ] && pass "18 embed_crash: all 3 rows correctly embedded after recovery" \
+  [[ "$done_n" = "3" ]] && pass "18 embed_crash: all 3 rows correctly embedded after recovery" \
                        || fail "18 embed_crash: expected 3 embedded rows after recovery, got: $done_n"
 
   "${PSQL[@]}" -c "
@@ -1475,7 +1493,7 @@ gate_19_sfs_bounds() {
   # the gap for search_explore specifically.
   local rinj; rinj=$("${PSQL[@]}" -c "SELECT * FROM fractal_search_explore('bt_orders''; DROP TABLE bt_orders; --', 'vec', ARRAY[0.1,0.2]::float8[]);" 2>&1)
   local n; n=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_orders;" 2>&1)
-  if [ "$n" = "0" ]; then
+  if [[ "$n" = "0" ]]; then
     pass "19 sfs_bounds: injection-shaped table_name into fractal_search_explore did not execute (bt_orders intact)"
   else
     fail "19 sfs_bounds: bt_orders row count changed (n=$n) — injection may have executed"
@@ -1516,7 +1534,7 @@ gate_20_api_func() {
   echo "gap-analysis-canary" > /tmp/fractalsql_bt_sql.txt
   local r1; r1=$("${PSQL[@]}" -c "SELECT fractal_reason('q');" 2>&1)
   local expect1; expect1=$(printf '```sql\ngap-analysis-canary\n```')
-  [ "$r1" = "$expect1" ] \
+  [[ "$r1" = "$expect1" ]] \
     && pass "20 api_func: fractal_reason() returns the plugin's actual response" \
     || fail "20 api_func: fractal_reason() expected the fenced canary text, got: $r1"
   rm -f /tmp/fractalsql_bt_sql.txt
@@ -1722,7 +1740,7 @@ gate_22_v2_functions() {
      SELECT string_agg(doc_id::text, ',' ORDER BY distance)
      FROM fractal_mine_topology_negatives(ARRAY[0.0,0.0,0.0]::float8[], 2)
      WHERE doc_id IN (901,902,903,904);" 2>&1)
-  [ "$r9" = "904,903" ] \
+  [[ "$r9" = "904,903" ]] \
     && pass "22 v2_functions: fractal_mine_topology_negatives k-NN order + upsert-overwrite correct" \
     || fail "22 v2_functions: expected mine order 904,903 (901 overwritten far away), got: $r9"
 
@@ -1782,7 +1800,7 @@ gate_22_v2_functions() {
      SELECT doc_id FROM fractal_hybrid_clinical_search(
        'bt_telemetry_docs', 'emb', ARRAY[0.0,1.0,0.0]::float8[],
        ARRAY[1,3,4]::int8[], 3) ORDER BY distance;" 2>&1)
-  [ "$r13" = "$(printf '1\n4\n3')" ] \
+  [[ "$r13" = "$(printf '1\n4\n3')" ]] \
     && pass "22 v2_functions: fractal_hybrid_clinical_search restricts to the cohort and returns real doc_ids" \
     || fail "22 v2_functions: expected doc_ids 1,4,3 in that order, got: $r13"
 
@@ -2111,7 +2129,7 @@ gate_23_agents() {
           (SELECT row_number() OVER (ORDER BY ctid)-1 AS doc_id
              FROM bt_agents_patients WHERE age>65 AND condition='sepsis') x),
        5, 'id');" 2>&1)
-  [ "$r11m" = "2" ] \
+  [[ "$r11m" = "2" ]] \
     && pass "23 agents: patient_deterioration_triage cohort_matches now honors k (got 2 of 2 qualifying rows)" \
     || fail "23 agents: expected cohort_matches length 2, got: $r11m"
   local r11b; r11b=$("${PSQL[@]}" -c "
@@ -2471,12 +2489,12 @@ gate_23_agents() {
 # -max_total_time) before relying on this gate to have found everything.
 gate_21_fuzz_smoke() {
   local cc="${FSQL_FUZZ_CC:-}"
-  if [ -z "$cc" ]; then
+  if [[ -z "$cc" ]]; then
     for candidate in clang-18 clang-17 clang-16 clang-15 clang; do
       if command -v "$candidate" >/dev/null 2>&1; then cc="$candidate"; break; fi
     done
   fi
-  if [ -z "$cc" ] || ! command -v "$cc" >/dev/null 2>&1; then
+  if [[ -z "$cc" ]] || ! command -v "$cc" >/dev/null 2>&1; then
     skip "21 fuzz_smoke (no clang found -- set FSQL_FUZZ_CC to a libFuzzer-capable clang)"
     return
   fi
@@ -2532,7 +2550,7 @@ gate_24_enterprise() {
   # audit_unpack), and the dormant-path error when the library is absent.
   local ent_so
   ent_so=$(ls include/*/libfractalsql-enterprise-sovereign-c.so include/*/libfractalsql-enterprise-sovereign-c.dylib 2>/dev/null | head -1)
-  if [ -z "$ent_so" ]; then
+  if [[ -z "$ent_so" ]]; then
     skip "24 enterprise: skipped (community edition; no libfractalsql-enterprise-sovereign-c.* in include/)"
     return
   fi
@@ -2548,22 +2566,21 @@ gate_24_enterprise() {
   # reload, then poll until a fresh backend observes the new value (a
   # bare SET cannot change a SIGHUP GUC in-session, and pg_reload_conf()
   # returns before the postmaster has re-read config).
-  local want v
+  local v
   set_ent_guc() {
-    local val="$1"
+    local val="$1" want="$1"
     "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_lib = '$val';" >/dev/null 2>&1
     "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1
-    want="$val"
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       v=$("${PSQL[@]}" -tA -c "SHOW fractalsql.enterprise_lib;" 2>/dev/null)
-      [ "$v" = "$want" ] && return
+      [[ "$v" = "$want" ]] && return
       sleep 0.3
     done
   }
 
   # Phase A: enterprise library present -- the surface activates.
   set_ent_guc "$abs"
-  if [ "$v" != "$abs" ]; then
+  if [[ "$v" != "$abs" ]]; then
     fail "24 enterprise: could not apply fractalsql.enterprise_lib (reload did not take effect; got '$v')"
     return
   fi
@@ -2624,7 +2641,7 @@ gate_24_enterprise() {
 
   local rd_verify
   rd_verify=$("${PSQL[@]}" -tA -c "SELECT fractal_ledger_verify(2)->>'ok';" 2>/dev/null)
-  [ "$rd_verify" = "true" ] \
+  [[ "$rd_verify" = "true" ]] \
     && pass "24 enterprise: fractal_ledger_verify(2) confirms the audit chain is clean" \
     || fail "24 enterprise: expected fractal_ledger_verify(2) ok=true, got: $rd_verify"
 
@@ -2634,7 +2651,7 @@ gate_24_enterprise() {
   rd_before=$("${PSQL[@]}" -tA -c "SELECT count(*) FROM fractalsql_ledger WHERE kind = 2;" 2>/dev/null)
   "${PSQL[@]}" -c "SELECT fractal_optimize_portfolio(ARRAY[0.1,0.05,0.08]::float8[], ARRAY[0.04,0.01,0.01, 0.01,0.03,0.01, 0.01,0.01,0.05]::float8[], 2);" >/dev/null 2>&1
   rd_after=$("${PSQL[@]}" -tA -c "SELECT count(*) FROM fractalsql_ledger WHERE kind = 2;" 2>/dev/null)
-  if [ "${rd_after:-0}" -gt "${rd_before:-0}" ] 2>/dev/null; then
+  if [[ "${rd_after:-0}" -gt "${rd_before:-0}" ]] 2>/dev/null; then
     pass "24 enterprise: fractal_optimize_portfolio logs a provenance record to the audit chain when enterprise is active"
   else
     fail "24 enterprise: expected a new kind=2 row after fractal_optimize_portfolio, before=$rd_before after=$rd_after"
@@ -2676,7 +2693,7 @@ gate_24_enterprise() {
   "${PSQL[@]}" -c "
      SELECT * FROM fractal_agent_outlier_intercept(
        ARRAY[0.1,0.2,0.3]::float8[], 'bt_gate24_history', 'emb', 0.5);" >/dev/null 2>&1
-  [ "$(latest_audit_type)" = "agent_outlier_intercept" ] \
+  [[ "$(latest_audit_type)" = "agent_outlier_intercept" ]] \
     && pass "24 enterprise: fractal_agent_outlier_intercept logs a provenance record to the audit chain" \
     || fail "24 enterprise: expected agent_outlier_intercept in the latest kind=2 row"
 
@@ -2687,7 +2704,7 @@ gate_24_enterprise() {
   "${PSQL[@]}" -c "
      SELECT * FROM fractal_agent_data_analyst(
        'sum of val', ARRAY['bt_gate24_data'], 2);" >/dev/null 2>&1
-  [ "$(latest_audit_type)" = "agent_data_analyst" ] \
+  [[ "$(latest_audit_type)" = "agent_data_analyst" ]] \
     && pass "24 enterprise: fractal_agent_data_analyst logs a provenance record to the audit chain" \
     || fail "24 enterprise: expected agent_data_analyst in the latest kind=2 row"
 
@@ -2720,7 +2737,7 @@ gate_25_enterprise_stress() {
   # blob, and under concurrent + cross-backend access.
   local ent_so
   ent_so=$(ls include/*/libfractalsql-enterprise-sovereign-c.so include/*/libfractalsql-enterprise-sovereign-c.dylib 2>/dev/null | head -1)
-  if [ -z "$ent_so" ]; then
+  if [[ -z "$ent_so" ]]; then
     skip "25 enterprise-stress: skipped (community edition; no libfractalsql-enterprise-sovereign-c.* in include/)"
     return
   fi
@@ -2728,21 +2745,20 @@ gate_25_enterprise_stress() {
   abs=$(cd "$(dirname "$ent_so")" && pwd)/$(basename "$ent_so")
 
   # PGC_SIGHUP GUC -- same apply-and-poll helper as gate 24.
-  local want v
+  local v
   set_ent_guc() {
-    local val="$1"
+    local val="$1" want="$1"
     "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_lib = '$val';" >/dev/null 2>&1
     "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1
-    want="$val"
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       v=$("${PSQL[@]}" -tA -c "SHOW fractalsql.enterprise_lib;" 2>/dev/null)
-      [ "$v" = "$want" ] && return
+      [[ "$v" = "$want" ]] && return
       sleep 0.3
     done
   }
 
   set_ent_guc "$abs"
-  if [ "$v" != "$abs" ]; then
+  if [[ "$v" != "$abs" ]]; then
     fail "25 enterprise-stress: could not apply fractalsql.enterprise_lib (got '$v')"
     set_ent_guc ""
     return
@@ -2877,7 +2893,7 @@ SQL
   verify_full=$("${PSQL[@]}" -tA -c "SELECT fractal_ledger_verify()::text;" 2>/dev/null)
   verify_ok=$("${PSQL[@]}" -tA -c "SELECT fractal_ledger_verify()->>'ok';" 2>/dev/null)
   latest_decode=$("${PSQL[@]}" -c "SELECT fractal_audit_unpack(blob)::text FROM fractalsql_ledger WHERE kind = 1 ORDER BY id DESC LIMIT 1;" 2>&1)
-  if [ "$rows" = "9" ] && [ "$verify_ok" = "true" ] && ! grep <<< "$latest_decode" -q "ERROR:"; then
+  if [[ "$rows" = "9" ]] && [[ "$verify_ok" = "true" ]] && ! grep <<< "$latest_decode" -q "ERROR:"; then
     pass "25 enterprise-stress Phase C(b): 8 concurrent flushes -> 9 append-only rows, chain verifies as one unforked line, latest blob decodes"
   else
     fail "25 enterprise-stress Phase C(b): expected 9 linked rows + clean decode after parallel flush, got rows=$rows verify=$verify_full decode=$latest_decode"
@@ -3067,7 +3083,7 @@ gate_26_enterprise_signature() {
   # (always hard-refused, regardless of require).
   local ent_so
   ent_so=$(ls include/*/libfractalsql-enterprise-sovereign-c.so include/*/libfractalsql-enterprise-sovereign-c.dylib 2>/dev/null | head -1)
-  if [ -z "$ent_so" ]; then
+  if [[ -z "$ent_so" ]]; then
     skip "26 enterprise-signature: skipped (community edition; no libfractalsql-enterprise-sovereign-c.* in include/)"
     return
   fi
@@ -3076,33 +3092,30 @@ gate_26_enterprise_signature() {
   sig_path="${abs}.sig"
   rm -f "$sig_path"
 
-  local want v
+  local v
   set_ent_guc() {
-    local val="$1"
+    local val="$1" want="$1"
     "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_lib = '$val';" >/dev/null 2>&1
     "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1
-    want="$val"
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       v=$("${PSQL[@]}" -tA -c "SHOW fractalsql.enterprise_lib;" 2>/dev/null)
-      [ "$v" = "$want" ] && return
+      [[ "$v" = "$want" ]] && return
       sleep 0.3
     done
   }
-  local want_r vr
   set_require() {
-    local rval="$1"
+    local rval="$1" want_r="$1" vr
     "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_require_signature = $rval;" >/dev/null 2>&1
     "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1
-    want_r="$rval"
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       vr=$("${PSQL[@]}" -tA -c "SHOW fractalsql.enterprise_require_signature;" 2>/dev/null)
-      [ "$vr" = "$want_r" ] && return
+      [[ "$vr" = "$want_r" ]] && return
       sleep 0.3
     done
   }
 
   set_ent_guc "$abs"
-  if [ "$v" != "$abs" ]; then
+  if [[ "$v" != "$abs" ]]; then
     fail "26 enterprise-signature: could not apply fractalsql.enterprise_lib (got '$v')"
     return
   fi
@@ -3149,6 +3162,90 @@ gate_26_enterprise_signature() {
   set_ent_guc ""
 }
 
+# Reasoning-effort (THINK) GUC passthrough -- fractalsql.http_think/
+# http_think_provider/http_native_url/http_num_ctx reach the plugin's
+# process environment correctly (Case A/B), and never leak into
+# fractal_embed()'s tier even when set (Case C, proving
+# ensure_embed_ctx()'s explicit unsetenv() calls actually work). Each
+# case uses a fresh "${PSQL[@]}" -c invocation deliberately -- a new
+# backend process per call, so g_reason_loaded/g_embed_loaded (per-
+# backend statics) start false and ensure_*_ctx() actually re-applies
+# the current GUC values instead of short-circuiting on an earlier
+# call's cached load.
+gate_27_think() {
+  pg_swap_plugin "$THINK" || { fail "27 think: plugin swap did not take effect"; return; }
+  local dump=/tmp/fractalsql_bt_think_dump.txt
+
+  # Case A: all four unset -- byte-identical to pre-v1.4.0 behavior.
+  pg_set_guc fractalsql.http_think "''" "" || { fail "27 think: reset http_think"; pg_swap_plugin "$MOCK"; return; }
+  pg_set_guc fractalsql.http_think_provider "''" "" || { fail "27 think: reset http_think_provider"; pg_swap_plugin "$MOCK"; return; }
+  pg_set_guc fractalsql.http_native_url "''" "" || { fail "27 think: reset http_native_url"; pg_swap_plugin "$MOCK"; return; }
+  pg_set_guc fractalsql.http_num_ctx 0 0 || { fail "27 think: reset http_num_ctx"; pg_swap_plugin "$MOCK"; return; }
+  rm -f "$dump"
+  "${PSQL[@]}" -c "SELECT fractal_reason('q');" >/dev/null 2>&1
+  local a; a=$(cat "$dump" 2>/dev/null)
+  if grep <<< "$a" -q "^THINK=(unset)$" && grep <<< "$a" -q "^THINK_PROVIDER=(unset)$" \
+     && grep <<< "$a" -q "^NATIVE_URL=(unset)$" && grep <<< "$a" -q "^NUM_CTX=(unset)$"; then
+    pass "27 think Case A: all four GUCs unset -> no THINK-related env var reaches the plugin"
+  else
+    fail "27 think Case A: expected all four (unset), got: $a"
+  fi
+
+  # Case B: set all four -- each reaches the plugin's environment via
+  # fractal_reason() (ensure_reason_ctx()'s apply_think_env()).
+  pg_set_guc fractalsql.http_think "'medium'" "medium" || { fail "27 think: set http_think"; pg_swap_plugin "$MOCK"; return; }
+  pg_set_guc fractalsql.http_think_provider "'ollama'" "ollama" || { fail "27 think: set http_think_provider"; pg_swap_plugin "$MOCK"; return; }
+  pg_set_guc fractalsql.http_native_url "'http://127.0.0.1:9/native'" "http://127.0.0.1:9/native" \
+    || { fail "27 think: set http_native_url"; pg_swap_plugin "$MOCK"; return; }
+  pg_set_guc fractalsql.http_num_ctx 8192 8192 || { fail "27 think: set http_num_ctx"; pg_swap_plugin "$MOCK"; return; }
+  rm -f "$dump"
+  "${PSQL[@]}" -c "SELECT fractal_reason('q');" >/dev/null 2>&1
+  local b; b=$(cat "$dump" 2>/dev/null)
+  if grep <<< "$b" -q "^THINK=medium$" && grep <<< "$b" -q "^THINK_PROVIDER=ollama$" \
+     && grep <<< "$b" -q "^NATIVE_URL=http://127.0.0.1:9/native$" && grep <<< "$b" -q "^NUM_CTX=8192$"; then
+    pass "27 think Case B: all four GUCs reach the plugin via fractal_reason()"
+  else
+    fail "27 think Case B: expected THINK=medium/THINK_PROVIDER=ollama/NATIVE_URL=http://127.0.0.1:9/native/NUM_CTX=8192, got: $b"
+  fi
+
+  # Case C: fractal_text_to_sql()'s GENERATE step forwards the same four
+  # (apply_think_env() is shared between ensure_reason_ctx() and
+  # ensure_text_to_sql_ctx()) -- the mock's canned "OK" response isn't
+  # a fenced SQL block, so this call is expected to error; only the
+  # dump file (written before that error, at format_prompt() time) is
+  # under test here.
+  rm -f "$dump"
+  "${PSQL[@]}" -c "SELECT fractal_text_to_sql('q', ARRAY['bt_customers']);" >/dev/null 2>&1
+  local c; c=$(cat "$dump" 2>/dev/null)
+  if grep <<< "$c" -q "^THINK=medium$" && grep <<< "$c" -q "^THINK_PROVIDER=ollama$"; then
+    pass "27 think Case C: fractal_text_to_sql()'s GENERATE step also forwards THINK/THINK_PROVIDER"
+  else
+    fail "27 think Case C: expected THINK=medium/THINK_PROVIDER=ollama from the GENERATE step, got: $c"
+  fi
+
+  # Case D: fractal_embed() never sees THINK vars even with the GUCs
+  # still set from Case B/C -- proves ensure_embed_ctx()'s explicit
+  # unsetenv() calls, not just "embed happens not to set them".
+  pg_set_guc fractalsql.http_embed_url "'http://unused/embeddings'" "http://unused/embeddings" \
+    || { fail "27 think Case D: http_embed_url GUC did not take effect"; pg_swap_plugin "$MOCK"; return; }
+  rm -f "$dump"
+  "${PSQL[@]}" -c "SELECT fractal_embed('test input');" >/dev/null 2>&1
+  local d; d=$(cat "$dump" 2>/dev/null)
+  if grep <<< "$d" -q "^THINK=(unset)$" && grep <<< "$d" -q "^THINK_PROVIDER=(unset)$" \
+     && grep <<< "$d" -q "^NATIVE_URL=(unset)$" && grep <<< "$d" -q "^NUM_CTX=(unset)$"; then
+    pass "27 think Case D: fractal_embed() never sees THINK vars, even with the GUCs still set"
+  else
+    fail "27 think Case D: expected all four (unset) in the embed tier, got: $d"
+  fi
+
+  # Reset the GUCs so they do not leak into later gates on a reused cluster.
+  pg_set_guc fractalsql.http_think "''" ""
+  pg_set_guc fractalsql.http_think_provider "''" ""
+  pg_set_guc fractalsql.http_native_url "''" ""
+  pg_set_guc fractalsql.http_num_ctx 0 0
+  pg_swap_plugin "$MOCK"
+}
+
 run_major() {
   local v="$1"; shift
   local gates=("$@")
@@ -3156,25 +3253,27 @@ run_major() {
   # gate 01 (build) and gate 21 (fuzz smoke) always run standalone (no
   # cluster) -- gate 21 links the pure-C parsers directly, no postgres
   # backend involved at all.
-  for g in "${gates[@]}"; do [ "$g" = "01" ] && gate_01_build "$v"; done
-  for g in "${gates[@]}"; do [ "$g" = "21" ] && gate_21_fuzz_smoke; done
+  for g in "${gates[@]}"; do [[ "$g" = "01" ]] && gate_01_build "$v"; done
+  for g in "${gates[@]}"; do [[ "$g" = "21" ]] && gate_21_fuzz_smoke; done
   # gates 02-20 need a live cluster
   local need_db=0
   for g in "${gates[@]}"; do
     case "$g" in
-      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26) need_db=1 ;;
+      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26|27) need_db=1 ;;
+      *) ;;   # 01/21 run standalone above, no DB needed -- intentional no-op
     esac
   done
-  if [ "$need_db" -eq 1 ]; then
+  if [[ "$need_db" -eq 1 ]]; then
     pg_setup "$v"; local rc=$?
-    if [ "$rc" -eq 1 ]; then skip "PG$v runtime gates (server binaries absent)"; return; fi
-    if [ "$rc" -ne 0 ]; then fail "PG$v cluster setup"; return; fi
+    if [[ "$rc" -eq 1 ]]; then skip "PG$v runtime gates (server binaries absent)"; return; fi
+    if [[ "$rc" -eq 3 ]]; then return; fi   # pg_setup already printed its own skip() message
+    if [[ "$rc" -ne 0 ]]; then fail "PG$v cluster setup"; return; fi
     # gate 03 creates bt_customers/bt_orders; several later gates
     # (04, 05, 07, 08, 10) depend on that fixture already existing, so
     # ensure it exists even if 03 wasn't explicitly requested.
     local have_03=0
-    for g in "${gates[@]}"; do [ "$g" = "03" ] && have_03=1; done
-    [ "$have_03" -eq 0 ] && gate_03_schema_context >/dev/null
+    for g in "${gates[@]}"; do [[ "$g" = "03" ]] && have_03=1; done
+    [[ "$have_03" -eq 0 ]] && gate_03_schema_context >/dev/null
     for g in "${gates[@]}"; do
       case "$g" in
         02) gate_02_smoke ;;
@@ -3201,6 +3300,8 @@ run_major() {
         24) gate_24_enterprise ;;
         25) gate_25_enterprise_stress ;;
         26) gate_26_enterprise_signature ;;
+        27) gate_27_think ;;
+        *) ;;   # 01/21 already ran standalone above, no-op here by design
       esac
     done
     pg_teardown
@@ -3208,20 +3309,20 @@ run_major() {
 }
 
 # --- dispatch ---------------------------------------------------------
-if [ -n "$ONE_GATE" ]; then
+if [[ -n "$ONE_GATE" ]]; then
   run_major "$PG_MAJOR" "$ONE_GATE"
-elif [ "$MODE" = "quick" ]; then
+elif [[ "$MODE" = "quick" ]]; then
   run_major "$PG_MAJOR" "${QUICK_GATES[@]}"
-elif [ "$MODE" = "cross" ]; then
+elif [[ "$MODE" = "cross" ]]; then
   for v in 14 15 16 17 18; do run_major "$v" "${DEFAULT_GATES[@]}"; done
-elif [ "$MODE" = "fuzz" ]; then
+elif [[ "$MODE" = "fuzz" ]]; then
   run_major "$PG_MAJOR" "${FUZZ_GATES[@]}"
 else
   run_major "$PG_MAJOR" "${DEFAULT_GATES[@]}"
 fi
 
-[ "$COVERAGE" -eq 1 ] && run_coverage_report
+[[ "$COVERAGE" -eq 1 ]] && run_coverage_report
 
 echo ""
-if [ "$FAILED" -eq 0 ]; then printf "${G}build_test: PASS${Z}\n"; exit 0
+if [[ "$FAILED" -eq 0 ]]; then printf "${G}build_test: PASS${Z}\n"; exit 0
 else printf "${R}build_test: FAIL${Z}\n"; exit 1; fi

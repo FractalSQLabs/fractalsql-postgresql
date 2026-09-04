@@ -169,7 +169,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoRoot
 
-$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26')
+$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26','27')
 $QuickGates   = @('01','02')
 $FuzzGates    = @('21')
 
@@ -252,6 +252,12 @@ $SqlFile     = Join-Path $DataDir 'fractalsql_bt_sql.txt'
 # attempt-1 rejection reason was threaded into the attempt-2 prompt.
 $RetryPromptFile = Join-Path $DataDir 'fractalsql_bt_retry_prompt.txt'
 
+# Bare relative filename the THINK plugin (tests\windows\think_reasoning_
+# plugin_win.c) dumps the four FSQL_REASONING_HTTP_THINK*/NUM_CTX env vars
+# to at format_prompt() time -- same resolved-against-CWD mechanism as
+# $RetryPromptFile above. Gate 27 reads this back.
+$ThinkDumpFile = Join-Path $DataDir 'fractalsql_bt_think_dump.txt'
+
 $Mock  = Join-Path $PluginDir 'mock.dll'
 $Evil  = Join-Path $PluginDir 'evil_overread.dll'
 $Crash = Join-Path $PluginDir 'evil_crash.dll'
@@ -259,6 +265,7 @@ $Lying = Join-Path $PluginDir 'evil_lying.dll'
 $Retry = Join-Path $PluginDir 'retry.dll'
 $Embed = Join-Path $PluginDir 'mock_embed.dll'
 $EvilEmbed = Join-Path $PluginDir 'evil_embed.dll'
+$Think = Join-Path $PluginDir 'think.dll'
 
 # Runs psql.exe via .NET's Process API directly rather than PowerShell's
 # own native-command invocation (`&`). Simpler approaches still let a
@@ -322,7 +329,7 @@ function Psql {
 
 function Cleanup {
     if (Test-Path $DataDir) {
-        try { & "$Bin\pg_ctl.exe" -D $DataDir -m immediate stop 2>&1 | Out-Null } catch {}
+        try { & "$Bin\pg_ctl.exe" -D $DataDir -m immediate stop 2>&1 | Out-Null } catch { <# best-effort: pg_ctl fails harmlessly if the server is already stopped #> }
         # TEMPORARY: FSQL_BT_KEEP_DATADIR preserves $DataDir\log for
         # post-mortem debugging of the gate-24 Windows enterprise crash --
         # revert this gate once that's root-caused.
@@ -332,7 +339,7 @@ function Cleanup {
             Write-Host "[build_test] FSQL_BT_KEEP_DATADIR set -- leaving $DataDir in place (log at $DataDir\log)"
         }
     }
-    Remove-Item -Force $SqlFile, $TriggerFile, $RetryPromptFile -ErrorAction SilentlyContinue
+    Remove-Item -Force $SqlFile, $TriggerFile, $RetryPromptFile, $ThinkDumpFile -ErrorAction SilentlyContinue
 }
 
 # --- gate 01: build -------------------------------------------------------
@@ -527,7 +534,8 @@ function BuildTestPlugins {
         @{ Src = Join-Path $RepoRoot 'tests\evil_lying_length_plugin.c';           Out = $Lying },
         @{ Src = Join-Path $RepoRoot 'tests\windows\retry_reasoning_plugin_win.c'; Out = $Retry },
         @{ Src = Join-Path $RepoRoot 'tests\mock_embed_plugin.c';                  Out = $Embed },
-        @{ Src = Join-Path $RepoRoot 'tests\evil_embed_plugin.c';                  Out = $EvilEmbed }
+        @{ Src = Join-Path $RepoRoot 'tests\evil_embed_plugin.c';                  Out = $EvilEmbed },
+        @{ Src = Join-Path $RepoRoot 'tests\windows\think_reasoning_plugin_win.c'; Out = $Think }
     )
     foreach ($t in $targets) {
         $obj = [System.IO.Path]::ChangeExtension($t.Out, '.obj')
@@ -553,7 +561,7 @@ function PgSetup {
     # THIS specific datadir first (scoped, not a general postgres.exe
     # sweep -- see this same pattern already used at teardown).
     if (Test-Path $DataDir) {
-        try { & "$Bin\pg_ctl.exe" -D $DataDir -m immediate stop 2>&1 | Out-Null } catch {}
+        try { & "$Bin\pg_ctl.exe" -D $DataDir -m immediate stop 2>&1 | Out-Null } catch { <# best-effort: pg_ctl fails harmlessly if the server is already stopped #> }
         Remove-Item -Recurse -Force $DataDir
     }
     BuildTestPlugins
@@ -746,7 +754,7 @@ CREATE FUNCTION fractal_embed(input text) RETURNS float8[] AS '$DllPath','fracta
 }
 
 function PgTeardown {
-    try { & "$Bin\pg_ctl.exe" -D $DataDir -m fast stop 2>&1 | Out-Null } catch {}
+    try { & "$Bin\pg_ctl.exe" -D $DataDir -m fast stop 2>&1 | Out-Null } catch { <# best-effort: pg_ctl fails harmlessly if the server is already stopped #> }
     # TEMPORARY: see Cleanup's matching FSQL_BT_KEEP_DATADIR comment.
     if (-not $env:FSQL_BT_KEEP_DATADIR) {
         Remove-Item -Recurse -Force $DataDir, $PluginDir -ErrorAction SilentlyContinue
@@ -781,7 +789,7 @@ function PgSwapPlugin($path) {
 
 function Gate02Smoke {
     $ver = Psql -Sql "SELECT fractal_version();"
-    if ($ver -eq '2.0.5') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.5)" }
+    if ($ver -eq '2.0.6') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.6)" }
     $r = Psql -Sql @"
 WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
 SELECT CASE WHEN sqrt(v[1]*v[1]+v[2]*v[2])>1e-9
@@ -2310,7 +2318,7 @@ function Gate21FuzzSmoke {
     # runtime directory the same way Find-ClangCl resolves the compiler
     # itself, and prepend it to PATH for this process only.
     $clangResourceDir = $null
-    try { $clangResourceDir = (& $script:ClangCl -print-resource-dir 2>$null | Select-Object -First 1) } catch {}
+    try { $clangResourceDir = (& $script:ClangCl -print-resource-dir 2>$null | Select-Object -First 1) } catch { <# best-effort: clang -print-resource-dir absent/unsupported is not fatal, $clangResourceDir stays $null #> }
     if ($clangResourceDir) {
         $sanRtDir = Join-Path $clangResourceDir 'lib\windows'
         if (Test-Path $sanRtDir) { $env:PATH = "$sanRtDir;$env:PATH" }
@@ -2981,6 +2989,84 @@ function Gate26EnterpriseSignature {
     [void](Psql -Sql "SELECT pg_reload_conf();")
 }
 
+# Reasoning-effort (THINK) GUC passthrough -- mirrors build_test.sh's
+# gate 27. Each Psql call below is a fresh backend process (matches
+# build_test.sh's own reasoning behind this), so ensure_reason_ctx()/
+# ensure_embed_ctx()'s per-backend g_*_loaded statics start false and
+# actually re-apply the current GUC values each time.
+function Gate27Think {
+    if (-not (PgSwapPlugin $Think)) { Fail "27 think: plugin swap did not take effect"; return }
+
+    # Case A: all four unset -- byte-identical to pre-v1.4.0 behavior.
+    if (-not (PgSetGuc -Name 'fractalsql.http_think' -SetVal "''" -Want '')) { Fail "27 think: reset http_think"; PgSwapPlugin $Mock | Out-Null; return }
+    if (-not (PgSetGuc -Name 'fractalsql.http_think_provider' -SetVal "''" -Want '')) { Fail "27 think: reset http_think_provider"; PgSwapPlugin $Mock | Out-Null; return }
+    if (-not (PgSetGuc -Name 'fractalsql.http_native_url' -SetVal "''" -Want '')) { Fail "27 think: reset http_native_url"; PgSwapPlugin $Mock | Out-Null; return }
+    if (-not (PgSetGuc -Name 'fractalsql.http_num_ctx' -SetVal '0' -Want '0')) { Fail "27 think: reset http_num_ctx"; PgSwapPlugin $Mock | Out-Null; return }
+    Remove-Item -Force $ThinkDumpFile -ErrorAction SilentlyContinue
+    Psql -Sql "SELECT fractal_reason('q');" | Out-Null
+    $a = Get-Content -Path $ThinkDumpFile -Raw -ErrorAction SilentlyContinue
+    if ($a -and $a -match 'THINK=\(unset\)' -and $a -match 'THINK_PROVIDER=\(unset\)' `
+              -and $a -match 'NATIVE_URL=\(unset\)' -and $a -match 'NUM_CTX=\(unset\)') {
+        Pass "27 think Case A: all four GUCs unset -> no THINK-related env var reaches the plugin"
+    } else {
+        Fail "27 think Case A: expected all four (unset), got: $a"
+    }
+
+    # Case B: set all four -- each reaches the plugin's environment via
+    # fractal_reason() (ensure_reason_ctx()'s apply_think_env()).
+    if (-not (PgSetGuc -Name 'fractalsql.http_think' -SetVal "'medium'" -Want 'medium')) { Fail "27 think: set http_think"; PgSwapPlugin $Mock | Out-Null; return }
+    if (-not (PgSetGuc -Name 'fractalsql.http_think_provider' -SetVal "'ollama'" -Want 'ollama')) { Fail "27 think: set http_think_provider"; PgSwapPlugin $Mock | Out-Null; return }
+    if (-not (PgSetGuc -Name 'fractalsql.http_native_url' -SetVal "'http://127.0.0.1:9/native'" -Want 'http://127.0.0.1:9/native')) { Fail "27 think: set http_native_url"; PgSwapPlugin $Mock | Out-Null; return }
+    if (-not (PgSetGuc -Name 'fractalsql.http_num_ctx' -SetVal '8192' -Want '8192')) { Fail "27 think: set http_num_ctx"; PgSwapPlugin $Mock | Out-Null; return }
+    Remove-Item -Force $ThinkDumpFile -ErrorAction SilentlyContinue
+    Psql -Sql "SELECT fractal_reason('q');" | Out-Null
+    $b = Get-Content -Path $ThinkDumpFile -Raw -ErrorAction SilentlyContinue
+    if ($b -and $b -match 'THINK=medium' -and $b -match 'THINK_PROVIDER=ollama' `
+              -and $b -match 'NATIVE_URL=http://127\.0\.0\.1:9/native' -and $b -match 'NUM_CTX=8192') {
+        Pass "27 think Case B: all four GUCs reach the plugin via fractal_reason()"
+    } else {
+        Fail "27 think Case B: expected THINK=medium/THINK_PROVIDER=ollama/NATIVE_URL=http://127.0.0.1:9/native/NUM_CTX=8192, got: $b"
+    }
+
+    # Case C: fractal_text_to_sql()'s GENERATE step forwards the same
+    # four (apply_think_env() is shared with ensure_text_to_sql_ctx()) --
+    # the mock's canned "OK" response isn't a fenced SQL block, so this
+    # call is expected to error; only the dump file (written before that
+    # error, at format_prompt() time) is under test here.
+    Remove-Item -Force $ThinkDumpFile -ErrorAction SilentlyContinue
+    Psql -Sql "SELECT fractal_text_to_sql('q', ARRAY['bt_customers']);" | Out-Null
+    $c = Get-Content -Path $ThinkDumpFile -Raw -ErrorAction SilentlyContinue
+    if ($c -and $c -match 'THINK=medium' -and $c -match 'THINK_PROVIDER=ollama') {
+        Pass "27 think Case C: fractal_text_to_sql()'s GENERATE step also forwards THINK/THINK_PROVIDER"
+    } else {
+        Fail "27 think Case C: expected THINK=medium/THINK_PROVIDER=ollama from the GENERATE step, got: $c"
+    }
+
+    # Case D: fractal_embed() never sees THINK vars even with the GUCs
+    # still set from Case B/C -- proves ensure_embed_ctx()'s explicit
+    # unsetenv() calls, not just "embed happens not to set them".
+    if (-not (PgSetGuc -Name 'fractalsql.http_embed_url' -SetVal "'http://unused/embeddings'" -Want 'http://unused/embeddings')) {
+        Fail "27 think Case D: http_embed_url GUC did not take effect"; PgSwapPlugin $Mock | Out-Null; return
+    }
+    Remove-Item -Force $ThinkDumpFile -ErrorAction SilentlyContinue
+    Psql -Sql "SELECT fractal_embed('test input');" | Out-Null
+    $d = Get-Content -Path $ThinkDumpFile -Raw -ErrorAction SilentlyContinue
+    if ($d -and $d -match 'THINK=\(unset\)' -and $d -match 'THINK_PROVIDER=\(unset\)' `
+              -and $d -match 'NATIVE_URL=\(unset\)' -and $d -match 'NUM_CTX=\(unset\)') {
+        Pass "27 think Case D: fractal_embed() never sees THINK vars, even with the GUCs still set"
+    } else {
+        Fail "27 think Case D: expected all four (unset) in the embed tier, got: $d"
+    }
+
+    # Reset the GUCs so they do not leak into later gates on a reused cluster.
+    [void](PgSetGuc -Name 'fractalsql.http_think' -SetVal "''" -Want '')
+    [void](PgSetGuc -Name 'fractalsql.http_think_provider' -SetVal "''" -Want '')
+    [void](PgSetGuc -Name 'fractalsql.http_native_url' -SetVal "''" -Want '')
+    [void](PgSetGuc -Name 'fractalsql.http_num_ctx' -SetVal '0' -Want '0')
+    PgSwapPlugin $Mock | Out-Null
+    Remove-Item -Force $ThinkDumpFile -ErrorAction SilentlyContinue
+}
+
 function RunGates($gates) {
     Write-Host "== PG$PgMajor (Windows) =="
     if ($gates -contains '01') {
@@ -3031,6 +3117,7 @@ function RunGates($gates) {
                 '24' { Gate24Enterprise }
                 '25' { Gate25EnterpriseStress }
                 '26' { Gate26EnterpriseSignature }
+                '27' { Gate27Think }
             }
         }
         PgTeardown

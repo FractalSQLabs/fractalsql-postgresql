@@ -80,7 +80,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: docker build (runs build_test.sh --pg ${{ matrix.pg }})
         run: |
@@ -127,7 +127,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up MSVC dev cmd (x64)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
         with:
           arch: x64
 
@@ -218,7 +218,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up MSVC dev cmd (x64)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
         with:
           arch: x64
 
@@ -269,7 +269,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up MSVC dev cmd (x64)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
         with:
           arch: x64
 
@@ -304,6 +304,12 @@ jobs:
     # scope. No Debian-Bookworm-glibc class of hang here -- ASan on
     # Darwin has no LeakSanitizer component at all, so there's no
     # ASAN_OPTIONS=detect_leaks equivalent to set either.
+    #
+    # Homebrew's postgres isn't ASan-instrumented, so build_test.sh
+    # SKIPs this gate rather than failing (DYLD_INSERT_LIBRARIES can't
+    # inject ASan reliably on modern macOS). Linux/Windows ASan CI
+    # cover the same source; kept wired up for a source-built ASan
+    # postgres.
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -376,9 +382,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -qq -y wget gnupg lsb-release ca-certificates
           sudo install -d /etc/apt/keyrings
-          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          wget --max-redirect=0 -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
               | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
               | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update -qq
           sudo apt-get install -qq -y postgresql-16 postgresql-server-dev-16
@@ -408,9 +414,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -qq -y wget gnupg lsb-release ca-certificates
           sudo install -d /etc/apt/keyrings
-          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          wget --max-redirect=0 -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
               | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
               | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update -qq
           sudo apt-get install -qq -y postgresql-16 postgresql-server-dev-16
@@ -436,9 +442,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -qq -y wget gnupg lsb-release ca-certificates lcov
           sudo install -d /etc/apt/keyrings
-          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          wget --max-redirect=0 -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
               | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
               | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update -qq
           sudo apt-get install -qq -y postgresql-16 postgresql-server-dev-16

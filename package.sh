@@ -61,6 +61,7 @@ esac
 case "${PKG_ARCH}" in
     amd64) RPM_ARCH="x86_64" ;;
     arm64) RPM_ARCH="aarch64" ;;
+    *) ;;   # unreachable: PKG_ARCH already validated above
 esac
 
 # Map the package arch to the vendored-artifact platform dir so we
@@ -68,6 +69,7 @@ esac
 case "${PKG_ARCH}" in
     amd64) FSQL_PLATFORM="linux-x86_64" ;;
     arm64) FSQL_PLATFORM="linux-aarch64" ;;
+    *) ;;   # unreachable: PKG_ARCH already validated above
 esac
 
 SRC_DIR="dist/${PKG_ARCH}"

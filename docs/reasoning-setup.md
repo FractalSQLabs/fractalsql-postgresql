@@ -156,6 +156,49 @@ Shape how the plugin post-processes the LLM response via environment variables:
 - `code`: Forces a single fenced code block and extracts it.
 - `json`: Forces a fenced JSON block and validates structural integrity.
 
+`FSQL_REASONING_HTTP_RESPONSE_MODE` is a process environment variable, not a
+`fractalsql.*` GUC -- read once when the plugin initializes, so changing it
+needs a real PostgreSQL restart, not `ALTER SYSTEM` + `pg_reload_conf()`.
+
+#### Switching modes on an already-running install
+
+Docker Compose demo:
+1. Edit `docker-compose.yml` -- add or change
+   `FSQL_REASONING_HTTP_RESPONSE_MODE` under the `postgres` service's
+   `environment:` block.
+2. `docker compose up -d --build postgres` -- recreates the container so
+   the plugin picks up the new value. `docker compose restart postgres`
+   is not enough: Compose only re-reads `environment:` on container
+   recreation, not a plain restart.
+
+Bare-metal / systemd:
+1. Set `FSQL_REASONING_HTTP_RESPONSE_MODE` wherever PostgreSQL's service
+   environment is configured (e.g. `Environment=` in a systemd unit
+   override, or `/etc/postgresql/<ver>/main/environment` on
+   Debian/Ubuntu packaging).
+2. Restart the PostgreSQL service (`systemctl restart postgresql`, or
+   `pg_ctl restart`) -- reloading config is not sufficient.
+
+### Reasoning Effort (THINK)
+Hybrid-thinker models (Granite 4.2, OpenAI o-series, Claude extended thinking, DeepSeek-R1, QwQ) emit an internal reasoning trace before their final answer -- left uncontrolled, that trace dominates latency and, on memory-constrained GPUs, VRAM. Two GUCs throttle it:
+
+| GUC | Values | Notes |
+| --- | --- | --- |
+| `fractalsql.http_think` | unset (default) / `none` / `off` / any other string (`low`, `medium`, `high`, `minimal`, `xhigh`, `max`, ...) | Unset (or `none`) sends no thinking-control field, so the model's own default applies. `off` explicitly disables thinking on the wire -- not the same thing, since a hybrid-thinker model's own default is often ON. Any other value is forwarded to the provider verbatim, not checked against a fixed list -- provider effort scales keep adding tiers, so this plugin doesn't hardcode any one vendor's current names. Applies to `fractal_reason()` and `fractal_text_to_sql()`'s GENERATE step only -- never `fractal_embed()`. |
+| `fractalsql.http_think_provider` | unset (defaults to `openai`) / `openai` / `ollama` / `anthropic` / `vllm` / `grok` | Selects the request SHAPE, not a vendor -- `openai` also covers Azure OpenAI, AWS Bedrock, and Google Vertex AI's OpenAI-compatible surfaces, since this is independent of how `fractalsql.http_url` is authenticated. `grok` is for xAI's Grok models on Bedrock's OpenAI-compatible surface, which take a nested `reasoning.effort` field instead of `openai`'s top-level one. Ollama and Anthropic speak a native request shape instead, since their OpenAI-compatible endpoints don't honor thinking control. Ignored entirely when `http_think` is unset. |
+| `fractalsql.http_native_url` | unset (default) / URL | Only consulted for the ollama/anthropic native shape. Leave unset to target `fractalsql.http_url` verbatim. |
+| `fractalsql.http_num_ctx` | `0` (default, unset) / positive integer | Ollama-native context window cap (`options.num_ctx`) -- a measured fix for hybrid-thinker VRAM blowup on memory-constrained GPUs. Only applies when `http_think_provider=ollama`. |
+
+```sql
+-- Local Ollama, medium reasoning effort, capped context window
+ALTER SYSTEM SET fractalsql.http_think = 'medium';
+ALTER SYSTEM SET fractalsql.http_think_provider = 'ollama';
+ALTER SYSTEM SET fractalsql.http_num_ctx = 16384;
+SELECT pg_reload_conf();
+```
+
+The plugin never surfaces the reasoning trace itself -- `fractal_reason()`/`fractal_text_to_sql()` still return the final answer only, regardless of `http_think_provider`'s shape.
+
 ### Target-System Hints
 Set `FSQL_REASONING_HTTP_SYSTEM_TAG=postgresql18` to hint to the model that it should use syntax appropriate for your specific PG version.
 

@@ -22,11 +22,28 @@
 -- Confirm before running this script:
 --   SELECT fractal_embed('reply with a short confirmation that this connection works');
 --
--- Safe to re-run: the schema is dropped and recreated at the top.
+-- Safe to re-run: the schema is dropped and recreated at the top, and
+-- any vectorizer this demo registered on a prior run is torn down via
+-- fractal_vectorizer_drop() below (dropping the docs table alone does
+-- NOT do this -- fractal_vectorizers is a standalone catalog, not owned
+-- by docs, so a stale registration would otherwise outlive the table
+-- and fail the next fractal_vectorizer_create() call with "already
+-- exists").
 
 \timing on
 \pset pager off
 \encoding UTF8
+
+DO $$
+DECLARE
+    v_id bigint;
+BEGIN
+    SELECT id INTO v_id FROM fractal_vectorizers
+     WHERE source_table = 'docs' AND text_col = 'body' AND embedding_col = 'embedding';
+    IF v_id IS NOT NULL THEN
+        PERFORM fractal_vectorizer_drop(v_id);
+    END IF;
+END $$;
 
 DROP TABLE IF EXISTS docs;
 
@@ -45,7 +62,7 @@ INSERT INTO docs (body) VALUES
     ('The reasoning plugin speaks the OpenAI chat-completions and embeddings shapes.'),
     ('fractal_text_to_sql never executes what it generates -- that is always separate.');
 
-SELECT id, body FROM docs ORDER BY id;
+SELECT id, body FROM docs ORDER BY id ASC;
 
 \echo ''
 \echo '=== Section 2: create the vectorizer ==='
@@ -75,20 +92,20 @@ SELECT fractal_vectorizer_process_queue();
 SELECT id, body, embedding IS NOT NULL AS has_embedding,
        CASE WHEN embedding IS NOT NULL THEN array_length(embedding, 1) END AS dim
 FROM docs
-ORDER BY id;
+ORDER BY id ASC;
 
 \echo ''
 \echo 'Status view -- what fractal_vectorizer_process_queue() actually did:'
 SELECT vectorizer_id, source_table, status, n, last_error
 FROM fractal_vectorizer_status
-ORDER BY status;
+ORDER BY status ASC;
 
 \echo ''
 \echo '=== Section 6: edit a row, watch it get re-queued ==='
 UPDATE docs SET body = body || ' (edited)' WHERE id = 1;
 SELECT status, count(*) FROM fractal_vectorizer_queue GROUP BY status;
 SELECT fractal_vectorizer_process_queue();
-SELECT vectorizer_id, status, n FROM fractal_vectorizer_status ORDER BY status;
+SELECT vectorizer_id, status, n FROM fractal_vectorizer_status ORDER BY status ASC;
 
 \echo ''
 \echo '================================================================'
@@ -96,9 +113,9 @@ SELECT vectorizer_id, status, n FROM fractal_vectorizer_status ORDER BY status;
 \echo 'nothing here ran fractal_vectorizer_process_queue() on a schedule,'
 \echo 'this demo called it manually once per section.'
 \echo ''
-\echo 'Clean up (fractal_vectorizers has no FK back to docs, so this'
-\echo 'order matters -- delete the vectorizer row first, its queue rows'
-\echo 'cascade automatically, then drop the table):'
-\echo '  DELETE FROM fractal_vectorizers WHERE source_table = ''docs'';'
+\echo 'Clean up (fractal_vectorizer_drop() removes the trigger + catalog'
+\echo 'row -- its queue rows cascade automatically -- then drop the'
+\echo 'table; this demo does exactly this at the top on every re-run):'
+\echo '  SELECT fractal_vectorizer_drop(<id from fractal_vectorizer_status above>);'
 \echo '  DROP TABLE docs;'
 \echo '================================================================'

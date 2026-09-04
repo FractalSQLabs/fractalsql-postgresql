@@ -68,7 +68,7 @@
 SELECT extname, extversion
 FROM pg_extension
 WHERE extname IN ('fractalsql', 'fractalsql_agents')
-ORDER BY extname;
+ORDER BY extname ASC;
 -- Expect two rows. If fractalsql_agents is missing:
 --   CREATE EXTENSION fractalsql_agents;
 -- If fractalsql is missing, install the base extension first.

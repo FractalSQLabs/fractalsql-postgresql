@@ -85,8 +85,8 @@ FROM postgres:14-bookworm AS build-pg14
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        build-essential \
         binutils \
+        build-essential \
         file \
         postgresql-server-dev-14 \
  && rm -rf /var/lib/apt/lists/*
@@ -123,8 +123,8 @@ FROM postgres:15-bookworm AS build-pg15
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        build-essential \
         binutils \
+        build-essential \
         file \
         postgresql-server-dev-15 \
  && rm -rf /var/lib/apt/lists/*
@@ -161,8 +161,8 @@ FROM postgres:16-bookworm AS build-pg16
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        build-essential \
         binutils \
+        build-essential \
         file \
         postgresql-server-dev-16 \
  && rm -rf /var/lib/apt/lists/*
@@ -199,8 +199,8 @@ FROM postgres:17-bookworm AS build-pg17
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        build-essential \
         binutils \
+        build-essential \
         file \
         postgresql-server-dev-17 \
  && rm -rf /var/lib/apt/lists/*
@@ -237,8 +237,8 @@ FROM postgres:18-bookworm AS build-pg18
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        build-essential \
         binutils \
+        build-essential \
         file \
         postgresql-server-dev-18 \
  && rm -rf /var/lib/apt/lists/*

@@ -103,7 +103,7 @@ def main() -> int:
                 emb_arr    float8[]  NOT NULL{fv_col}
             );
         """)
-        conn.execute(f"""
+        conn.execute("""
             CREATE TABLE bench_centers (
                 cluster_id int       PRIMARY KEY,
                 center_arr float8[]  NOT NULL
@@ -145,7 +145,7 @@ def main() -> int:
                         copy.write_row((i, int(labels[i]), vec_lit, arr_lit))
         print(f"    COPY done in {time.perf_counter() - t0:.1f}s")
 
-        print(f"  building HNSW index on emb ...")
+        print("  building HNSW index on emb ...")
         t0 = time.perf_counter()
         # Tuned down from defaults (m=16, ef_construction=64) to keep demo
         # build time reasonable at 100k rows. Production deployments should

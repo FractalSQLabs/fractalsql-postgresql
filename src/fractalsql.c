@@ -144,6 +144,20 @@ extern int no_such_variable
  * the common case). See ent_verify_signature() below. */
 #include <openssl/evp.h>
 
+/* fractal_text_to_sql's statement-shape allowlist uses the backend's OWN
+ * parser (raw_parser), not a vendored copy. We run inside a live
+ * PostgreSQL backend, so the real parser is already loaded and callable
+ * -- using it parses SQL with the exact same grammar the server will
+ * execute (no version skew), on every platform, with no vendored
+ * dependency. (A vendored libpg_query was tried and rejected: it links a
+ * large slice of backend source and, on Windows, corrupted the
+ * extension DLL's load-time state.) */
+#include "parser/parser.h"     /* raw_parser, RAW_PARSE_DEFAULT */
+#include "tcop/utility.h"      /* CreateCommandTag */
+#include "tcop/cmdtag.h"       /* GetCommandTagName */
+#include "nodes/nodes.h"       /* nodeTag, T_SelectStmt, ... */
+#include "parser/analyze.h"   /* parse_analyze_fixedparams, Query.hasModifyingCTE */
+
 #ifndef INT8PASSBYVAL
 #define INT8PASSBYVAL true
 #endif
@@ -163,22 +177,9 @@ static T2SAllowedStmts t2s_allowed_stmts_mode(void);
 
 /* Internal text-to-sql generator used by the agent loop */
 static char *fractal_text_to_sql_internal(const char *question, ArrayType *table_names, char *feedback);
-/* fractal_text_to_sql's statement-shape allowlist uses the backend's
- * OWN parser (raw_parser), not a vendored copy. We run inside a live
- * PostgreSQL backend, so the real parser is already loaded and callable
- * -- using it parses SQL with the exact same grammar the server will
- * execute (no version skew), on every platform, with no vendored
- * dependency. (A vendored libpg_query was tried and rejected: it links a
- * large slice of backend source and, on Windows, corrupted the
- * extension DLL's load-time state.) */
-#include "parser/parser.h"     /* raw_parser, RAW_PARSE_DEFAULT */
-#include "tcop/utility.h"      /* CreateCommandTag */
-#include "tcop/cmdtag.h"       /* GetCommandTagName */
-#include "nodes/nodes.h"       /* nodeTag, T_SelectStmt, ... */
-#include "parser/analyze.h"   /* parse_analyze_fixedparams, Query.hasModifyingCTE */
 
 #define FSQL_EDITION "Community"
-#define FSQL_VERSION "2.0.5"
+#define FSQL_VERSION "2.0.6"
 
 /* B4-extended (H3) — supply-side DoS guards.
  *
@@ -328,6 +329,16 @@ static char *g_http_model         = NULL;
 static bool  g_http_allow_plain   = false;
 static char *g_http_embed_url     = NULL;
 static char *g_http_embed_model   = NULL;
+
+/* Reasoning-effort knobs (v1.4.0+ plugin). Chat-only by design -- never
+ * wired into ensure_embed_ctx(), which explicitly unsetenv()s all four
+ * so a value left over from an earlier fractal_reason()/
+ * fractal_text_to_sql() call in the same backend can't leak into an
+ * embedding request. */
+static char *g_http_think          = NULL;
+static char *g_http_think_provider = NULL;
+static char *g_http_native_url     = NULL;
+static int   g_http_num_ctx        = 0;
 
 /* text-to-sql GUCs. See fractal_text_to_sql() below for how each is
  * used; kept together here since they're a matched set. */
@@ -512,6 +523,62 @@ _PG_init(void)
         "embeddinggemma).",
         &g_http_embed_model,
         NULL,
+        PGC_SIGHUP,
+        0, NULL, NULL, NULL);
+
+    DefineCustomStringVariable(
+        "fractalsql.http_think",
+        "Reasoning effort for hybrid-thinker models: none/off/anything else.",
+        "Forwarded via FSQL_REASONING_HTTP_THINK to fractal_reason() and "
+        "fractal_text_to_sql()'s GENERATE step only -- never fractal_embed(). "
+        "Leave unset for the plugin's own default (none: no thinking-control "
+        "field sent). 'off' explicitly disables thinking, distinct from "
+        "unset/none. Any other value (low/medium/high/...) is forwarded to "
+        "the provider verbatim, not checked against a fixed list.",
+        &g_http_think,
+        NULL,
+        PGC_SIGHUP,
+        0, NULL, NULL, NULL);
+
+    DefineCustomStringVariable(
+        "fractalsql.http_think_provider",
+        "Which field/shape carries http_think: openai/ollama/anthropic/vllm/grok.",
+        "Forwarded via FSQL_REASONING_HTTP_THINK_PROVIDER. Names a request "
+        "SHAPE, not a vendor -- 'openai' also covers Azure OpenAI, AWS "
+        "Bedrock, and Google Vertex AI's OpenAI-compatible surfaces, since "
+        "this is independent of how http_url is authenticated. 'grok' is "
+        "for xAI's Grok models on Bedrock's OpenAI-compatible surface, "
+        "which take a nested reasoning.effort field. Ignored entirely when "
+        "http_think is unset. Defaults to openai inside the plugin if "
+        "http_think is set but this is left unset.",
+        &g_http_think_provider,
+        NULL,
+        PGC_SIGHUP,
+        0, NULL, NULL, NULL);
+
+    DefineCustomStringVariable(
+        "fractalsql.http_native_url",
+        "Endpoint override for the ollama/anthropic native request shape.",
+        "Forwarded via FSQL_REASONING_HTTP_NATIVE_URL. Only consulted when "
+        "http_think_provider is ollama or anthropic (those two speak a "
+        "native shape instead of the OpenAI-compatible one, see api-cognition "
+        "docs). Leave unset to target http_url verbatim -- most Ollama/"
+        "Anthropic deployments don't need a separate URL for the native path.",
+        &g_http_native_url,
+        NULL,
+        PGC_SIGHUP,
+        0, NULL, NULL, NULL);
+
+    DefineCustomIntVariable(
+        "fractalsql.http_num_ctx",
+        "Ollama-native context window cap (options.num_ctx).",
+        "Forwarded via FSQL_REASONING_HTTP_NUM_CTX when > 0. Only applies "
+        "to the ollama-native shape (http_think_provider=ollama with "
+        "http_think set) -- a measured fix for hybrid-thinker VRAM blowup "
+        "on memory-constrained GPUs. 0 (default) leaves it unset, letting "
+        "the plugin/server apply its own default.",
+        &g_http_num_ctx,
+        0, 0, 1048576,
         PGC_SIGHUP,
         0, NULL, NULL, NULL);
 
@@ -822,7 +889,13 @@ ent_verify_signature(const char *so_path)
     f = fopen(so_path, "rb");
     if (f == NULL)
         return ENT_SIG_IOERROR;
-    if (fseek(f, 0, SEEK_END) != 0 || (so_len = ftell(f)) < 0 || fseek(f, 0, SEEK_SET) != 0)
+    if (fseek(f, 0, SEEK_END) != 0)
+    {
+        fclose(f);
+        return ENT_SIG_IOERROR;
+    }
+    so_len = ftell(f);
+    if (so_len < 0 || fseek(f, 0, SEEK_SET) != 0)
     {
         fclose(f);
         return ENT_SIG_IOERROR;
@@ -961,9 +1034,13 @@ ensure_enterprise_lib(void)
                         "FractalSQL Enterprise core library?",
                         g_enterprise_lib)));
         ent_dlclose(h);
-        g_ent_ledger_flush = g_ent_ledger_load = g_ent_ledger_compact = NULL;
-        g_ent_ledger_reset_soft = g_ent_ledger_reset_hard = NULL;
-        g_ent_ledger_truth_count = g_ent_ledger_shadow_count = NULL;
+        g_ent_ledger_flush = NULL;
+        g_ent_ledger_load = NULL;
+        g_ent_ledger_compact = NULL;
+        g_ent_ledger_reset_soft = NULL;
+        g_ent_ledger_reset_hard = NULL;
+        g_ent_ledger_truth_count = NULL;
+        g_ent_ledger_shadow_count = NULL;
         g_ent_audit_unpack = NULL;
         return false;
     }
@@ -1371,15 +1448,47 @@ ensure_reasoning_tier_ctx(fsql_ctx **ctx_out, bool *loaded_out,
     *loaded_out = true;
 }
 
-/* fractal_reason() and fractal_text_to_sql()'s REVIEW step both want a
- * plain-text judgment -- chat mode, no RESPONSE_MODE override. Explicit
- * unsetenv() of MODE/RESPONSE_MODE/SYSTEM_TAG, not just "don't set
- * them": a var setenv()'d by a DIFFERENT tier earlier in this same
- * backend (e.g. fractal_embed() called first) would otherwise still be
- * sitting in the process environment when this tier's own
- * fsql_load_reasoning() -> getenv() runs. Clear centrally so a var set
- * by one tier does not leak into another tier's getenv() within the
- * same backend. */
+/* Shared by ensure_reason_ctx()/ensure_text_to_sql_ctx() -- both chat
+ * tiers forward the same four reasoning-effort GUCs identically.
+ * ensure_embed_ctx() does NOT call this; it unsetenv()s all four
+ * itself, since http_think has no embedding-mode meaning. */
+static void
+apply_think_env(void)
+{
+    if (g_http_think && *g_http_think)
+        setenv("FSQL_REASONING_HTTP_THINK", g_http_think, 1);
+    else
+        unsetenv("FSQL_REASONING_HTTP_THINK");
+
+    if (g_http_think_provider && *g_http_think_provider)
+        setenv("FSQL_REASONING_HTTP_THINK_PROVIDER", g_http_think_provider, 1);
+    else
+        unsetenv("FSQL_REASONING_HTTP_THINK_PROVIDER");
+
+    if (g_http_native_url && *g_http_native_url)
+        setenv("FSQL_REASONING_HTTP_NATIVE_URL", g_http_native_url, 1);
+    else
+        unsetenv("FSQL_REASONING_HTTP_NATIVE_URL");
+
+    if (g_http_num_ctx > 0)
+    {
+        char num_ctx_str[32];
+        snprintf(num_ctx_str, sizeof num_ctx_str, "%d", g_http_num_ctx);
+        setenv("FSQL_REASONING_HTTP_NUM_CTX", num_ctx_str, 1);
+    }
+    else
+        unsetenv("FSQL_REASONING_HTTP_NUM_CTX");
+}
+
+/* fractal_reason(): chat mode. Explicit unsetenv() of MODE/SYSTEM_TAG
+ * so a value set by a different tier earlier in this backend (e.g.
+ * fractal_embed() called first) can't leak into this tier's getenv().
+ *
+ * RESPONSE_MODE is left alone -- it's fractal_reason()'s own opt-in
+ * lever (FSQL_REASONING_HTTP_RESPONSE_MODE), never set by this file.
+ * fractal_text_to_sql() hardcodes "code" for itself but cleans up
+ * right after (see ensure_text_to_sql_ctx() below), so it never
+ * reaches here. */
 static void
 ensure_reason_ctx(void)
 {
@@ -1395,8 +1504,8 @@ ensure_reason_ctx(void)
     if (g_http_allow_plain)
         setenv("FSQL_REASONING_HTTP_ALLOW_PLAINTEXT", "1", 1);
     unsetenv("FSQL_REASONING_HTTP_MODE");
-    unsetenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
     unsetenv("FSQL_REASONING_HTTP_SYSTEM_TAG");
+    apply_think_env();
 
     ensure_reasoning_tier_ctx(&g_reason_ctx, &g_reason_loaded, "fractal_reason");
 }
@@ -1425,6 +1534,9 @@ ensure_text_to_sql_ctx(void)
     if (g_http_allow_plain)
         setenv("FSQL_REASONING_HTTP_ALLOW_PLAINTEXT", "1", 1);
     unsetenv("FSQL_REASONING_HTTP_MODE");
+    /* Hardcoded, not user-configurable. Cleaned up right after init
+     * below so it can't leak into a later fractal_reason() call and
+     * override that function's own RESPONSE_MODE lever. */
     setenv("FSQL_REASONING_HTTP_RESPONSE_MODE", "code", 1);
 
     /* missing_ok=true: server_version_num is a core GUC that always
@@ -1440,8 +1552,10 @@ ensure_text_to_sql_ctx(void)
     else
         snprintf(system_tag, sizeof system_tag, "postgresql");
     setenv("FSQL_REASONING_HTTP_SYSTEM_TAG", system_tag, 1);
+    apply_think_env();
 
     ensure_reasoning_tier_ctx(&g_t2s_ctx, &g_t2s_loaded, "fractal_text_to_sql");
+    unsetenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
 }
 
 /* fractal_embed(): embedding mode. http_embed_url has no fallback to
@@ -1474,8 +1588,14 @@ ensure_embed_ctx(void)
     if (g_http_allow_plain)
         setenv("FSQL_REASONING_HTTP_ALLOW_PLAINTEXT", "1", 1);
     setenv("FSQL_REASONING_HTTP_MODE", "embedding", 1);
-    unsetenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
     unsetenv("FSQL_REASONING_HTTP_SYSTEM_TAG");
+    /* http_think has no embedding-mode meaning -- explicit unsetenv, not
+     * apply_think_env(), since a GUC set for the chat tiers must never
+     * leak into an embedding request in the same backend. */
+    unsetenv("FSQL_REASONING_HTTP_THINK");
+    unsetenv("FSQL_REASONING_HTTP_THINK_PROVIDER");
+    unsetenv("FSQL_REASONING_HTTP_NATIVE_URL");
+    unsetenv("FSQL_REASONING_HTTP_NUM_CTX");
 
     ensure_reasoning_tier_ctx(&g_embed_ctx, &g_embed_loaded, "fractal_embed");
 }

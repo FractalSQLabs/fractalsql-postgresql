@@ -172,7 +172,7 @@ SELECT 'Q' || r.snapshot_id || '-hist',
 FROM vqf_snapshot_raw r
 JOIN vqf_snapshot_sums s ON s.snapshot_id = r.snapshot_id
 GROUP BY r.snapshot_id, s.total
-ORDER BY r.snapshot_id;
+ORDER BY r.snapshot_id ASC;
 
 -- Blueprint (raw primitive): the nearest historical rebalance pattern to
 -- the optimized book (equal-weight baseline -> the Section 2 optimized

@@ -7,3 +7,7 @@ results/
 packaging/debian/.debhelper/
 packaging/rpm/BUILD/
 packaging/rpm/BUILDROOT/
+.env
+.env.*
+*.pem
+*.key

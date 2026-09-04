@@ -9,9 +9,10 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-permissions:
-  contents: write
-
+# contents: write is granted per-job below (package/build-darwin/build-
+# windows-msi, the three that call softprops/action-gh-release to upload
+# assets), not here at workflow level -- build doesn't touch the release
+# at all and doesn't need it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -47,7 +48,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Build fractalsql_pg${{ matrix.pg }}.so for ${{ matrix.arch }}
         run: |
@@ -130,7 +131,7 @@ jobs:
           VERSION=$(docker exec pg psql -U postgres -tAc \
               "SELECT fractal_version();")
           echo "version: ${VERSION}"
-          test "${VERSION}" = "2.0.5"
+          test "${VERSION}" = "2.0.6"
 
           # Convergence sanity check: query = (0.6, 0.8), objective is
           # cosine distance. Cosine distance is magnitude-invariant,
@@ -174,6 +175,8 @@ jobs:
     name: package ${{ matrix.arch }}
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -292,7 +295,7 @@ jobs:
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/packages/*
           fail_on_unmatched_files: false
@@ -326,6 +329,8 @@ jobs:
         pg: [14, 15, 16, 17, 18]
         arch: [arm64, x86_64]
     runs-on: macos-14
+    permissions:
+      contents: write
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
@@ -367,7 +372,7 @@ jobs:
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/packages/*-pg${{ matrix.pg }}-darwin-${{ matrix.arch }}.tar.gz
           fail_on_unmatched_files: false
@@ -431,12 +436,14 @@ jobs:
             edb_version: "18.0-1"
     runs-on: ${{ matrix.runner }}
     name: windows pg${{ matrix.pg }} / ${{ matrix.arch }}
+    permissions:
+      contents: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up MSVC dev cmd (${{ matrix.arch }})
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
         with:
           arch: ${{ matrix.arch }}
 
@@ -556,7 +563,7 @@ jobs:
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/windows/FractalSQL-PostgreSQL-${{ matrix.pg }}-*-${{ matrix.arch }}.msi
           fail_on_unmatched_files: false

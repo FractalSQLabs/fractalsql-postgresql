@@ -53,7 +53,7 @@ INSERT INTO docs_fv (body) VALUES
     ('FractalSQL runs Stochastic Fractal Search directly inside PostgreSQL.'),
     ('The reasoning plugin speaks the OpenAI chat-completions and embeddings shapes.');
 
-SELECT id, body FROM docs_fv ORDER BY id;
+SELECT id, body FROM docs_fv ORDER BY id ASC;
 
 \echo ''
 \echo '=== Section 2: create the vectorizer -- exactly like the float8[] demo ==='
@@ -63,7 +63,7 @@ SELECT fractal_vectorizer_process_queue();
 SELECT id, body, embedding IS NOT NULL AS has_embedding,
        fractal_vector_dims(embedding) AS dim
 FROM docs_fv
-ORDER BY id;
+ORDER BY id ASC;
 
 \echo ''
 \echo '=== Section 3: the hard-fail, live ==='

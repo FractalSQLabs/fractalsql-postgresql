@@ -27,6 +27,9 @@ fractal_reason(
 | `query` | `text` | (Required) | The question or instruction for the LLM. |
 | `context` | `text` | `'{}'` | A JSON payload containing search results, schema, or other data. |
 
+### Reasoning Effort
+Hybrid-thinker models' internal reasoning trace is throttled via `fractalsql.http_think` and related GUCs -- see [Reasoning Setup: Reasoning Effort (THINK)](reasoning-setup.md#reasoning-effort-think).
+
 ---
 
 ## `fractal_embed`

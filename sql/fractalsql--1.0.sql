@@ -576,6 +576,48 @@ COMMENT ON FUNCTION fractal_vectorizer_resume(bigint) IS
   'paused, since the trigger itself was a no-op for the whole '
   'duration), picked up on the next process_queue() call.';
 
+-- Irreversible, unlike pause/resume: deregisters the vectorizer entirely
+-- rather than toggling it off. Needed because (source_table, text_col,
+-- embedding_col) is UNIQUE on fractal_vectorizers -- without this,
+-- there was no supported way to retarget or re-create a vectorizer once
+-- registered, only fractal_vectorizer_create()'s "already exists"
+-- error naming the id stuck holding it.
+CREATE FUNCTION fractal_vectorizer_drop(vectorizer_id bigint) RETURNS void AS $$
+DECLARE
+    v_tbl text;
+    v_trg text;
+BEGIN
+    SELECT source_table INTO v_tbl FROM fractal_vectorizers WHERE id = vectorizer_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'fractal_vectorizer_drop: no vectorizer with id %', vectorizer_id;
+    END IF;
+
+    -- source_table may already be gone (dropped/recreated since
+    -- fractal_vectorizer_create() ran, e.g. a demo/test fixture reset).
+    -- to_regclass() returns NULL rather than erroring on a missing
+    -- relation, unlike ::regclass -- so this stays a clean no-op instead
+    -- of blocking the row cleanup below on a table that no longer exists
+    -- (its trigger, if any, already went with it).
+    IF to_regclass(v_tbl) IS NOT NULL THEN
+        v_trg := format('fractal_vectorizer_trg_%s', vectorizer_id);
+        EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', v_trg, v_tbl);
+    END IF;
+
+    -- fractal_vectorizer_queue rows cascade via its own
+    -- REFERENCES fractal_vectorizers(id) ON DELETE CASCADE.
+    DELETE FROM fractal_vectorizers WHERE id = vectorizer_id;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION fractal_vectorizer_drop(bigint) IS
+  'Permanently deregisters a vectorizer: drops its enqueue trigger (if '
+  'the source table still exists) and deletes its fractal_vectorizers '
+  'row, cascading to every fractal_vectorizer_queue row for it. '
+  'Irreversible -- re-embedding after this needs a fresh '
+  'fractal_vectorizer_create() call and a full backfill. For a '
+  'temporary stop that keeps config/history, use '
+  'fractal_vectorizer_pause() instead.';
+
 -- Per-vectorizer rolling-window embed-call counter, consulted by
 -- fractal_vectorizer_process_queue() below when a vectorizer's own
 -- `options` sets max_embeds_per_window. One row per vectorizer that has

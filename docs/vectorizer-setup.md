@@ -194,6 +194,9 @@ Sets up the automation trigger and backfills the queue. Requires a single-column
 ### `fractal_vectorizer_pause(id)` / `fractal_vectorizer_resume(id)`
 Toggles the `enabled` state. When paused, new writes are not queued and the processor skips existing pending rows.
 
+### `fractal_vectorizer_drop(id)`
+Permanently deregisters the vectorizer: drops its trigger and deletes its config/queue history. Irreversible -- for a temporary stop, use `fractal_vectorizer_pause()` instead. Needed before re-creating a vectorizer on the same `(source_table, text_col, embedding_col)`, since that triple is unique.
+
 ### `fractal_vectorizer_process_queue(batch_size DEFAULT 100, stale_after DEFAULT '10 minutes')`
 The engine that drives the synchronization. Safe for concurrent execution via `SKIP LOCKED`.
 

@@ -92,7 +92,7 @@ def bench_copy_throughput(conn, n: int, dim: int) -> None:
 
 
 def bench_search_latency(conn, n_queries: int) -> None:
-    print(f"\n-- (c) fractal_search_trajectory latency: float8[] vs fractal_vector overload --")
+    print("\n-- (c) fractal_search_trajectory latency: float8[] vs fractal_vector overload --")
     row = conn.execute("SELECT emb_arr, emb_fv FROM bench_vectors LIMIT 1").fetchone()
     if row is None or row[1] is None:
         print("  SKIP -- bench_vectors.emb_fv is empty (run data_gen.py "

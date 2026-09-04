@@ -28,7 +28,7 @@ set -euo pipefail
 # FSQL_PKG_VERSION lets release.yml pin an exact release version (e.g.
 # from the git tag) without touching this file.
 VERSION="${FSQL_PKG_VERSION:-$(sed -n 's/^#define FSQL_VERSION "\(.*\)"$/\1/p' src/fractalsql.c)}"
-[ -n "${VERSION}" ] || { echo "could not determine VERSION (FSQL_VERSION not found in src/fractalsql.c)" >&2; exit 1; }
+[[ -n "${VERSION}" ]] || { echo "could not determine VERSION (FSQL_VERSION not found in src/fractalsql.c)" >&2; exit 1; }
 
 ARCH="${FSQL_DARWIN_ARCH:-$(uname -m)}"   # arm64 | x86_64
 case "${ARCH}" in
@@ -42,7 +42,7 @@ command -v "${PG_CONFIG}" >/dev/null 2>&1 \
 
 # "PostgreSQL 17.2" -> 17
 PG_MAJOR="$("${PG_CONFIG}" --version | sed -E 's/^PostgreSQL[[:space:]]+([0-9]+).*/\1/')"
-[ -n "${PG_MAJOR}" ] \
+[[ -n "${PG_MAJOR}" ]] \
     || { echo "could not parse PG major from '${PG_CONFIG} --version'" >&2; exit 1; }
 
 # DLSUFFIX genuinely differs by PG major on Darwin -- confirmed on real
@@ -59,7 +59,7 @@ PG_MAJOR="$("${PG_CONFIG}" --version | sed -E 's/^PostgreSQL[[:space:]]+([0-9]+)
 # for exactly this -- ask the same Makefile/PGXS chain the real build
 # uses instead of re-deriving the logic ourselves.
 DLSUFFIX="$(make PG_CONFIG="${PG_CONFIG}" show_dl_suffix 2>/dev/null | tail -1)"
-[ -n "${DLSUFFIX}" ] || DLSUFFIX=".dylib"
+[[ -n "${DLSUFFIX}" ]] || DLSUFFIX=".dylib"
 
 FSQL_PLATFORM="darwin-${ARCH}"
 REASONING_SO="include/${FSQL_PLATFORM}/fractalsql-reasoning-http.so"
@@ -69,7 +69,7 @@ for f in "${REASONING_SO}" "${CORE_A}" LICENSE THIRD-PARTY-NOTICES.md \
          fractalsql_agents/fractalsql_agents.control \
          fractalsql_agents/sql/fractalsql_agents--1.0.sql \
          scripts/macos/install.sh; do
-    [ -f "${f}" ] \
+    [[ -f "${f}" ]] \
         || { echo "missing ${f} — re-run the vendored-artifact deploy step" >&2; exit 1; }
 done
 
@@ -86,7 +86,7 @@ echo "== building fractalsql${DLSUFFIX} for PG ${PG_MAJOR} / darwin-${ARCH} (DLS
 # FSQL_DARWIN_XC_LDFLAGS's own comment in the Makefile for the fix.
 # Empty (a no-op) for a native build.
 XC_LDFLAGS=""
-if [ "${ARCH}" != "$(uname -m)" ]; then
+if [[ "${ARCH}" != "$(uname -m)" ]]; then
     XC_LDFLAGS="-Wl,-undefined,dynamic_lookup"
 fi
 

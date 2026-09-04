@@ -2,6 +2,12 @@
 -- Part 1 of 3 of the text-to-sql validation spike (see
 -- text-to-sql-spike-2-review.sql and -3-validate.sql for the rest).
 --
+-- Generates one candidate using whichever model fractalsql.http_model
+-- is currently pointed at -- a quality-control check on
+-- fractal_text_to_sql() for YOUR configured model (gpt-oss:20b by
+-- default, or whatever you've switched to, local or cloud), not a
+-- fixed model comparison.
+--
 -- REQUIRES FSQL_REASONING_HTTP_RESPONSE_MODE=code -- set it and
 -- restart PostgreSQL BEFORE running this file. See "Switching modes
 -- on an already-running install" in ../docs/reasoning-setup.md.
@@ -20,47 +26,18 @@ CREATE TABLE spike_candidates (
     review   text
 );
 
-\echo '=== GENERATE: phi4:14b ==='
-ALTER SYSTEM SET fractalsql.http_model = 'phi4:14b';
-SELECT pg_reload_conf();
-\c
-\encoding UTF8
+SELECT current_setting('fractalsql.http_model') AS model \gset
+\echo === GENERATE: :model ===
 INSERT INTO spike_candidates (model, sql_text) VALUES (
-    'phi4:14b',
+    :'model',
     fractal_reason(
         'Write a single PostgreSQL SELECT statement that answers this question: for each service, show the count of alerts broken down by severity level, but only include services that have logged at least one critical-severity alert. Return only the SQL, no explanation.',
         'Schema: demo_alerts(id serial PK, service text, message text, severity text CHECK IN (''info'',''warning'',''critical''), created_at timestamptz). No foreign keys, this is the only table.'
     )
 );
 
-\echo '=== GENERATE: gemma4:12b ==='
-ALTER SYSTEM SET fractalsql.http_model = 'gemma4:12b';
-SELECT pg_reload_conf();
-\c
-\encoding UTF8
-INSERT INTO spike_candidates (model, sql_text) VALUES (
-    'gemma4:12b',
-    fractal_reason(
-        'Write a single PostgreSQL SELECT statement that answers this question: for each service, show the count of alerts broken down by severity level, but only include services that have logged at least one critical-severity alert. Return only the SQL, no explanation.',
-        'Schema: demo_alerts(id serial PK, service text, message text, severity text CHECK IN (''info'',''warning'',''critical''), created_at timestamptz). No foreign keys, this is the only table.'
-    )
-);
-
-\echo '=== GENERATE: gpt-oss:20b ==='
-ALTER SYSTEM SET fractalsql.http_model = 'gpt-oss:20b';
-SELECT pg_reload_conf();
-\c
-\encoding UTF8
-INSERT INTO spike_candidates (model, sql_text) VALUES (
-    'gpt-oss:20b',
-    fractal_reason(
-        'Write a single PostgreSQL SELECT statement that answers this question: for each service, show the count of alerts broken down by severity level, but only include services that have logged at least one critical-severity alert. Return only the SQL, no explanation.',
-        'Schema: demo_alerts(id serial PK, service text, message text, severity text CHECK IN (''info'',''warning'',''critical''), created_at timestamptz). No foreign keys, this is the only table.'
-    )
-);
-
-\echo '=== All three candidates ==='
-SELECT model, sql_text FROM spike_candidates ORDER BY model;
+\echo '=== Candidate ==='
+SELECT model, sql_text FROM spike_candidates;
 
 \echo ''
 \echo '================================================================'

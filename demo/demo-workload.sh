@@ -63,7 +63,7 @@ DBUSER="${WORKLOAD_DBUSER:-postgres}"
 OLLAMA_HOST=""
 MODEL=""
 
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --duration)     DURATION="$2"; shift ;;
     --concurrency)  CONCURRENCY="$2"; shift ;;
@@ -94,7 +94,7 @@ log() { printf "%b\n" "$*"; }
 # --------------------------------------------------------------------
 COMPOSE_EDITED=0
 revert_compose_overrides() {
-  [ "$COMPOSE_EDITED" -eq 1 ] || return 0
+  [[ "$COMPOSE_EDITED" -eq 1 ]] || return 0
   log "\n${Y}Reverting docker-compose.yml to its defaults...${Z}"
   sed -i \
     -e "s|http_url=http://${OLLAMA_HOST}|http_url=http://ollama:11434|" \
@@ -106,15 +106,15 @@ revert_compose_overrides() {
 }
 trap revert_compose_overrides EXIT INT TERM
 
-if [ -n "$OLLAMA_HOST" ] || [ -n "$MODEL" ]; then
-  [ -n "$OLLAMA_HOST" ] && log "Pointing reasoning/text-to-sql/embed at $OLLAMA_HOST for this run..."
-  [ -n "$MODEL" ] && log "Using chat model $MODEL for reason/text-to-sql this run..."
+if [[ -n "$OLLAMA_HOST" ]] || [[ -n "$MODEL" ]]; then
+  [[ -n "$OLLAMA_HOST" ]] && log "Pointing reasoning/text-to-sql/embed at $OLLAMA_HOST for this run..."
+  [[ -n "$MODEL" ]] && log "Using chat model $MODEL for reason/text-to-sql this run..."
   sed_args=()
-  if [ -n "$OLLAMA_HOST" ]; then
+  if [[ -n "$OLLAMA_HOST" ]]; then
     sed_args+=(-e "s|http_url=http://ollama:11434|http_url=http://${OLLAMA_HOST}|")
     sed_args+=(-e "s|http_embed_url=http://ollama:11434|http_embed_url=http://${OLLAMA_HOST}|")
   fi
-  if [ -n "$MODEL" ]; then
+  if [[ -n "$MODEL" ]]; then
     sed_args+=(-e "s|http_model=gpt-oss:20b|http_model=${MODEL}|")
   fi
   sed -i "${sed_args[@]}" docker-compose.yml
@@ -130,7 +130,7 @@ if [ -n "$OLLAMA_HOST" ] || [ -n "$MODEL" ]; then
     "${PSQL[@]}" -c "SELECT 1;" >/dev/null 2>&1 && { ready=1; break; }
     sleep 1
   done
-  if [ "$ready" -ne 1 ]; then
+  if [[ "$ready" -ne 1 ]]; then
     log "\n${Y}postgres never became reachable within 30s of starting --"
     log "aborting before running the workload against a dead container."
     log "Check: docker logs $CONTAINER${Z}"
@@ -227,16 +227,16 @@ EMBED_TEXTS=(
 )
 
 worker() {
-    local wid="$1" end_at op t0 out lat
+    local wid="$1" end_at op out lat
     end_at=$(( $(date +%s) + DURATION ))
     : > "$RESULTS_DIR/worker_$wid.log"
-    while [ "$(date +%s)" -lt "$end_at" ]; do
+    while [[ "$(date +%s)" -lt "$end_at" ]]; do
         local r=$(( RANDOM % 100 ))
-        if   [ "$r" -lt 40 ]; then op=sniper
-        elif [ "$r" -lt 55 ]; then op=scout
-        elif [ "$r" -lt 70 ]; then op=embed
-        elif [ "$r" -lt 80 ]; then op=insert
-        elif [ "$r" -lt 90 ]; then op=t2s
+        if   [[ "$r" -lt 40 ]]; then op=sniper
+        elif [[ "$r" -lt 55 ]]; then op=scout
+        elif [[ "$r" -lt 70 ]]; then op=embed
+        elif [[ "$r" -lt 80 ]]; then op=insert
+        elif [[ "$r" -lt 90 ]]; then op=t2s
         else                       op=reason
         fi
 
@@ -267,6 +267,7 @@ worker() {
             reason)
                 local p="${REASON_PROMPTS[$((RANDOM % ${#REASON_PROMPTS[@]}))]}"
                 out=$("${PSQL[@]}" -c "\timing on" -c "SELECT fractal_reason('$p');" 2>&1) ;;
+            *) ;;   # unreachable: op is set to one of the above by the if/elif chain above
         esac
 
         # psql prints a Time: line even when the query itself errored --
@@ -278,7 +279,7 @@ worker() {
         lat=$(printf '%s' "$out" | grep -oE 'Time: [0-9.]+ ms' | grep -oE '[0-9.]+' | head -1)
         if printf '%s' "$out" | grep -q '^ERROR:'; then
             echo "$op fail 0" >> "$RESULTS_DIR/worker_$wid.log"
-        elif [ -n "$lat" ]; then
+        elif [[ -n "$lat" ]]; then
             echo "$op ok $lat" >> "$RESULTS_DIR/worker_$wid.log"
         else
             echo "$op fail 0" >> "$RESULTS_DIR/worker_$wid.log"
@@ -292,7 +293,7 @@ worker() {
 # options this stands in for.
 scheduler() {
     local end_at=$(( $(date +%s) + DURATION ))
-    while [ "$(date +%s)" -lt "$end_at" ]; do
+    while [[ "$(date +%s)" -lt "$end_at" ]]; do
         sleep 5
         "${PSQL[@]}" -c "SELECT fractal_vectorizer_process_queue();" >/dev/null 2>&1
     done
@@ -319,10 +320,10 @@ percentile() {
     # args: sorted-values-file percentile(0-100)
     local file="$1" p="$2" n idx
     n=$(wc -l < "$file")
-    [ "$n" -eq 0 ] && { echo "-"; return; }
+    [[ "$n" -eq 0 ]] && { echo "-"; return; }
     idx=$(( (p * n + 99) / 100 ))
-    [ "$idx" -lt 1 ] && idx=1
-    [ "$idx" -gt "$n" ] && idx="$n"
+    [[ "$idx" -lt 1 ]] && idx=1
+    [[ "$idx" -gt "$n" ]] && idx="$n"
     sed -n "${idx}p" "$file"
 }
 
@@ -336,7 +337,7 @@ total_calls=0
 total_failed=0
 for op in sniper scout embed insert t2s reason; do
     n=$(awk -v o="$op" '$1==o' "$RESULTS_DIR/all.log" | wc -l)
-    [ "$n" -eq 0 ] && continue
+    [[ "$n" -eq 0 ]] && continue
     nfail=$(awk -v o="$op" '$1==o && $2=="fail"' "$RESULTS_DIR/all.log" | wc -l)
     awk -v o="$op" '$1==o && $2=="ok" {print $3}' "$RESULTS_DIR/all.log" | sort -n > "$RESULTS_DIR/$op.sorted"
     p50=$(percentile "$RESULTS_DIR/$op.sorted" 50)
@@ -349,7 +350,7 @@ done
 
 log ""
 log "Total: $total_calls calls, $total_failed failed, $(( total_calls / DURATION )) calls/sec aggregate throughput"
-if [ "$total_failed" -eq 0 ]; then
+if [[ "$total_failed" -eq 0 ]]; then
     log "${G}No failures under this load.${Z}"
 else
     log "${Y}$total_failed calls failed -- if reasoning wasn't configured, that's expected"
