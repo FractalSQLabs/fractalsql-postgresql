@@ -245,13 +245,7 @@ jobs:
           # "direct connection" path (resolve_psql_as() tries this before
           # falling back to sudo -u postgres). Running the whole script
           # as postgres avoids needing to install sudo in this container.
-          # --provider ollama, not openai-compatible: the latter has no
-          # plaintext override by design (it's meant for real https
-          # cloud endpoints), so it refuses to load a plugin pointed at
-          # our plaintext local mock. ollama mode sets
-          # http_allow_plaintext=on automatically, which is what this
-          # mock endpoint actually needs regardless of what the GUCs
-          # are named.
+          # ollama mode sets http_allow_plaintext=on; openai-compatible doesn't.
           su postgres -c "cd /work && ./scripts/easy_install.sh \
               --pg \${PG_VER} --no-install --yes \
               --provider ollama \
@@ -521,13 +515,7 @@ jobs:
           # anyone who ran install.sh themselves first. PG_BINDIR pins the
           # exact Homebrew install, removing any ambiguity from this
           # runner's other preinstalled PostgreSQL binaries.
-          # --provider ollama, not openai-compatible: the latter has no
-          # plaintext override by design (it's meant for real https
-          # cloud endpoints), so it refuses to load a plugin pointed at
-          # our plaintext local mock. ollama mode sets
-          # http_allow_plaintext=on automatically, which is what this
-          # mock endpoint actually needs regardless of what the GUCs
-          # are named.
+          # ollama mode sets http_allow_plaintext=on; openai-compatible doesn't.
           PG_BINDIR="$(brew --prefix postgresql@17)/bin" \
             ./scripts/easy_install.sh \
               --pg 17 --no-install --yes \
@@ -686,12 +674,13 @@ jobs:
               exit 1
           }
 
-          $env:PGPASSWORD = 'postgres'
-          $psql = "C:\Program Files\PostgreSQL\17\bin\psql.exe"
-          $edition = & $psql -h 127.0.0.1 -U postgres -d postgres -Atc "SELECT fractal_edition();"
+          # Read the edition easy_install.ps1 already printed instead of
+          # opening a second psql connection here.
+          $edition = Select-String -Path easy-install.log -Pattern 'fractal_edition\(\) = (\S+),' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
           Write-Host "edition=$edition"
           if ($edition -ne 'Community') {
-              Write-Host "FAIL: fractal_edition() returned '$edition'"
+              Write-Host "FAIL: fractal_edition() line not found or unexpected in easy-install.log"
               exit 1
           }
           Write-Host "ok: easy_install.ps1 end-to-end (Windows, pg17)"

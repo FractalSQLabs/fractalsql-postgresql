@@ -3671,12 +3671,8 @@ fractal_text_to_sql_internal(const char *question, ArrayType *table_names, char 
 
     fsql_ai_response_t gen_resp;
     memset(&gen_resp, 0, sizeof(gen_resp));
-    /* ensure_text_to_sql_ctx()'s own setenv/unsetenv only brackets the
-     * one-time plugin load, which finishes well before this dispatch
-     * call ever runs. A plugin that checks RESPONSE_MODE at generate
-     * time (not just at load) would otherwise never see it set here,
-     * so assert it again right around the actual dispatch, including
-     * every retry attempt. */
+    /* Some plugins check RESPONSE_MODE at generate time, not just at
+     * load, so assert it again right around the dispatch call. */
     setenv("FSQL_REASONING_HTTP_RESPONSE_MODE", "code", 1);
     int rc = fsql_dispatch_ai(g_t2s_ctx,
                               prompt.data, strlen(prompt.data),
