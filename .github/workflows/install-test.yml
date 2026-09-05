@@ -109,7 +109,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.8"
+          test "\$VERSION" = "2.0.9"
           echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -233,6 +233,7 @@ jobs:
           # is never exercised, same as anyone who ran apt install first.
           apt-get install -qq -y ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.deb
 
+          chmod +x /work/scripts/easy_install.sh
           python3 /work/scripts/ci/mock_llm.py 18080 &
           MOCK_PID=\$!
           for i in \$(seq 1 50); do
@@ -244,11 +245,20 @@ jobs:
           # "direct connection" path (resolve_psql_as() tries this before
           # falling back to sudo -u postgres). Running the whole script
           # as postgres avoids needing to install sudo in this container.
+          # --provider ollama, not openai-compatible: the latter has no
+          # plaintext override by design (it's meant for real https
+          # cloud endpoints), so it refuses to load a plugin pointed at
+          # our plaintext local mock. ollama mode sets
+          # http_allow_plaintext=on automatically, which is what this
+          # mock endpoint actually needs regardless of what the GUCs
+          # are named.
           su postgres -c "cd /work && ./scripts/easy_install.sh \
               --pg \${PG_VER} --no-install --yes \
-              --provider openai-compatible \
+              --provider ollama \
               --url http://127.0.0.1:18080/v1/chat/completions \
-              --model mock-model --token test-token" | tee /tmp/easy-install.log
+              --model mock-model \
+              --embed-url http://127.0.0.1:18080/v1/embeddings \
+              --embed-model mock-embed --think off" | tee /tmp/easy-install.log
 
           kill \${MOCK_PID} 2>/dev/null || true
 
@@ -324,7 +334,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.8"
+          test "\$VERSION" = "2.0.9"
           echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -428,7 +438,7 @@ jobs:
           VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.8"
+          test "${VERSION}" = "2.0.9"
 
           # Search works with no further config.
           psql -d postgres -Atc \
@@ -511,12 +521,21 @@ jobs:
           # anyone who ran install.sh themselves first. PG_BINDIR pins the
           # exact Homebrew install, removing any ambiguity from this
           # runner's other preinstalled PostgreSQL binaries.
+          # --provider ollama, not openai-compatible: the latter has no
+          # plaintext override by design (it's meant for real https
+          # cloud endpoints), so it refuses to load a plugin pointed at
+          # our plaintext local mock. ollama mode sets
+          # http_allow_plaintext=on automatically, which is what this
+          # mock endpoint actually needs regardless of what the GUCs
+          # are named.
           PG_BINDIR="$(brew --prefix postgresql@17)/bin" \
             ./scripts/easy_install.sh \
               --pg 17 --no-install --yes \
-              --provider openai-compatible \
+              --provider ollama \
               --url http://127.0.0.1:18080/v1/chat/completions \
-              --model mock-model --token test-token | tee /tmp/easy-install.log
+              --model mock-model \
+              --embed-url http://127.0.0.1:18080/v1/embeddings \
+              --embed-model mock-embed --think off | tee /tmp/easy-install.log
 
           kill "${MOCK_PID}" 2>/dev/null || true
 
@@ -640,11 +659,21 @@ jobs:
           # Deliberately no -PgDir: this exercises the script's own
           # registry-based auto-detection (Get-PgInstalls) against the
           # real EDB install above, not a manual override.
+          #
+          # -Provider ollama, not openai-compatible: the latter has no
+          # plaintext override by design (it's meant for real https
+          # cloud endpoints), so it refuses to load a plugin pointed at
+          # our plaintext local mock. ollama mode sets
+          # http_allow_plaintext=on automatically, which is what this
+          # mock endpoint actually needs regardless of what the GUCs
+          # are named.
           & pwsh -File .\scripts\windows\easy_install.ps1 `
               -PgMajor 17 -PgPassword 'postgres' `
-              -Provider openai-compatible `
+              -Provider ollama `
               -Url 'http://127.0.0.1:18080/v1/chat/completions' `
-              -Model 'mock-model' -Token 'test-token' `
+              -Model 'mock-model' `
+              -EmbedUrl 'http://127.0.0.1:18080/v1/embeddings' `
+              -EmbedModel 'mock-embed' -Think off `
               -NoInstall -Yes 2>&1 | Tee-Object -FilePath easy-install.log
           if ($LASTEXITCODE -ne 0) {
               Write-Host "FATAL: easy_install.ps1 exited $LASTEXITCODE"
