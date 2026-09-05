@@ -102,7 +102,14 @@ fi
 # now, appended to COPT after pg_config's own flags so it wins (clang
 # honors the last -isysroot on the command line).
 SDK_OVERRIDE=""
-BAKED_SDK="$("${PG_CONFIG}" --cflags 2>/dev/null | grep -oE -- '-isysroot [^ ]+' | awk '{print $2}' | head -1)"
+# grep exits 1 when pg_config's cflags have no -isysroot at all (the
+# normal case on Homebrew, which never bakes one in). Under pipefail
+# that nonzero status propagates to this whole command substitution,
+# and set -e then kills the script right here with no error message --
+# this broke every Homebrew-based Darwin build, not just the EDB case
+# this check exists for. The `|| true` treats "no match" as the
+# ordinary, expected outcome it is.
+BAKED_SDK="$("${PG_CONFIG}" --cflags 2>/dev/null | grep -oE -- '-isysroot [^ ]+' | awk '{print $2}' | head -1 || true)"
 if [[ -n "${BAKED_SDK}" ]] && [[ ! -d "${BAKED_SDK}" ]]; then
     REAL_SDK="$(xcrun --show-sdk-path 2>/dev/null || true)"
     if [[ -n "${REAL_SDK}" ]]; then
