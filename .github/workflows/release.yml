@@ -131,7 +131,7 @@ jobs:
           VERSION=$(docker exec pg psql -U postgres -tAc \
               "SELECT fractal_version();")
           echo "version: ${VERSION}"
-          test "${VERSION}" = "2.0.6"
+          test "${VERSION}" = "2.0.7"
 
           # Convergence sanity check: query = (0.6, 0.8), objective is
           # cosine distance. Cosine distance is magnitude-invariant,
@@ -227,6 +227,23 @@ jobs:
           chmod +x package.sh
           ./package.sh ${{ matrix.arch }}
           ls -l dist/packages
+
+      # easy_install.sh is arch-independent (pure bash), so stamp it once
+      # from the amd64 leg only, not once per matrix arch. Uploading the
+      # identical file from both the amd64 and arm64 package jobs would
+      # race two concurrent release-asset uploads of the same name.
+      - name: Stamp version into easy_install.sh
+        if: matrix.arch == 'amd64'
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+              FSQL_VERSION="${{ github.ref_name }}"
+              FSQL_VERSION="${FSQL_VERSION#v}"
+          else
+              FSQL_VERSION="$(sed -n 's/^#define FSQL_VERSION "\(.*\)"$/\1/p' src/fractalsql.c)"
+          fi
+          sed "s/@@FSQL_VERSION@@/${FSQL_VERSION}/" scripts/easy_install.sh > dist/packages/easy_install.sh
+          chmod +x dist/packages/easy_install.sh
 
       # Verify no luajit runtime dep leaked into the package metadata.
       - name: Verify packages declare no luajit dependency
@@ -566,6 +583,40 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/windows/FractalSQL-PostgreSQL-${{ matrix.pg }}-*-${{ matrix.arch }}.msi
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # easy_install.ps1 is PG-major-independent (it detects installs at
+      # runtime), so stamp and upload it from one matrix cell only (pg 14,
+      # arbitrary but stable), not once per (pg, arch) cell, to avoid
+      # five concurrent jobs racing an upload of the same release asset.
+      - name: Stamp version into easy_install.ps1
+        if: matrix.pg == 14
+        shell: pwsh
+        run: |
+          if ("${{ github.ref }}" -like "refs/tags/v*") {
+            $ver = "${{ github.ref_name }}".Substring(1)
+          } else {
+            $m = Select-String -Path src\fractalsql.c -Pattern '^#define FSQL_VERSION "(.*)"$' | Select-Object -First 1
+            $ver = $m.Matches[0].Groups[1].Value
+          }
+          New-Item -ItemType Directory -Force -Path dist\windows | Out-Null
+          (Get-Content scripts\windows\easy_install.ps1 -Raw) -replace '@@FSQL_VERSION@@', $ver | Set-Content -Path dist\windows\easy_install.ps1 -Encoding utf8
+
+      - name: Upload easy_install.ps1 artifact
+        if: matrix.pg == 14
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fractalsql-postgresql-easy-install-ps1
+          path: dist/windows/easy_install.ps1
+          if-no-files-found: error
+
+      - name: Upload easy_install.ps1 to Release
+        if: matrix.pg == 14 && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          files: dist/windows/easy_install.ps1
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

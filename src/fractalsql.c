@@ -179,7 +179,7 @@ static T2SAllowedStmts t2s_allowed_stmts_mode(void);
 static char *fractal_text_to_sql_internal(const char *question, ArrayType *table_names, char *feedback);
 
 #define FSQL_EDITION "Community"
-#define FSQL_VERSION "2.0.6"
+#define FSQL_VERSION "2.0.7"
 
 /* B4-extended (H3) — supply-side DoS guards.
  *
@@ -320,6 +320,17 @@ static bool      g_t2s_loaded    = false;
 
 static fsql_ctx *g_embed_ctx     = NULL;   /* fractal_embed() */
 static bool      g_embed_loaded  = false;
+
+/* An operator can set FSQL_REASONING_HTTP_RESPONSE_MODE at the process
+ * level (same mechanism as FSQL_REASONING_HTTP_TIMEOUT_MS) to control
+ * fractal_reason()'s own response parsing. Captured once here, in
+ * _PG_init, before any SQL function in this backend has a chance to
+ * run and before fractal_text_to_sql() ever sets its own temporary
+ * "code" value. ensure_reason_ctx() asserts this captured value
+ * explicitly on every load instead of trusting whatever the process
+ * environment currently holds, so it can never end up loading with a
+ * value some other tier left behind. See ensure_reason_ctx() below. */
+static char *g_response_mode_boot = NULL;
 
 /* GUC storage — PostgreSQL requires static lifetime for GUC string vars. */
 static char *g_reasoning_plugin   = NULL;
@@ -675,6 +686,24 @@ _PG_init(void)
         GUC_SUPERUSER_ONLY, NULL, NULL, NULL);
 
     /* Plugin loading deferred to ensure_reasoning_ctx() — see comment there. */
+
+    /* Capture whatever RESPONSE_MODE an operator set at the process
+     * level, before any SQL function in this backend can run and
+     * before fractal_text_to_sql() ever sets its own temporary value.
+     * Plain malloc+memcpy, not pstrdup: this needs to survive for the
+     * life of the backend process, independent of any PostgreSQL
+     * memory context. Not strdup either: MSVC deprecates it in favor
+     * of _strdup, and this file builds on Windows too. */
+    {
+        const char *v = getenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
+        if (v)
+        {
+            size_t len = strlen(v) + 1;
+            g_response_mode_boot = malloc(len);
+            if (g_response_mode_boot)
+                memcpy(g_response_mode_boot, v, len);
+        }
+    }
 }
 
 void
@@ -1484,11 +1513,19 @@ apply_think_env(void)
  * so a value set by a different tier earlier in this backend (e.g.
  * fractal_embed() called first) can't leak into this tier's getenv().
  *
- * RESPONSE_MODE is left alone -- it's fractal_reason()'s own opt-in
- * lever (FSQL_REASONING_HTTP_RESPONSE_MODE), never set by this file.
- * fractal_text_to_sql() hardcodes "code" for itself but cleans up
- * right after (see ensure_text_to_sql_ctx() below), so it never
- * reaches here. */
+ * RESPONSE_MODE is fractal_reason()'s own opt-in lever
+ * (FSQL_REASONING_HTTP_RESPONSE_MODE), an operator-set process
+ * environment variable, never a value this file computes itself. We
+ * assert the value captured once at _PG_init (g_response_mode_boot)
+ * rather than reading whatever is currently in the process
+ * environment: fractal_text_to_sql() temporarily sets this same
+ * variable to "code" for its own GENERATE step and clears it right
+ * after (see ensure_text_to_sql_ctx() below), but if that load ever
+ * fails partway through, an ereport(ERROR) unwinds past the cleanup
+ * and leaves "code" sitting in the environment for the rest of the
+ * backend's life. Asserting our own captured value here, instead of
+ * trusting ambient state, means this load is correct regardless of
+ * what any other tier's load left behind. */
 static void
 ensure_reason_ctx(void)
 {
@@ -1505,6 +1542,10 @@ ensure_reason_ctx(void)
         setenv("FSQL_REASONING_HTTP_ALLOW_PLAINTEXT", "1", 1);
     unsetenv("FSQL_REASONING_HTTP_MODE");
     unsetenv("FSQL_REASONING_HTTP_SYSTEM_TAG");
+    if (g_response_mode_boot && *g_response_mode_boot)
+        setenv("FSQL_REASONING_HTTP_RESPONSE_MODE", g_response_mode_boot, 1);
+    else
+        unsetenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
     apply_think_env();
 
     ensure_reasoning_tier_ctx(&g_reason_ctx, &g_reason_loaded, "fractal_reason");
@@ -1589,6 +1630,10 @@ ensure_embed_ctx(void)
         setenv("FSQL_REASONING_HTTP_ALLOW_PLAINTEXT", "1", 1);
     setenv("FSQL_REASONING_HTTP_MODE", "embedding", 1);
     unsetenv("FSQL_REASONING_HTTP_SYSTEM_TAG");
+    /* RESPONSE_MODE has no embedding-mode meaning -- explicit unsetenv
+     * so a "code" value left behind by an interrupted text_to_sql load
+     * (see ensure_reason_ctx()'s comment above) can't reach here either. */
+    unsetenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
     /* http_think has no embedding-mode meaning -- explicit unsetenv, not
      * apply_think_env(), since a GUC set for the chat tiers must never
      * leak into an embedding request in the same backend. */
@@ -2855,11 +2900,16 @@ fractal_rag_agent(PG_FUNCTION_ARGS)
     ensure_embed_ctx();
     fsql_ai_response_t emb_resp;
     memset(&emb_resp, 0, sizeof(emb_resp));
-    fsql_dispatch_ai(g_embed_ctx, query_str, strlen(query_str), "{}", 2, &emb_resp);
+    int rc_emb = fsql_dispatch_ai(g_embed_ctx, query_str, strlen(query_str), "{}", 2, &emb_resp);
+    if (rc_emb != 0 || emb_resp.rc != 0) {
+        fsql_ai_response_free(&emb_resp);
+        ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION), errmsg("fractal_rag_agent: embedding failed")));
+    }
     char *raw_emb = pnstrdup(emb_resp.summary, emb_resp.summary_len);
     fsql_ai_response_free(&emb_resp);
     double *query_vec = palloc(MAX_EMBED_DIM * sizeof(double));
     int dim = fsql_parse_embedding_array(raw_emb, query_vec, MAX_EMBED_DIM);
+    if (dim <= 0) ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION), errmsg("fractal_rag_agent: failed to parse embedding")));
 
     /* 2. Hybrid search: Filter then Scout. Capture each row's ctid so the
      * search-result positions map back to physical rows for content
@@ -4155,12 +4205,20 @@ fractal_optimize_portfolio(PG_FUNCTION_ARGS)
     int     diffusion_mode = PG_ARGISNULL(5) ? 0 :
         parse_diffusion_mode(text_to_cstring(PG_GETARG_TEXT_PP(5)));
 
-    if (cov_n != n_assets * n_assets)
+    /* Both sides widened to int64 before multiplying: n_assets and cov_n
+     * are plain int, so n_assets * n_assets alone can overflow 32 bits
+     * for a large n_assets and wrap to a small or negative number. That
+     * would let an attacker pick an n_assets whose square wraps to a
+     * small value, then supply a cov array of only that small size
+     * instead of the true n_assets^2 the check is meant to require. The
+     * optimizer below then reads cov as an n_assets x n_assets matrix,
+     * running far past the actual buffer. */
+    if ((int64) cov_n != (int64) n_assets * n_assets)
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("fractalsql: cov length (%d) must be n_assets^2 "
-                        "(n_assets=%d, expected %d)",
-                        cov_n, n_assets, n_assets * n_assets)));
+                        "(n_assets=%d, expected %lld)",
+                        cov_n, n_assets, (long long) n_assets * n_assets)));
     if (k <= 0 || k > n_assets)
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_EXCEPTION),
@@ -4218,12 +4276,20 @@ fractal_optimize_portfolio_multimodal(PG_FUNCTION_ARGS)
     int     diffusion_mode = PG_ARGISNULL(8) ? 0 :
         parse_diffusion_mode(text_to_cstring(PG_GETARG_TEXT_PP(8)));
 
-    if (cov_n != n_assets * n_assets)
+    /* Both sides widened to int64 before multiplying: n_assets and cov_n
+     * are plain int, so n_assets * n_assets alone can overflow 32 bits
+     * for a large n_assets and wrap to a small or negative number. That
+     * would let an attacker pick an n_assets whose square wraps to a
+     * small value, then supply a cov array of only that small size
+     * instead of the true n_assets^2 the check is meant to require. The
+     * optimizer below then reads cov as an n_assets x n_assets matrix,
+     * running far past the actual buffer. */
+    if ((int64) cov_n != (int64) n_assets * n_assets)
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("fractalsql: cov length (%d) must be n_assets^2 "
-                        "(n_assets=%d, expected %d)",
-                        cov_n, n_assets, n_assets * n_assets)));
+                        "(n_assets=%d, expected %lld)",
+                        cov_n, n_assets, (long long) n_assets * n_assets)));
     if (k <= 0 || k > n_assets)
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_EXCEPTION),
@@ -4366,12 +4432,20 @@ fractal_optimize_portfolio_multimodal_pareto(PG_FUNCTION_ARGS)
     int     diffusion_mode = PG_ARGISNULL(7) ? 0 :
         parse_diffusion_mode(text_to_cstring(PG_GETARG_TEXT_PP(7)));
 
-    if (cov_n != n_assets * n_assets)
+    /* Both sides widened to int64 before multiplying: n_assets and cov_n
+     * are plain int, so n_assets * n_assets alone can overflow 32 bits
+     * for a large n_assets and wrap to a small or negative number. That
+     * would let an attacker pick an n_assets whose square wraps to a
+     * small value, then supply a cov array of only that small size
+     * instead of the true n_assets^2 the check is meant to require. The
+     * optimizer below then reads cov as an n_assets x n_assets matrix,
+     * running far past the actual buffer. */
+    if ((int64) cov_n != (int64) n_assets * n_assets)
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("fractalsql: cov length (%d) must be n_assets^2 "
-                        "(n_assets=%d, expected %d)",
-                        cov_n, n_assets, n_assets * n_assets)));
+                        "(n_assets=%d, expected %lld)",
+                        cov_n, n_assets, (long long) n_assets * n_assets)));
     if (k <= 0 || k > n_assets)
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_EXCEPTION),

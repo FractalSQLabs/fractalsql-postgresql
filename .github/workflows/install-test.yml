@@ -109,7 +109,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.6"
+          test "\$VERSION" = "2.0.7"
           echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -195,6 +195,78 @@ jobs:
               -v "${{ github.workspace }}:/work" -w /work \
               ubuntu:24.04 bash /work/test-deb.sh
 
+  easy-install-linux:
+    name: "easy_install.sh: Debian wizard, non-interactive (pg17)"
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install package, then run easy_install.sh against a mock LLM
+        env:
+          PG_VER: 17
+        run: |
+          cat > test-easy-install.sh <<SCRIPT
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -qq -y wget gnupg lsb-release ca-certificates python3
+
+          install -d /etc/apt/keyrings
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+              | gpg --dearmor > /etc/apt/keyrings/pgdg.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt \$(lsb_release -cs)-pgdg main" \
+              > /etc/apt/sources.list.d/pgdg.list
+          apt-get update -qq
+          apt-get install -qq -y postgresql-\${PG_VER} postgresql-client-\${PG_VER}
+          su postgres -c "pg_ctlcluster \${PG_VER} main start"
+          for i in \$(seq 1 60); do
+              su postgres -c "psql -c 'SELECT 1'" >/dev/null 2>&1 && break
+              sleep 1
+          done
+
+          # Package already installed manually here (mirrors debian-install)
+          # so the script's Phase A detects it and Phase B (--no-install)
+          # is never exercised, same as anyone who ran apt install first.
+          apt-get install -qq -y ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.deb
+
+          python3 /work/scripts/ci/mock_llm.py 18080 &
+          MOCK_PID=\$!
+          for i in \$(seq 1 50); do
+              (echo > /dev/tcp/127.0.0.1/18080) >/dev/null 2>&1 && break
+              sleep 0.2
+          done
+
+          # Peer auth as the postgres OS user is easy_install.sh's own
+          # "direct connection" path (resolve_psql_as() tries this before
+          # falling back to sudo -u postgres). Running the whole script
+          # as postgres avoids needing to install sudo in this container.
+          su postgres -c "cd /work && ./scripts/easy_install.sh \
+              --pg \${PG_VER} --no-install --yes \
+              --provider openai-compatible \
+              --url http://127.0.0.1:18080/v1/chat/completions \
+              --model mock-model --token test-token" | tee /tmp/easy-install.log
+
+          kill \${MOCK_PID} 2>/dev/null || true
+
+          grep -q 'pong-from-mock' /tmp/easy-install.log \
+              || { echo "FAIL: reasoning round-trip via easy_install.sh didn't reach the mock reply"; exit 1; }
+
+          EDITION=\$(su postgres -c "psql -At -c 'SELECT fractal_edition();'")
+          VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
+          echo "edition=\$EDITION version=\$VERSION"
+          test "\$EDITION" = "Community"
+          echo "ok: easy_install.sh end-to-end (Debian, pg\${PG_VER})"
+          SCRIPT
+          chmod +x test-easy-install.sh
+          docker run --rm \
+              -e PG_VER=${PG_VER} \
+              -v "${{ github.workspace }}:/work" -w /work \
+              ubuntu:24.04 bash /work/test-easy-install.sh
+
   rpm-install:
     name: RHEL (Rocky 9) — install + CREATE EXTENSION (pg${{ matrix.pg }})
     needs: build-artifacts
@@ -252,7 +324,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.6"
+          test "\$VERSION" = "2.0.7"
           echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -356,7 +428,7 @@ jobs:
           VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.6"
+          test "${VERSION}" = "2.0.7"
 
           # Search works with no further config.
           psql -d postgres -Atc \
@@ -391,3 +463,206 @@ jobs:
           test "${REPLY}" = "pong-from-mock" \
               || { echo "FAIL: reasoning round-trip returned '${REPLY}'"; exit 1; }
           echo "ok: macOS build + install + search + reasoning round-trip"
+
+  easy-install-macos:
+    name: "easy_install.sh: macOS wizard, non-interactive (pg17, arm64)"
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install PostgreSQL 17 (Homebrew) and start it
+        run: |
+          set -euo pipefail
+          brew install postgresql@17
+          echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
+          brew services start postgresql@17
+          for i in $(seq 1 30); do
+              psql -d postgres -c 'SELECT 1' >/dev/null 2>&1 && break
+              sleep 1
+          done
+
+      - name: Build + install the darwin tarball manually first
+        run: |
+          set -euo pipefail
+          chmod +x scripts/package-darwin.sh scripts/macos/install.sh
+          PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config" \
+            ./scripts/package-darwin.sh
+          TARBALL=$(ls dist/packages/*-pg17-darwin-arm64.tar.gz)
+          tar xzf "${TARBALL}" -C /tmp
+          DIR=$(basename "${TARBALL}" .tar.gz)
+          PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config" /tmp/"${DIR}"/install.sh
+          test -f "$(pg_config --sharedir)/extension/fractalsql.control"
+
+      - name: Run easy_install.sh against a mock LLM
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/mock_llm.py 18080 &
+          MOCK_PID=$!
+          for i in $(seq 1 50); do
+              nc -z 127.0.0.1 18080 >/dev/null 2>&1 && break
+              sleep 0.2
+          done
+
+          chmod +x scripts/easy_install.sh
+          # Package already installed manually above (mirrors macos-install)
+          # so Phase A detects it and skips straight to the wizard, same as
+          # anyone who ran install.sh themselves first. PG_BINDIR pins the
+          # exact Homebrew install, removing any ambiguity from this
+          # runner's other preinstalled PostgreSQL binaries.
+          PG_BINDIR="$(brew --prefix postgresql@17)/bin" \
+            ./scripts/easy_install.sh \
+              --pg 17 --no-install --yes \
+              --provider openai-compatible \
+              --url http://127.0.0.1:18080/v1/chat/completions \
+              --model mock-model --token test-token | tee /tmp/easy-install.log
+
+          kill "${MOCK_PID}" 2>/dev/null || true
+
+          grep -q 'pong-from-mock' /tmp/easy-install.log \
+              || { echo "FAIL: reasoning round-trip via easy_install.sh didn't reach the mock reply"; exit 1; }
+
+          EDITION=$(psql -d postgres -Atc 'SELECT fractal_edition();')
+          echo "edition=${EDITION}"
+          test "${EDITION}" = "Community"
+          echo "ok: easy_install.sh end-to-end (macOS, pg17)"
+
+  # No existing Windows install-CI job predates this one (build_test.ps1
+  # is a build-gate on a throwaway no-root cluster, not a real install).
+  # Unlike release.yml's build-windows-msi job, this one also installs a
+  # real PostgreSQL server through EDB's own unattended installer, not
+  # just the headers-only "binaries.zip". That's because easy_install.ps1
+  # detects the server through the registry key and Windows service the
+  # real EDB installer writes (HKLM:\SOFTWARE\PostgreSQL\Installations\...,
+  # postgresql-x64-<major>), which the binaries.zip alone never creates.
+  easy-install-windows:
+    name: "easy_install.ps1: Windows wizard, non-interactive (pg17)"
+    runs-on: windows-latest
+    env:
+      PG_VER: 17
+      EDB_VERSION: "17.0-1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: '3.x'
+
+      - name: Set up MSVC dev cmd (x64)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Install WiX Toolset (provides candle.exe + light.exe)
+        shell: pwsh
+        run: |
+          choco install -y --no-progress wixtoolset
+          $wixBin = $null
+          $candidates = @(
+            "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+            "C:\Program Files\WiX Toolset v3.14\bin",
+            "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          )
+          foreach ($c in $candidates) {
+            if (Test-Path (Join-Path $c "candle.exe")) { $wixBin = $c; break }
+          }
+          if (-not $wixBin) {
+            $hit = Get-ChildItem -Path "C:\Program Files (x86)", "C:\Program Files" `
+                     -Recurse -Filter "candle.exe" -ErrorAction SilentlyContinue `
+                   | Select-Object -First 1
+            if ($hit) { $wixBin = $hit.DirectoryName }
+          }
+          if (-not $wixBin) {
+            Write-Host "FATAL: candle.exe not found after choco install wixtoolset"
+            exit 1
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $wixBin
+
+      - name: Install a real PostgreSQL server (EDB installer, unattended)
+        shell: pwsh
+        run: |
+          $url = "https://get.enterprisedb.com/postgresql/postgresql-$env:EDB_VERSION-windows-x64.exe"
+          Write-Host "Fetching $url"
+          Invoke-WebRequest -Uri $url -OutFile edb-installer.exe -UseBasicParsing
+          $installArgs = @(
+            '--mode', 'unattended',
+            '--unattendedmodeui', 'minimal',
+            '--superpassword', 'postgres',
+            '--serverport', '5432',
+            '--disable-components', 'pgAdmin,stackbuilder'
+          )
+          $p = Start-Process -FilePath .\edb-installer.exe -ArgumentList $installArgs -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+              Write-Host "FATAL: EDB installer exited $($p.ExitCode)"
+              exit 1
+          }
+          Get-Service "postgresql-x64-$env:PG_VER"
+
+      - name: Download + unpack EDB binaries (server headers for building)
+        shell: pwsh
+        run: |
+          $zipName = "postgresql-$env:EDB_VERSION-windows-x64-binaries.zip"
+          $url = "https://get.enterprisedb.com/postgresql/$zipName"
+          New-Item -ItemType Directory -Force -Path deps\pg | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\pg\edb.zip" -UseBasicParsing
+          Expand-Archive -Path "deps\pg\edb.zip" -DestinationPath "deps\pg" -Force
+          Rename-Item -Path "deps\pg\pgsql" -NewName "root"
+
+      - name: Build fractalsql.dll
+        shell: pwsh
+        run: |
+          .\scripts\windows\build-windows.ps1 -PgDir "deps\pg\root" -PgMajor $env:PG_VER
+
+      - name: Build MSI
+        shell: cmd
+        env:
+          PG_MAJOR: ${{ env.PG_VER }}
+          MSI_ARCH: x64
+        run: |
+          call scripts\windows\build-msi.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Install our MSI into the running EDB server
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "dist\windows\FractalSQL-PostgreSQL-$env:PG_VER-*-x64.msi" | Select-Object -First 1
+          if (-not $msi) { Write-Host "FATAL: built .msi not found"; exit 1 }
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /quiet /norestart" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Host "FATAL: msiexec exited $($p.ExitCode)"; exit 1 }
+
+      - name: Run easy_install.ps1 against a mock LLM
+        shell: pwsh
+        run: |
+          Start-Process python -ArgumentList 'scripts\ci\mock_llm.py','18080' -WindowStyle Hidden
+          Start-Sleep -Seconds 2
+
+          # Deliberately no -PgDir: this exercises the script's own
+          # registry-based auto-detection (Get-PgInstalls) against the
+          # real EDB install above, not a manual override.
+          & pwsh -File .\scripts\windows\easy_install.ps1 `
+              -PgMajor 17 -PgPassword 'postgres' `
+              -Provider openai-compatible `
+              -Url 'http://127.0.0.1:18080/v1/chat/completions' `
+              -Model 'mock-model' -Token 'test-token' `
+              -NoInstall -Yes 2>&1 | Tee-Object -FilePath easy-install.log
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "FATAL: easy_install.ps1 exited $LASTEXITCODE"
+              exit 1
+          }
+
+          $hit = Select-String -Path easy-install.log -Pattern 'pong-from-mock' -Quiet
+          if (-not $hit) {
+              Write-Host "FAIL: reasoning round-trip via easy_install.ps1 didn't reach the mock reply"
+              exit 1
+          }
+
+          $env:PGPASSWORD = 'postgres'
+          $psql = "C:\Program Files\PostgreSQL\17\bin\psql.exe"
+          $edition = & $psql -h 127.0.0.1 -U postgres -d postgres -Atc "SELECT fractal_edition();"
+          Write-Host "edition=$edition"
+          if ($edition -ne 'Community') {
+              Write-Host "FAIL: fractal_edition() returned '$edition'"
+              exit 1
+          }
+          Write-Host "ok: easy_install.ps1 end-to-end (Windows, pg17)"

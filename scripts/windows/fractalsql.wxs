@@ -232,6 +232,14 @@
               KeyPath="yes" />
       </Component>
 
+      <Component Id="c_EasyInstall"
+                 Directory="FractalSqlDocDir"
+                 Guid="C1A1$(var.PG_MAJOR)07-0000-4000-B000-00000000EA51">
+        <File Id="easy_install.ps1"
+              Source="$(var.STAGE_DIR)\easy_install.ps1"
+              KeyPath="yes" />
+      </Component>
+
     </ComponentGroup>
 
     <Feature Id="MainFeature"
@@ -242,6 +250,14 @@
       <ComponentGroupRef Id="CoreFiles" />
     </Feature>
 
+    <!-- Without this, WixUI_InstallDir's EULA dialog silently falls back
+         to WiX's own bundled placeholder License.rtf, which is
+         lorem-ipsum-style sample text, instead of this project's real
+         license. This points it at the actual Apache 2.0 LICENSE,
+         converted to RTF. License.rtf is generated from that file, not
+         hand-authored, to keep it faithful to the source. -->
+    <WixVariable Id="WixUILicenseRtf" Value="scripts\windows\License.rtf" />
+
     <!-- Standard WixUI_InstallDir flow (Welcome → EULA → FolderDlg →
          Ready → Progress). The folder picker lets power-users retarget
          a non-default PG install root (e.g. D:\PostgreSQL\17) — the
@@ -249,6 +265,36 @@
          subpaths. -->
     <UIRef Id="WixUI_InstallDir" />
     <UIRef Id="WixUI_ErrorProgressText" />
+
+    <!-- "Launch the setup wizard now" checkbox on the exit dialog.
+         WixUI_InstallDir's ExitDialog has a built-in optional checkbox;
+         setting these two properties turns it on and gives it its text.
+         Checked by default. Unchecking it and clicking Finish just
+         skips the launch, same as anyone who runs easy_install.ps1
+         later by hand. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
+              Value="Run the setup wizard now (activates the extension and configures reasoning)" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
+    <!-- Type 18 (Directory + ExeCommand): CreateProcess from
+         FractalSqlDocDir, resolving powershell.exe off PATH. No
+         WixUtilExtension helper needed for this. -PgMajor disambiguates
+         if the box has several PG installs; deliberately no -PgDir, so
+         the script's own registry-based auto-detection is what runs
+         (matches whatever server this MSI's own folder picker pointed
+         at, since that's the same install the registry key describes).
+         asyncNoWait: the install finishes and this dialog closes without
+         waiting on the wizard, which stays open in its own console. -->
+    <CustomAction Id="LaunchEasyInstall"
+                  Directory="FractalSqlDocDir"
+                  ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;easy_install.ps1&quot; -PgMajor $(var.PG_MAJOR)"
+                  Return="asyncNoWait" />
+
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchEasyInstall">
+        WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed
+      </Publish>
+    </UI>
 
   </Product>
 </Wix>

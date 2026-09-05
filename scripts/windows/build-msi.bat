@@ -67,6 +67,17 @@ copy /Y fractalsql_agents\sql\fractalsql_agents--1.0.sql     "%STAGE%\fractalsql
 copy /Y LICENSE                      "%STAGE%\LICENSE"                   > nul
 copy /Y THIRD-PARTY-NOTICES.md       "%STAGE%\LICENSE-THIRD-PARTY"       > nul
 
+REM Ships alongside the extension files so the "Launch the setup wizard
+REM now" checkbox on the exit dialog (see fractalsql.wxs) has something
+REM to launch, and so anyone who only grabbed the .msi (not the repo)
+REM still has it on disk afterward. Stamped with MSI_VERSION the same
+REM way release.yml stamps the standalone release-asset copy. Without
+REM this, the bundled copy's own version fallback (reading
+REM src\fractalsql.c) would find nothing on an end user's machine, since
+REM there's no repo checkout once it's just files under Program Files.
+powershell -NoProfile -Command ^
+    "(Get-Content 'scripts\windows\easy_install.ps1' -Raw) -replace '@@FSQL_VERSION@@', '%MSI_VERSION%' | Set-Content -Path '%STAGE%\easy_install.ps1' -Encoding utf8"
+
 REM Reasoning plugin DLL — bundled so a DBA can point
 REM fractalsql.reasoning_plugin at it in the same lib\ dir as
 REM fractalsql.dll. x64 only: no Windows arm64 plugin is vendored yet,

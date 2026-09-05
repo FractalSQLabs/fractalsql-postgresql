@@ -39,6 +39,15 @@ Run `pg_config --pkglibdir`. Common paths include:
 - **Host Dependencies**: `libcurl` 7.75.0+ (required for AWS SigV4 auth).
 - **Endpoint**: An LLM provider (Ollama, AWS Bedrock, Azure OpenAI, GCP Vertex, or any OpenAI-compatible API).
 
+> **Shortcut**: for a local Ollama or a plain OpenAI-compatible endpoint,
+> `scripts/easy_install.sh` (Linux/macOS) and
+> `scripts/windows/easy_install.ps1` (Windows) do Steps 1–2 below for you
+> interactively, activating the plugin and setting the GUCs in one pass.
+> See **[docs/getting-started.md §5](getting-started.md#5-install-without-docker)**.
+> The manual walkthrough below still applies for Bedrock/Azure/Vertex
+> (the wizard only offers the two common defaults) and for anyone who
+> wants to see exactly what gets configured.
+
 ---
 
 ## 🚀 Setup Sequence

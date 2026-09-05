@@ -78,16 +78,25 @@ SOC, FinTech, and MedTech reference implementations.
 
 ## 🚀 Get it running
 
-The fastest path is one command. See **[Getting Started](docs/getting-started.md)**
-for the 60-second Docker run and the native installers:
+The fastest path is one command: Docker if you just want to try it, or the
+setup wizard if you have a real PostgreSQL cluster already. See
+**[Getting Started](docs/getting-started.md)** for the full 60-second walkthrough.
 
 ```bash
 docker compose up -d   # then connect and run your first Scout search
 ```
 
+```bash
+# Or, on a real Postgres install (Linux/macOS):
+git clone https://github.com/FractalSQLabs/fractalsql-postgresql.git && cd fractalsql-postgresql
+./scripts/easy_install.sh   # detects your PG install, offers to install the package, walks you through reasoning setup
+```
+
 Native installers (PostgreSQL 14–18): `.deb` / `.rpm` for Linux amd64/arm64,
-a signed Windows `.msi`, and a self-contained tarball + `install.sh` for
-macOS (arm64/x86_64). See the compatibility table below.
+a Windows `.msi`, and a self-contained tarball + `install.sh` for
+macOS (arm64/x86_64). See the compatibility table below. `easy_install.sh`
+(Linux/macOS) and `scripts/windows/easy_install.ps1` (Windows) wrap all of
+these behind one interactive wizard; no telemetry, everything stays local.
 
 ---
 

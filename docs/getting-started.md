@@ -183,15 +183,50 @@ right *industry* starting point, see
 
 ## 5. Install without Docker
 
-For a real Postgres cluster, grab the package matching your PostgreSQL major
-and CPU architecture from [GitHub Releases](https://github.com/FractalSQLabs/fractalsql-postgresql/releases).
+### Option A: one command
+
+Clone the repo, then run the setup wizard for your platform. It detects
+your PostgreSQL install, offers to install the matching package if it's
+not there yet, activates both extensions, and walks you through picking a
+reasoning provider (local Ollama, an OpenAI-compatible endpoint, or search
+only). No manual `postgresql.conf` editing required.
+
+```bash
+# Linux / macOS
+git clone https://github.com/FractalSQLabs/fractalsql-postgresql.git
+cd fractalsql-postgresql
+./scripts/easy_install.sh
+```
+
+```powershell
+# Windows
+git clone https://github.com/FractalSQLabs/fractalsql-postgresql.git
+cd fractalsql-postgresql
+pwsh -File .\scripts\windows\easy_install.ps1
+```
+
+Already installed the package yourself? Run the same script and it detects
+that, skipping straight to the wizard. It's also safe to re-run any time
+you want to switch providers or models: it just overwrites the reasoning
+GUCs and reloads. Every prompt has a matching flag (`--provider`, `--url`,
+`--model`, `--yes`, `--dry-run`, `-Provider`, `-Url`, `-Model`, `-Yes`,
+`-DryRun`, ...) for non-interactive or CI use. Run with `--help`/`-Help`
+for the full list. The script never phones home: no telemetry, no usage
+reporting, all of it stays local to your box.
+
+### Option B: manual / air-gapped
+
+For anything that can't run a cloned script directly, such as a compliance
+environment, an air-gapped box, or just wanting to see every step, the
+package matching your PostgreSQL major and CPU architecture is on
+[GitHub Releases](https://github.com/FractalSQLabs/fractalsql-postgresql/releases).
 
 ```bash
 # Debian / Ubuntu
 sudo apt install ./postgresql-17-fractalsql-amd64.deb
 
-# RHEL / Rocky / Fedora
-sudo dnf install ./postgresql-17-fractalsql-*.rpm
+# RHEL / Rocky / Fedora / SUSE
+sudo dnf install ./postgresql-17-fractalsql-*.rpm   # or: sudo zypper install ./postgresql-17-fractalsql-*.rpm
 ```
 
 ```bash
@@ -221,6 +256,10 @@ cd fractalsql-postgresql-2.0.0-pg17-darwin-arm64
 `install.sh` drops the base extension, the reasoning plugin, **and** the
 agents files into the target server's own extension dir, then you run the two
 `CREATE EXTENSION` lines above.
+
+Reasoning provider configuration (the GUCs `easy_install` sets for you in
+Option A) is documented step by step in
+**[docs/reasoning-setup.md](reasoning-setup.md)**.
 
 → Package paths, version matrices, and the reasoning-plugin GUCs are in
 **[docs/features.md](features.md)** and

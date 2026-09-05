@@ -90,8 +90,43 @@ if [[ "${ARCH}" != "$(uname -m)" ]]; then
     XC_LDFLAGS="-Wl,-undefined,dynamic_lookup"
 fi
 
-make clean >/dev/null 2>&1 || true
-make FSQL_PLATFORM="${FSQL_PLATFORM}" COPT="-arch ${ARCH}" PG_CONFIG="${PG_CONFIG}" \
+# EDB's official macOS installer bakes its own CI build machine's
+# absolute SDK path into pg_config --cflags. It also leaks that
+# machine's own vendored-dependency -I paths, for example
+# /Users/runner/work/postgresql-packaging-foundation/.../deps/include.
+# PGXS uses those flags verbatim, so if the baked SDK version isn't the
+# one actually present on this machine, -isysroot points at nothing.
+# That breaks all system header lookup, not just PostgreSQL's own, so
+# even <math.h> fails to resolve. Detect that mismatch and override
+# with whatever SDK Xcode/CLT actually has active on this machine right
+# now, appended to COPT after pg_config's own flags so it wins (clang
+# honors the last -isysroot on the command line).
+SDK_OVERRIDE=""
+BAKED_SDK="$("${PG_CONFIG}" --cflags 2>/dev/null | grep -oE -- '-isysroot [^ ]+' | awk '{print $2}' | head -1)"
+if [[ -n "${BAKED_SDK}" ]] && [[ ! -d "${BAKED_SDK}" ]]; then
+    REAL_SDK="$(xcrun --show-sdk-path 2>/dev/null || true)"
+    if [[ -n "${REAL_SDK}" ]]; then
+        echo "note: pg_config's built-in -isysroot (${BAKED_SDK}) doesn't exist on this machine. Overriding with ${REAL_SDK}." >&2
+        SDK_OVERRIDE=" -isysroot ${REAL_SDK}"
+    else
+        echo "warning: pg_config's built-in -isysroot (${BAKED_SDK}) doesn't exist and 'xcrun --show-sdk-path' found no replacement. The build below will likely fail." >&2
+    fi
+fi
+
+# PG_CONFIG must be passed here too. Without it, PG_CONFIG falls back
+# to the Makefile's bare `pg_config` default, which resolves to nothing
+# on a from-source PG install with no pg_config on PATH. When that
+# happens, PGXS never gets included, so `clean` isn't even a defined
+# target and this whole step silently no-ops (the `|| true` exists for
+# a genuinely empty tree, not to hide that). Any stale .o already
+# sitting in src/, left over from a previous build on another OS or
+# arch synced into this same checkout, then survives untouched and
+# gets linked into this platform's .dylib, since make's staleness
+# check is pure mtime, not platform or format aware. That's exactly
+# what breaks a from-source-PG darwin build when leftover Linux ELF
+# .o's produce an "unsupported file format" link error.
+make clean PG_CONFIG="${PG_CONFIG}" >/dev/null 2>&1 || true
+make FSQL_PLATFORM="${FSQL_PLATFORM}" COPT="-arch ${ARCH}${SDK_OVERRIDE}" PG_CONFIG="${PG_CONFIG}" \
     FSQL_DARWIN_XC_LDFLAGS="${XC_LDFLAGS}"
 
 test -f "fractalsql${DLSUFFIX}" || { echo "build did not produce fractalsql${DLSUFFIX}" >&2; exit 1; }
