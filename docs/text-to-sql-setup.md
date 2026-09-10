@@ -37,14 +37,14 @@ SELECT fractal_text_to_sql(
 FractalSQL implements a rigorous verification loop to eliminate "hallucinated" SQL.
 
 ```
-GENERATE ──▶ [REVIEW, optional] ──▶ ALLOWLIST ──▶ EXPLAIN ──▶ RETURN
-   ▲                                    │              │
+GENERATE ──▶ ALLOWLIST ──▶ [REVIEW, optional] ──▶ EXPLAIN ──▶ RETURN
+   ▲                              │                   │
    └──────────── retry, with the specific failure fed back ───┘
 ```
 
 1. **GENERATE**: The question and schema description (from `fractal_schema_context()`) are sent to the LLM.
-2. **REVIEW** *(Optional)*: A second LLM call critiques the candidate against the original question.
-3. **ALLOWLIST**: The candidate is parsed using the PostgreSQL `raw_parser`. It is rejected if it contains multiple statements, DDL/utility commands (`CREATE`, `DROP`, etc.), or statement types not permitted by `fractalsql.text_to_sql_allowed_statements`. In `select` mode, it also rejects data-modifying CTEs.
+2. **ALLOWLIST**: The candidate is parsed using the PostgreSQL `raw_parser`. It is rejected if it contains multiple statements, DDL/utility commands (`CREATE`, `DROP`, etc.), or statement types not permitted by `fractalsql.text_to_sql_allowed_statements`. In `select` mode, it also rejects data-modifying CTEs.
+3. **REVIEW** *(Optional)*: A second LLM call critiques the candidate against the original question.
 4. **EXPLAIN**: The candidate is mechanically planned via the Postgres planner **inside an internal subtransaction**. If a planner error occurs (e.g., bad column name), the error is caught and fed back for a retry without aborting your main transaction.
 5. **RETURN or RETRY**: On success, the SQL is returned. On failure, the specific error (from the allowlist or planner) is fed back into the next generation attempt, up to `fractalsql.text_to_sql_max_attempts`.
 

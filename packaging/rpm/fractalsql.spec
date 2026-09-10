@@ -60,5 +60,5 @@ install -Dm0644 fractalsql_agents/sql/fractalsql_agents--1.0.sql \
 /usr/pgsql-%{pg_major}/share/extension/fractalsql_agents--1.0.sql
 
 %changelog
-* Sat Apr 18 2026 FractalSQLabs <ops@fractalsqlabs.io> - 1.0.0-1
+* Sat Apr 18 2026 FractalSQLabs - 1.0.0-1
 - Initial Factory-standardized release for PostgreSQL 16 / 17 / 18.

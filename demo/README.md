@@ -467,6 +467,9 @@ results. Drop them when you're done:
 ```sql
 DROP TABLE demo_alerts, demo_embeddings;
 DROP TABLE order_items, orders, customers;  -- demo-text-to-sql.sql
+DROP TABLE bi_customer_features, bi_orders, bi_customers;             -- demo-business-intelligence.sql
+DROP TABLE spike_candidates, spike_negative_control;                  -- text-to-sql-spike-*.sql
+DROP TABLE bt_bench_clusters, bt_bench_corpus, bt_bench_docs;          -- benchmark.sql
 DROP TABLE vqf_assets, vqf_loadings, vqf_allocation_snapshots;         -- demo-vertical-quant-finance.sql
 DROP TABLE vmc_patients;                                               -- demo-vertical-medtech-clinical.sql
 DROP TABLE vrs_genres, vrs_catalog, vrs_modal_items;                   -- demo-vertical-recommendation-search.sql

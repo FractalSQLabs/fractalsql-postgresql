@@ -1,7 +1,7 @@
 Source: fractalsql-postgresql
 Section: database
 Priority: optional
-Maintainer: FractalSQLabs <ops@fractalsqlabs.io>
+Maintainer: FractalSQLabs
 Build-Depends:
  debhelper-compat (= 13),
  postgresql-server-dev-all

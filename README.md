@@ -9,7 +9,7 @@
 
 FractalSQL transforms PostgreSQL from a passive data store into an active agentic
 database. FractalSQL adds what traditional RAG (Retrieval-Augmented Generation)
-stops short of: reasoning over what it retrieves, and — when you enable it —
+stops short of: reasoning over what it retrieves, and when you enable it
 acting on the result, whether that's running a generated query or executing a
 decision an agent computed, all inside the same database process.
 
@@ -17,9 +17,8 @@ By bringing reasoning and agency directly into the PostgreSQL backend, FractalSQ
 enables **Sovereign Data Intelligence**: the ability to reason, plan, and act upon
 your data with the deployment topology under your control. Run fully on-prem or in
 your own containers with Ollama/vLLM for zero data egress, or point at your
-organization's cloud AI accounts (Bedrock, Azure OpenAI, Vertex) — BAA-covered
-where your compliance posture requires it — for managed-model scale. You control
-the trade, not the product.
+organization's cloud AI accounts (Bedrock, Azure OpenAI, Vertex) — where your compliance 
+posture requires it — for managed-model scale. You control the trade, not the product.
 
 | Traditional RAG Stack | The Sovereign Way (FractalSQL) |
 | --- | --- |
