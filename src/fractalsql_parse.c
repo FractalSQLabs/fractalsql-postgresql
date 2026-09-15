@@ -8,6 +8,7 @@
  */
 #include "fractalsql_parse.h"
 
+#include <limits.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
