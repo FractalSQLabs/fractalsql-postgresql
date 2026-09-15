@@ -102,6 +102,12 @@
 #                      Requires a libFuzzer-capable clang (set
 #                      FSQL_FUZZ_CC to override auto-detection); skips
 #                      cleanly if none is found.
+#   28  review_isolation  ensure_review_ctx()/g_review_ctx: fractal_   ~10s
+#                      text_to_sql()'s REVIEW step never inherits an
+#                      operator-set FSQL_REASONING_HTTP_RESPONSE_MODE,
+#                      even under a real postmaster restart with it
+#                      exported (RESPONSE_MODE has no GUC -- it's a
+#                      boot-time env capture, unlike THINK in gate 27)
 #
 # Gate sets:
 #   QUICK   = 01 02                                   post-edit sanity loop
@@ -205,9 +211,10 @@ fsql_pg_dlsuffix() {
   else
     printf '%s' ".so"
   fi
+  return 0
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21)
 
@@ -245,9 +252,9 @@ fi
 
 # --- colours ----------------------------------------------------------
 if [[ -t 1 ]]; then G="\033[32m"; R="\033[31m"; Y="\033[33m"; Z="\033[0m"; else G=""; R=""; Y=""; Z=""; fi
-pass() { printf "  [${G}PASS${Z}] %s\n" "$1"; }
-fail() { printf "  [${R}FAIL${Z}] %s\n" "$1"; FAILED=1; }
-skip() { printf "  [${Y}SKIP${Z}] %s\n" "$1"; }
+pass() { local msg="$1"; printf "  [${G}PASS${Z}] %s\n" "$msg"; return 0; }
+fail() { local msg="$1"; printf "  [${R}FAIL${Z}] %s\n" "$msg"; FAILED=1; return 0; }
+skip() { local msg="$1"; printf "  [${Y}SKIP${Z}] %s\n" "$msg"; return 0; }
 
 usage() { sed -n '4,40p' "$0"; exit 0; }
 
@@ -304,6 +311,7 @@ pg_bindir() {
   else
     echo "/usr/lib/postgresql/$1/bin"
   fi
+  return 0
 }
 
 # Resolves a sanitizer runtime's real .so path: `cc -print-file-name=
@@ -340,6 +348,7 @@ resolve_san_rt() {
     [[ -n "$cand" ]] && [[ -f "$cand" ]] && rt="$cand"
   fi
   printf '%s' "$rt"
+  return 0
 }
 
 cleanup() {
@@ -424,6 +433,7 @@ run_coverage_report() {
       || fail "coverage: genhtml failed — see /tmp/fractalsql_bt_genhtml.log"
   fi
   rm -rf "$GCOV_PREFIX"
+  return 0
 }
 
 # Build the target-major extension and mock plugin, start a throwaway
@@ -605,6 +615,7 @@ pg_teardown() {
   [[ -n "$DATADIR" ]] && "$BIN/pg_ctl" -D "$DATADIR" -m fast stop >/dev/null 2>&1
   rm -rf "$DATADIR" "$SOCKDIR" "$MOCK" "$EVIL" "$CRASH" "$LYING" "$RETRY" "$EMBED" "$EVIL_EMBED"
   DATADIR=""; SOCKDIR=""
+  return 0
 }
 
 # Generic PGC_SIGHUP GUC setter: ALTER SYSTEM + reload + poll until the
@@ -617,18 +628,19 @@ pg_teardown() {
 #        strings yourself, e.g. "'/path'"), $3 = value AS READ BACK by
 #        current_setting() (e.g. on/off for booleans, unquoted path text)
 pg_set_guc() {
-  "${PSQL[@]}" -c "ALTER SYSTEM SET $1 = $2;" >/dev/null 2>&1
+  local key="$1" val="$2" scope="$3"
+  "${PSQL[@]}" -c "ALTER SYSTEM SET $key = $val;" >/dev/null 2>&1
   "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1
   local i v tries=$(( 10 * TIMEOUT_MULT ))
   for i in $(seq 1 "$tries"); do
-    v=$("${PSQL[@]}" -c "SELECT current_setting('$1');" 2>/dev/null)
-    [[ "$v" = "$3" ]] && return 0
+    v=$("${PSQL[@]}" -c "SELECT current_setting('$key');" 2>/dev/null)
+    [[ "$v" = "$scope" ]] && return 0
     sleep 0.2
   done
   return 1
 }
 
-pg_swap_plugin() { pg_set_guc fractalsql.reasoning_plugin "'$1'" "$1"; }
+pg_swap_plugin() { local plugin="$1"; pg_set_guc fractalsql.reasoning_plugin "'$plugin'" "$plugin"; return 0; }
 
 # --- gates ------------------------------------------------------------
 
@@ -663,6 +675,7 @@ gate_01_build() {
     fail "01 build (PG$v) — see /tmp/fractalsql_bt_build_$v.log"
     grep -iE "error:" "/tmp/fractalsql_bt_build_$v.log" | head -3 | sed 's/^/         /'
   fi
+  return 0
 }
 
 gate_02_smoke() {
@@ -682,6 +695,7 @@ gate_02_smoke() {
   # the best_point key survives the jsonb_in round-trip.
   local dbg; dbg=$("${PSQL[@]}" -c "SELECT fractal_search_debug(ARRAY[0.6,0.8]::float8[],100,50,2);" 2>&1)
   grep <<< "$dbg" -q "best_point" && pass "02 smoke: fractal_search_debug has best_point" || fail "02 smoke: fractal_search_debug='$dbg'"
+  return 0
 }
 
 gate_03_schema_context() {
@@ -705,6 +719,7 @@ gate_03_schema_context() {
   else
     fail "03 schema_context: auto-discovery='$auto'"
   fi
+  return 0
 }
 
 # helper: expect a text_to_sql rejection containing $2 (or PASS if $2 empty)
@@ -720,6 +735,7 @@ t2s_expect() {
   else
     if grep <<< "$r" -q "$want"; then pass "$label → rejected ($want)"; else fail "$label: got '$r' (want '$want')"; fi
   fi
+  return 0
 }
 
 gate_04_text_to_sql() {
@@ -743,6 +759,7 @@ gate_04_text_to_sql() {
   else
     fail "04 auto-discovery: got '$auto'"
   fi
+  return 0
 }
 
 # Guard-page plugin: response is deliberately NOT NUL-terminated and
@@ -785,6 +802,7 @@ gate_05_evil_overread() {
   echo "1" > /tmp/fractalsql_bt_evil_trigger_call.txt
 
   pg_swap_plugin "$MOCK"
+  return 0
 }
 
 # Same three call sites as gate 05, but the adversarial claim is a
@@ -828,6 +846,7 @@ gate_07_evil_lying_length() {
   echo "1" > /tmp/fractalsql_bt_evil_trigger_call.txt
 
   pg_swap_plugin "$MOCK"
+  return 0
 }
 
 # Regression test for a real information-disclosure bug found + fixed
@@ -865,6 +884,7 @@ gate_08_authz() {
                               || fail "08 authz: granted role still blocked: $r2"
 
   "${PSQL[@]}" -c "DROP ROLE bt_lowpriv; DROP TABLE bt_secret;" >/dev/null 2>&1
+  return 0
 }
 
 # Regression test for today's GUC_SUPERUSER_ONLY fix (fractalsql.c):
@@ -878,6 +898,7 @@ gate_09_guc_superuser() {
     && pass "09 guc_superuser: non-superuser rejected from setting reasoning_plugin" \
     || fail "09 guc_superuser: expected rejection, got: $r"
   "${PSQL[@]}" -c "DROP ROLE bt_lowpriv2;" >/dev/null 2>&1
+  return 0
 }
 
 # MAX_SCHEMA_CONTEXT_TABLES (512) DoS cap boundary, and a SQL-injection-
@@ -899,6 +920,7 @@ gate_10_dos_and_injection() {
   grep <<< "$r2" -qE "not found or not visible|ERROR" \
     && pass "10 injection: injection-shaped table name cleanly rejected" \
     || fail "10 injection: unexpected result: $r2"
+  return 0
 }
 
 # Scout mode minimal smoke: a 3-island clustered corpus, population
@@ -936,6 +958,7 @@ gate_11_scout() {
                                           || fail "11 scout: expected dispersion, got islands=$islands"
 
   "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_scout_docs;" >/dev/null 2>&1
+  return 0
 }
 
 # Deliberately-segfaulting plugin. No in-process fix can prevent this —
@@ -978,6 +1001,7 @@ gate_06_crash_recovery() {
   else
     fail "06 crash_recovery: cluster never came back -- remaining gates will run against the crash plugin"
   fi
+  return 0
 }
 
 # Concurrency/soak: SOAK_WORKERS concurrent backends x SOAK_ITERS mixed
@@ -1030,6 +1054,7 @@ gate_12_soak() {
     || fail "12 soak: cluster unresponsive after concurrent load"
 
   rm -rf "$outdir"
+  return 0
 }
 
 # select_insert_update mode: fractalsql.text_to_sql_allowed_statements
@@ -1052,6 +1077,7 @@ gate_13_siu_mode() {
                   || fail "13 siu_mode: row count=$n"
 
   pg_set_guc fractalsql.text_to_sql_allowed_statements "'select'" "select"
+  return 0
 }
 
 # Retry-with-feedback: max_attempts>1 with a plugin that returns a
@@ -1083,6 +1109,7 @@ gate_14_retry() {
 
   pg_set_guc fractalsql.text_to_sql_max_attempts 1 1
   pg_swap_plugin "$MOCK"
+  return 0
 }
 
 # fractal_embed() + the vectorizer, real dispatch through
@@ -1184,6 +1211,7 @@ gate_15_embed() {
   "${PSQL[@]}" -c "DELETE FROM fractal_vectorizers WHERE source_table = 'bt_embed_docs';" >/dev/null 2>&1
   "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_embed_docs;" >/dev/null 2>&1
   pg_swap_plugin "$MOCK"
+  return 0
 }
 
 # Vectorizer authz: two real properties, not assumed from reading the
@@ -1263,6 +1291,7 @@ gate_16_embed_authz() {
      DROP ROLE IF EXISTS bt_embed_owner;
      DROP ROLE IF EXISTS bt_embed_outsider;
   " >/dev/null 2>&1
+  return 0
 }
 
 # Concurrent fractal_vectorizer_process_queue() calls against a SHARED
@@ -1356,6 +1385,7 @@ gate_17_embed_soak() {
      DROP TABLE IF EXISTS bt_embed_soak;
   " >/dev/null 2>&1
   pg_swap_plugin "$MOCK"
+  return 0
 }
 
 # Real crash mid-process_queue(), via the same deliberately-segfaulting
@@ -1434,6 +1464,7 @@ gate_18_embed_crash() {
      DROP TABLE IF EXISTS bt_embed_crash;
   " >/dev/null 2>&1
   pg_swap_plugin "$MOCK"
+  return 0
 }
 
 # validate_sfs_params() bounds (fractal_search/fractal_search_debug/
@@ -1501,6 +1532,7 @@ gate_19_sfs_bounds() {
   grep <<< "$rinj" -qE "does not exist|ERROR" \
     && pass "19 sfs_bounds: injection-shaped table_name cleanly rejected" \
     || fail "19 sfs_bounds: unexpected result: $rinj"
+  return 0
 }
 
 # Closes 5 concrete API-surface coverage gaps found by a gap analysis
@@ -1617,6 +1649,7 @@ gate_20_api_func() {
      DROP TABLE IF EXISTS bt_stale_reclaim;
   " >/dev/null 2>&1
   pg_swap_plugin "$MOCK" >/dev/null
+  return 0
 }
 
 # v2.x additions smoke gate -- HNSW/Diversify-era functions (dimension
@@ -1844,6 +1877,7 @@ gate_22_v2_functions() {
     || fail "22 v2_functions: expected an alpha_weight rejection, got: $r17"
 
   "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_telemetry_docs, bt_combined_docs;" >/dev/null 2>&1
+  return 0
 }
 
 # fractalsql_agents dependent-extension smoke gate -- the two parameterized
@@ -2466,6 +2500,7 @@ gate_23_agents() {
   "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_agents_logs;" >/dev/null 2>&1
   "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_agents_data, bt_agents_patients, bt_agents_fcatalog, bt_agents_fwarmup, bt_agents_nodes, bt_agents_alloc, bt_agents_vehicles, bt_agents_tracks;" >/dev/null 2>&1
   rm -f /tmp/fractalsql_bt_sql.txt
+  return 0
 }
 
 # FUZZ only -- not in DEFAULT or QUICK, run via --fuzz. No live cluster
@@ -2538,6 +2573,7 @@ gate_21_fuzz_smoke() {
     fi
     rm -f "$bin"
   done
+  return 0
 }
 
 # --- run one major through a gate set ---------------------------------
@@ -2727,6 +2763,7 @@ gate_24_enterprise() {
 
   # Reset the GUC so it does not leak into later gates on a reused cluster.
   set_ent_guc ""
+  return 0
 }
 
 gate_25_enterprise_stress() {
@@ -3064,6 +3101,7 @@ SQL
 
   # Reset the GUC so it does not leak into later gates on a reused cluster.
   set_ent_guc ""
+  return 0
 }
 
 gate_26_enterprise_signature() {
@@ -3160,6 +3198,7 @@ gate_26_enterprise_signature() {
   # Reset the GUCs so they do not leak into later gates on a reused cluster.
   set_require "off"
   set_ent_guc ""
+  return 0
 }
 
 # Reasoning-effort (THINK) GUC passthrough -- fractalsql.http_think/
@@ -3244,6 +3283,82 @@ gate_27_think() {
   pg_set_guc fractalsql.http_native_url "''" ""
   pg_set_guc fractalsql.http_num_ctx 0 0
   pg_swap_plugin "$MOCK"
+  return 0
+}
+
+# Regression test for ensure_review_ctx()/g_review_ctx: fractal_text_to_
+# sql()'s REVIEW step must never see an operator-set
+# FSQL_REASONING_HTTP_RESPONSE_MODE, even though REVIEW is "just a
+# second fractal_reason()-shaped call" sharing the same URL/token/model
+# config. Before this fix REVIEW shared g_reason_ctx directly, so an
+# operator setting RESPONSE_MODE=json (say) for their own
+# fractal_reason() calls would silently break t2s_run_review()'s
+# hardcoded leading-PASS/FAIL text parsing too.
+#
+# Unlike THINK (gate 27), RESPONSE_MODE has no GUC -- it's captured
+# from the raw process environment exactly once, at postmaster startup
+# (_PG_init's g_response_mode_boot), so exercising it needs a real
+# pg_ctl restart with the var exported into the postmaster's own
+# environment, not just an ALTER SYSTEM + reload. Restores the
+# un-restarted baseline afterward so later gates on this same reused
+# cluster see a clean postmaster environment again.
+gate_28_review_isolation() {
+  pg_swap_plugin "$MOCK" >/dev/null
+
+  local dump="/tmp/fractalsql_bt_review_env_dump.txt"
+  restart_pg() {
+    "$BIN/pg_ctl" -D "$DATADIR" -m fast stop >/dev/null 2>&1
+    "$BIN/pg_ctl" -D "$DATADIR" -w -l "$DATADIR/log" \
+       -o "-p $PORT -k $SOCKDIR -c listen_addresses='' -c shared_preload_libraries=$SO" \
+       start >/tmp/fractalsql_bt_gate28_restart.log 2>&1
+  }
+
+  export FSQL_REASONING_HTTP_RESPONSE_MODE=json
+  if ! restart_pg; then
+    fail "28 review_isolation: could not restart cluster with FSQL_REASONING_HTTP_RESPONSE_MODE=json set"
+    unset FSQL_REASONING_HTTP_RESPONSE_MODE
+    restart_pg
+    return
+  fi
+
+  # Positive control: fractal_reason()'s own tier DOES see the boot-
+  # captured value -- proves the env var actually reached the
+  # postmaster (and that g_response_mode_boot's capture/re-apply
+  # mechanism works) before trusting REVIEW's negative result below.
+  rm -f "$dump"
+  "${PSQL[@]}" -c "SELECT fractal_reason('q');" >/dev/null 2>&1
+  local ra; ra=$(cat "$dump" 2>/dev/null)
+  if grep <<< "$ra" -q "^RESPONSE_MODE=json$"; then
+    pass "28 review_isolation: positive control -- fractal_reason() sees the boot-captured RESPONSE_MODE=json"
+  else
+    fail "28 review_isolation: positive control failed, expected RESPONSE_MODE=json from fractal_reason(), got: $ra"
+  fi
+
+  # The actual regression check: REVIEW must NOT see it, regardless.
+  # REVIEW runs after GENERATE within one fractal_text_to_sql() call,
+  # so the dump file's content once the whole call returns/errors
+  # reflects REVIEW's own env (see mock_reasoning_plugin.c's header).
+  if ! pg_set_guc fractalsql.text_to_sql_use_review on on; then
+    fail "28 review_isolation: could not enable text_to_sql_use_review"
+  else
+    echo "SELECT 1" > /tmp/fractalsql_bt_sql.txt
+    rm -f "$dump"
+    "${PSQL[@]}" -c "SELECT fractal_text_to_sql('q', ARRAY['bt_customers','bt_orders']);" >/dev/null 2>&1
+    local rb; rb=$(cat "$dump" 2>/dev/null)
+    if grep <<< "$rb" -q "^RESPONSE_MODE=(unset)$"; then
+      pass "28 review_isolation: REVIEW step never sees the boot-captured RESPONSE_MODE, even though fractal_reason() does"
+    else
+      fail "28 review_isolation: expected RESPONSE_MODE=(unset) from the REVIEW dispatch, got: $rb"
+    fi
+    pg_set_guc fractalsql.text_to_sql_use_review off off
+  fi
+
+  # Restore: stop, drop the env var, restart -- so later gates on this
+  # same reused cluster see a clean postmaster environment again.
+  unset FSQL_REASONING_HTTP_RESPONSE_MODE
+  restart_pg || fail "28 review_isolation: could not restart cluster to restore the clean baseline environment"
+  pg_swap_plugin "$MOCK" >/dev/null
+  return 0
 }
 
 run_major() {
@@ -3259,7 +3374,7 @@ run_major() {
   local need_db=0
   for g in "${gates[@]}"; do
     case "$g" in
-      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26|27) need_db=1 ;;
+      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26|27|28) need_db=1 ;;
       *) ;;   # 01/21 run standalone above, no DB needed -- intentional no-op
     esac
   done
@@ -3301,11 +3416,13 @@ run_major() {
         25) gate_25_enterprise_stress ;;
         26) gate_26_enterprise_signature ;;
         27) gate_27_think ;;
+        28) gate_28_review_isolation ;;
         *) ;;   # 01/21 already ran standalone above, no-op here by design
       esac
     done
     pg_teardown
   fi
+  return 0
 }
 
 # --- dispatch ---------------------------------------------------------

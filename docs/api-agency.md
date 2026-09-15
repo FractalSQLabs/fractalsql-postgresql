@@ -1177,18 +1177,7 @@ currently accepted but not yet applied to the search.
 
 ## Reference blueprints: Domain Agents
 
-Before the installable agents existed, the vertical demos shipped inline PL/pgSQL
-**Domain Agent** reference blueprints: self-contained functions at the top of
-each `demo/demo-agentic-*.sql` script. The installable agents above are the
-productized form of those blueprints: parameterized so your tables and columns
-are arguments instead of hardcoded, and installed by `CREATE EXTENSION
-fractalsql_agents` rather than copy-pasted. The demos are now **presets**:
-their raw-primitive sections are preserved as commented blueprints above a call
-to the shipped agent that generalizes them. Every demo is a clean, re-runnable
-regression test: it drops and recreates its tables and vectorizer config at the
-top, so `psql -f` it again safely.
-
-Six Domain Agent blueprints ship across the three agentic verticals:
+The three agentic-vertical demos (`demo/demo-vertical-agentic-ops-devops.sql` for DevOps/SRE, `-fintech-mcts.sql` for FinTech, `-customer-support.sql` for Customer Support) shipped six hand-written PL/pgSQL **Domain Agent** blueprints: SOC incident triage and task routing, portfolio rebalancing, and hybrid memory recall with diverse recommendations. Each demo still keeps its original blueprint as a commented reference sitting right above a call to the shipped, generalized agent that replaced it, so you can see the hand-rolled composition and the productized one side by side; a couple of the blueprints stub their inner reasoning/retrieval step with canned data so the demo runs without a live model, which is the one part worth swapping for a real call against your own corpus before reusing the pattern. To try them: install the extension and configure reasoning (see [reasoning-setup.md](reasoning-setup.md)), run a demo end to end (`psql -d <your_database> -f demo/demo-vertical-agentic-customer-support.sql`), then read the `CREATE OR REPLACE FUNCTION` blocks at the top of the file to see exactly how each blueprint is built.
 
 ### DevOps / SRE — `demo/demo-vertical-agentic-ops-devops.sql`
 
@@ -1210,15 +1199,6 @@ Six Domain Agent blueprints ship across the three agentic verticals:
 | --- | --- | --- |
 | `fractal_agent_recall_hybrid(query, mem_table, alpha)` → `(mem_id, content)` | `fractal_search_trajectory` + SQL filter | Hybrid memory recall: fuses a strict metadata filter with a drift-vector (current-vs-baseline) state search. |
 | `fractal_agent_recommend_diverse(customer_id, catalog_table, k)` → `(item_id, score)` | `fractal_diversify_enable` + Scout (`fractal_search_explore`) | Feedback-aware recommender: enables the stateful Diversify/Repulsion layer so re-searches avoid recently-rejected items, then Scout-searches for diverse candidates. |
-
-> **Stubbed inner steps.** The demo blueprints below (not the installable
-> agents above) stub their inner reasoning/retrieval calls so the demo runs
-> without a model. A few (`route_task`, `outlier_intercept`, `recall_hybrid`)
-> simulate the inner embed/Scout call with canned data. The composition
-> *wiring* (which primitive calls into which, in what order) is the part to
-> copy; swap the canned step for the real `fractal_search_agent` /
-> `fractal_search_telemetry` call against your own corpus. The shipped agents
-> are the real, non-stubbed form of these same blueprints.
 
 ### Getting started with the blueprints
 

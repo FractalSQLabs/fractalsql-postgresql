@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 bench/vector_type_head_to_head.py — fractal_vector(n) vs float8[] at
-data_gen.py's actual scale (100k rows / dim 768 by default), not the
+data_gen.py's actual scale (100k rows / dim 128 by default -- pass
+--dim 768 to data_gen.py for realistic-embedding scale), not the
 small demo's hand-picked single row.
 
 Distinct from bench/head_to_head.py (HNSW-vs-Scout algorithm comparison,

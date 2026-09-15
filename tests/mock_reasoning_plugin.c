@@ -26,6 +26,15 @@
 
 #define MOCK_SQL_FILE "/tmp/fractalsql_bt_sql.txt"
 
+/* Dumped fresh on every generate() call (GENERATE, REVIEW, or a bare
+ * fractal_reason()) so gate_28_review_isolation can tell which tier's
+ * dispatch last ran without needing a distinct plugin: since REVIEW
+ * always runs after GENERATE within one fractal_text_to_sql() call,
+ * the file's content after the whole call reflects REVIEW's own env,
+ * not GENERATE's. Same fixed-path/no-env-inheritance rationale as
+ * MOCK_SQL_FILE above. */
+#define MOCK_RESPONSE_MODE_DUMP_FILE "/tmp/fractalsql_bt_review_env_dump.txt"
+
 static int
 mock_format(void *u, const char *q, size_t ql, const char *c, size_t cl,
             const char **prompt_out, size_t *prompt_len_out)
@@ -80,6 +89,13 @@ mock_generate(void *u, const char *p, size_t pl,
      * a real chat-mode response would look before any extraction. */
     const char *response_mode = getenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
     int         code_mode = response_mode != NULL && strcmp(response_mode, "code") == 0;
+
+    FILE *dump = fopen(MOCK_RESPONSE_MODE_DUMP_FILE, "w");
+    if (dump != NULL)
+    {
+        fprintf(dump, "RESPONSE_MODE=%s\n", response_mode != NULL ? response_mode : "(unset)");
+        fclose(dump);
+    }
 
     char *resp = malloc(strlen(sql) + 16);
     if (resp == NULL)

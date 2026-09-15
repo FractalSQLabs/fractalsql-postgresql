@@ -192,9 +192,9 @@ action's state vector against known-bad state clusters before the action runs.
 
 ---
 
-## Two notes to carry over
+## Notes
 
-These bit the shipped agents; they'll bite yours too.
+Two issues surfaced while building the shipped agents, and apply equally to any composition you write.
 
 - **`id_col` must be bigint-castable.** The table-searching agents
   (`recall_hybrid`, `recommend_diverse`, `patient_deterioration_triage`,

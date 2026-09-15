@@ -199,4 +199,23 @@ fsql_hmac_sha256(const uint8_t *key, size_t keylen,
     fsql_sha256_final(&ctx, out);
 }
 
+/* Constant-time byte compare: XOR-accumulate every byte, return 0 only
+ * when all bytes match. Use for MAC/tag comparisons where one side is a
+ * secret-derived tag and the other sits in attacker-positionable storage
+ * (a persisted row's mac column): a plain memcmp early-exits on the first
+ * differing byte, and tag bytes adjacent to an attacker-controlled row
+ * make the timing difference measurable in principle. Structural hashes
+ * (chain links, entry_hash recomputations) compare attacker-derived but
+ * NOT secret-derived values, so plain memcmp is fine for those. */
+static int
+fsql_ct_memcmp(const void *a, const void *b, size_t n)
+{
+    const uint8_t *pa = (const uint8_t *) a;
+    const uint8_t *pb = (const uint8_t *) b;
+    uint8_t diff = 0;
+    for (size_t i = 0; i < n; ++i)
+        diff |= (uint8_t) (pa[i] ^ pb[i]);
+    return (int) diff;
+}
+
 #endif /* FRACTALSQL_HMAC_H */

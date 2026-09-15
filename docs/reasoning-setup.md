@@ -75,7 +75,7 @@ fractalsql.http_url             = 'http://127.0.0.1:11434/v1/chat/completions'
 fractalsql.http_allow_plaintext = on
 fractalsql.http_model           = 'gpt-oss:20b'
 ```
-*Note: Run `ollama pull gpt-oss:20b` before connecting.*
+*Note: Run `ollama pull gpt-oss:20b` or `ollama pull gemma4:12b` or `ollama pull phi4:14b` before connecting.*
 
 ## OpenAI-Compatible (OpenAI, Together AI, Fireworks, vLLM)
 ```ini
@@ -92,7 +92,12 @@ Bedrock uses AWS SigV4 signing. The URL must point to the **OpenAI-compatible** 
 fractalsql.http_url   = 'https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions'
 fractalsql.http_model = 'amazon.nova-lite-v1:0'
 ```
-**Critical**: Auth type and region are **Environment Variables only** (see Configuration Reference).
+**Critical**: Auth type and region are set via the reasoning plugin's own
+lower-level environment variables, not the `fractalsql.*` GUCs:
+```sh
+export FSQL_REASONING_HTTP_AUTH_TYPE=aws-sigv4
+export FSQL_REASONING_HTTP_AWS_REGION=us-east-1
+```
 
 ## Azure OpenAI
 Azure requires a separate deployment for the chat model.
@@ -159,36 +164,34 @@ export FSQL_REASONING_HTTP_LOW_SPEED_SECS=300
 
 ## 🛠️ Advanced Configuration
 
-### Response Modes (v1.2.1+)
+Every advanced knob at a glance -- details for each are in the sections below:
+
+| Variable | Notes |
+| --- | --- |
+| `FSQL_REASONING_HTTP_RESPONSE_MODE` | `text` (default) / `code` / `json` -- see [Response Modes](#response-modes) |
+| `fractalsql.http_think` | Reasoning effort for hybrid-thinker models -- see [Reasoning Effort](#reasoning-effort) |
+| `fractalsql.http_think_provider` | Request shape THINK uses -- see [Reasoning Effort](#reasoning-effort) |
+| `fractalsql.http_native_url` | Override URL for the ollama/anthropic native shape |
+| `fractalsql.http_num_ctx` | Ollama-native context-window cap |
+| `FSQL_REASONING_HTTP_AUTH_TYPE` | `bearer` (default) / `api-key` / `aws-sigv4` -- see [AWS Bedrock](#aws-bedrock) |
+| `FSQL_REASONING_HTTP_AWS_REGION` | AWS region for `aws-sigv4` |
+| `FSQL_REASONING_HTTP_TIMEOUT_MS` | Total request timeout -- see [Handling Constrained Hardware](#handling-constrained-hardware) |
+| `FSQL_REASONING_HTTP_LOW_SPEED_SECS` | Slow-response abort window |
+| `FSQL_REASONING_HTTP_SYSTEM_PROMPT` | Replaces the baseline anti-injection system prompt -- see [Security & Governance](#-security--governance) |
+
+### Response Modes
 Shape how the plugin post-processes the LLM response via environment variables:
 - `text` (default): Raw content.
 - `code`: Forces a single fenced code block and extracts it.
 - `json`: Forces a fenced JSON block and validates structural integrity.
 
-`FSQL_REASONING_HTTP_RESPONSE_MODE` is a process environment variable, not a
-`fractalsql.*` GUC -- read once when the plugin initializes, so changing it
-needs a real PostgreSQL restart, not `ALTER SYSTEM` + `pg_reload_conf()`.
+Applies to `fractal_reason`
 
-#### Switching modes on an already-running install
+Not a GUC: set `FSQL_REASONING_HTTP_RESPONSE_MODE` in PostgreSQL's service
+environment and restart PostgreSQL (`systemctl restart postgresql`, or
+`pg_ctl restart`) if reloading config is not enough.
 
-Docker Compose demo:
-1. Edit `docker-compose.yml` -- add or change
-   `FSQL_REASONING_HTTP_RESPONSE_MODE` under the `postgres` service's
-   `environment:` block.
-2. `docker compose up -d --build postgres` -- recreates the container so
-   the plugin picks up the new value. `docker compose restart postgres`
-   is not enough: Compose only re-reads `environment:` on container
-   recreation, not a plain restart.
-
-Bare-metal / systemd:
-1. Set `FSQL_REASONING_HTTP_RESPONSE_MODE` wherever PostgreSQL's service
-   environment is configured (e.g. `Environment=` in a systemd unit
-   override, or `/etc/postgresql/<ver>/main/environment` on
-   Debian/Ubuntu packaging).
-2. Restart the PostgreSQL service (`systemctl restart postgresql`, or
-   `pg_ctl restart`) -- reloading config is not sufficient.
-
-### Reasoning Effort (THINK)
+### Reasoning Effort
 Hybrid-thinker models (Granite 4.2, OpenAI o-series, Claude extended thinking, DeepSeek-R1, QwQ) emit an internal reasoning trace before their final answer -- left uncontrolled, that trace dominates latency and, on memory-constrained GPUs, VRAM. Two GUCs throttle it:
 
 | GUC | Values | Notes |

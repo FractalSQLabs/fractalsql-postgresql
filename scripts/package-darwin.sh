@@ -116,7 +116,7 @@ make clean PG_CONFIG="${PG_CONFIG}" >/dev/null 2>&1 || true
 make FSQL_PLATFORM="${FSQL_PLATFORM}" COPT="-arch ${ARCH}${SDK_OVERRIDE}" PG_CONFIG="${PG_CONFIG}" \
     FSQL_DARWIN_XC_LDFLAGS="${XC_LDFLAGS}"
 
-test -f "fractalsql${DLSUFFIX}" || { echo "build did not produce fractalsql${DLSUFFIX}" >&2; exit 1; }
+[[ -f "fractalsql${DLSUFFIX}" ]] || { echo "build did not produce fractalsql${DLSUFFIX}" >&2; exit 1; }
 
 PKG="fractalsql-postgresql-${VERSION}-pg${PG_MAJOR}-darwin-${ARCH}"
 DIST="dist/packages"

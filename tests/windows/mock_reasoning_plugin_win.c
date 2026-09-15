@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <windows.h>
 
 /* Bare relative filename, not an absolute C:\Windows\Temp\... path --
  * that absolute path was the previous attempt, and it silently never
@@ -40,6 +41,15 @@
  * $DataDir\fractalsql_bt_sql.txt to match. */
 #define MOCK_SQL_FILE "fractalsql_bt_sql.txt"
 
+/* Dumped fresh on every generate() call (GENERATE, REVIEW, or a bare
+ * fractal_reason()) so Gate28ReviewIsolation can tell which tier's
+ * dispatch last ran without needing a distinct plugin: since REVIEW
+ * always runs after GENERATE within one fractal_text_to_sql() call,
+ * the file's content after the whole call reflects REVIEW's own env,
+ * not GENERATE's. Same bare-relative-filename/CWD mechanism as
+ * MOCK_SQL_FILE above. */
+#define MOCK_RESPONSE_MODE_DUMP_FILE "fractalsql_bt_review_env_dump.txt"
+
 static int
 mock_format(void *u, const char *q, size_t ql, const char *c, size_t cl,
             const char **prompt_out, size_t *prompt_len_out)
@@ -49,6 +59,30 @@ mock_format(void *u, const char *q, size_t ql, const char *c, size_t cl,
     *prompt_out = b;
     *prompt_len_out = 1;
     return 0;
+}
+
+/* This DLL and fractalsql.dll are separately /MT-linked (see the build
+ * comment above), so each has its own private static-CRT copy of
+ * _environ -- a documented MSVC gotcha (Microsoft Learn: "Potential
+ * Errors Passing CRT Objects Across DLL Boundaries"; also reported
+ * against curl and MIT krb5). plain getenv() here can silently miss
+ * changes fractalsql.c makes via setenv()/unsetenv(), which on Win32
+ * resolve to PostgreSQL's pgwin32_putenv()/pgwin32_unsetenv() (see PG's
+ * src/port/win32env.c) -- those update the real, single, process-wide
+ * environment block via SetEnvironmentVariable specifically so other
+ * modules can observe the change, but only a reader that also goes
+ * through the Win32 API, not a separate CRT's getenv(), is guaranteed
+ * to see it. Confirmed as the actual cause of gate 28 (review_isolation)
+ * failing only on Windows despite passing on Linux with the identical
+ * source-level fix in t2s_run_review(): the fix's unsetenv() call was
+ * genuinely running, but this plugin's own getenv() wasn't seeing it. */
+static const char *
+mock_getenv_win32(const char *name, char *buf, DWORD buf_len)
+{
+    DWORD n = GetEnvironmentVariableA(name, buf, buf_len);
+    if (n == 0 || n >= buf_len)
+        return NULL;
+    return buf;
 }
 
 static void
@@ -92,8 +126,17 @@ mock_generate(void *u, const char *p, size_t pl,
      * (gate 05/07) never set RESPONSE_MODE, so they still get the
      * fenced form here, same as a real chat-mode response would look
      * before any extraction. */
-    const char *response_mode = getenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
+    char        response_mode_buf[256];
+    const char *response_mode = mock_getenv_win32("FSQL_REASONING_HTTP_RESPONSE_MODE",
+                                                    response_mode_buf, sizeof(response_mode_buf));
     int         code_mode = response_mode != NULL && strcmp(response_mode, "code") == 0;
+
+    FILE *dump = fopen(MOCK_RESPONSE_MODE_DUMP_FILE, "w");
+    if (dump != NULL)
+    {
+        fprintf(dump, "RESPONSE_MODE=%s\n", response_mode != NULL ? response_mode : "(unset)");
+        fclose(dump);
+    }
 
     char *resp = malloc(strlen(sql) + 16);
     if (resp == NULL)

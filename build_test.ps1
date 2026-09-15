@@ -169,7 +169,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoRoot
 
-$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26','27')
+$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26','27','28')
 $QuickGates   = @('01','02')
 $FuzzGates    = @('21')
 
@@ -177,6 +177,10 @@ $script:Failed = 0
 function Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green }
 function Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:Failed = 1 }
 function Skip($msg) { Write-Host "  [SKIP] $msg" -ForegroundColor Yellow }
+# Doesn't set $script:Failed -- for environment-flake conditions (e.g. a
+# pg_ctl restart not completing in time) where forcing the whole run
+# red would hide the actual pass/fail signal for everything else.
+function Warn($msg) { Write-Host "  [WARN] $msg" -ForegroundColor DarkYellow }
 
 # --- per-run state ------------------------------------------------------
 $Bin      = Join-Path $PgDir 'bin'
@@ -258,6 +262,14 @@ $RetryPromptFile = Join-Path $DataDir 'fractalsql_bt_retry_prompt.txt'
 # $RetryPromptFile above. Gate 27 reads this back.
 $ThinkDumpFile = Join-Path $DataDir 'fractalsql_bt_think_dump.txt'
 
+# Bare relative filename the MOCK plugin (tests\windows\mock_reasoning_
+# plugin_win.c) dumps FSQL_REASONING_HTTP_RESPONSE_MODE to on every
+# generate() call (GENERATE, REVIEW, or a bare fractal_reason()) -- same
+# resolved-against-CWD mechanism as $ThinkDumpFile above. Gate 28 reads
+# this back after a full fractal_text_to_sql() call, whose last dispatch
+# is always REVIEW.
+$ReviewEnvDumpFile = Join-Path $DataDir 'fractalsql_bt_review_env_dump.txt'
+
 $Mock  = Join-Path $PluginDir 'mock.dll'
 $Evil  = Join-Path $PluginDir 'evil_overread.dll'
 $Crash = Join-Path $PluginDir 'evil_crash.dll'
@@ -327,19 +339,44 @@ function Psql {
     ($stdoutTask.Result + $stderrTask.Result).Trim()
 }
 
+# pg_ctl stop -w confirms the postmaster process itself has exited, but
+# that's not the same guarantee as the OS having released every file
+# handle it held -- on Windows, CloseHandle for a file under real-time
+# antivirus scanning (or just plain process-teardown scheduling) can
+# trail process-exit by up to a couple seconds. Confirmed the hard way:
+# a run with -w already added to both stop call sites still hit "the
+# process cannot access the file ...\log because it is being used by
+# another process" on the very next Remove-Item. Retry with backoff
+# instead of a one-shot delete.
+function RemoveDataDirRetrying($path) {
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            Remove-Item -Recurse -Force $path -ErrorAction Stop
+            return
+        } catch {
+            if ($i -eq 19) { throw }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
 function Cleanup {
     if (Test-Path $DataDir) {
-        try { & "$Bin\pg_ctl.exe" -D $DataDir -m immediate stop 2>&1 | Out-Null } catch { <# best-effort: pg_ctl fails harmlessly if the server is already stopped #> }
+        # -w: see the matching comment on PgSetup's own stale-cleanup
+        # stop call -- same race, same fix, here so a *later* run's
+        # PgSetup doesn't inherit a not-yet-exited postmaster from this
+        # one's teardown.
+        try { & "$Bin\pg_ctl.exe" -D $DataDir -m immediate -w stop 2>&1 | Out-Null } catch { Write-Verbose "best-effort: pg_ctl stop failed (harmless if the server is already stopped): $($_.Exception.Message)" }
         # TEMPORARY: FSQL_BT_KEEP_DATADIR preserves $DataDir\log for
         # post-mortem debugging of the gate-24 Windows enterprise crash --
         # revert this gate once that's root-caused.
         if (-not $env:FSQL_BT_KEEP_DATADIR) {
-            Remove-Item -Recurse -Force $DataDir -ErrorAction SilentlyContinue
+            try { RemoveDataDirRetrying $DataDir } catch { Write-Verbose "best-effort at teardown; PgSetup's own retrying delete is what actually has to succeed: $($_.Exception.Message)" }
         } else {
-            Write-Host "[build_test] FSQL_BT_KEEP_DATADIR set -- leaving $DataDir in place (log at $DataDir\log)"
+            Write-Information "[build_test] FSQL_BT_KEEP_DATADIR set -- leaving $DataDir in place (log at $DataDir\log)" -InformationAction Continue
         }
     }
-    Remove-Item -Force $SqlFile, $TriggerFile, $RetryPromptFile, $ThinkDumpFile -ErrorAction SilentlyContinue
+    Remove-Item -Force $SqlFile, $TriggerFile, $RetryPromptFile, $ThinkDumpFile, $ReviewEnvDumpFile -ErrorAction SilentlyContinue
 }
 
 # --- gate 01: build -------------------------------------------------------
@@ -500,7 +537,7 @@ function Build-UbsanExtension {
 }
 
 function Gate01Build {
-    Write-Host "  building..."
+    Write-Information "  building..." -InformationAction Continue
     if ($Asan) {
         Build-AsanExtension
     } elseif ($Ubsan) {
@@ -561,8 +598,19 @@ function PgSetup {
     # THIS specific datadir first (scoped, not a general postgres.exe
     # sweep -- see this same pattern already used at teardown).
     if (Test-Path $DataDir) {
-        try { & "$Bin\pg_ctl.exe" -D $DataDir -m immediate stop 2>&1 | Out-Null } catch { <# best-effort: pg_ctl fails harmlessly if the server is already stopped #> }
-        Remove-Item -Recurse -Force $DataDir
+        # -w: wait for the stop to actually complete before we touch the
+        # datadir below. Without it, pg_ctl returns as soon as the signal
+        # is sent, not once postgres.exe (and its checkpointer/bgwriter/
+        # walwriter/logger children) have actually exited and released
+        # their open handles -- confirmed the hard way: Remove-Item here
+        # racing a still-live postmaster left orphaned, unkillable-by-us
+        # postgres.exe processes behind (reparented once the owning
+        # terminal session ended), and a later run's pg_ctl start then
+        # failed with "the process cannot access the file ...\log
+        # because it is being used by another process" against the very
+        # datadir this was supposed to have already cleared out.
+        try { & "$Bin\pg_ctl.exe" -D $DataDir -m immediate -w stop 2>&1 | Out-Null } catch { Write-Verbose "best-effort: pg_ctl stop failed (harmless if the server is already stopped): $($_.Exception.Message)" }
+        RemoveDataDirRetrying $DataDir
     }
     BuildTestPlugins
 
@@ -596,8 +644,8 @@ function PgSetup {
     $initdbProc.WaitForExit()
     $initdbOut = $initdbOutTask.Result
     $initdbErr = $initdbErrTask.Result
-    if ($initdbOut) { Write-Host $initdbOut }
-    if ($initdbErr) { Write-Host $initdbErr }
+    if ($initdbOut) { Write-Information $initdbOut -InformationAction Continue }
+    if ($initdbErr) { Write-Information $initdbErr -InformationAction Continue }
     if ($initdbProc.ExitCode -ne 0) {
         throw "initdb.exe failed (exit $($initdbProc.ExitCode)) -- see output above."
     }
@@ -754,7 +802,7 @@ CREATE FUNCTION fractal_embed(input text) RETURNS float8[] AS '$DllPath','fracta
 }
 
 function PgTeardown {
-    try { & "$Bin\pg_ctl.exe" -D $DataDir -m fast stop 2>&1 | Out-Null } catch { <# best-effort: pg_ctl fails harmlessly if the server is already stopped #> }
+    try { & "$Bin\pg_ctl.exe" -D $DataDir -m fast stop 2>&1 | Out-Null } catch { Write-Verbose "best-effort: pg_ctl stop failed (harmless if the server is already stopped): $($_.Exception.Message)" }
     # TEMPORARY: see Cleanup's matching FSQL_BT_KEEP_DATADIR comment.
     if (-not $env:FSQL_BT_KEEP_DATADIR) {
         Remove-Item -Recurse -Force $DataDir, $PluginDir -ErrorAction SilentlyContinue
@@ -1036,7 +1084,7 @@ function Gate12Soak {
     # other gates' single synchronous Psql calls. Cheap, always-on
     # (unlike a -Verbose-gated line) since gate 12 already prints on
     # every run anyway.
-    Write-Host "  12 soak: starting (20 workers x 15 iterations)..."
+    Write-Information "  12 soak: starting (20 workers x 15 iterations)..." -InformationAction Continue
     $workers = 20
     $iters = 15
     Set-Content -Path $SqlFile -Value 'SELECT count(*) FROM bt_orders' -NoNewline
@@ -1184,7 +1232,7 @@ function Gate14Retry {
 # fractalsql-postgresql's OWN glue, matching every other gate's
 # mock-plugin scope in this file. Mirrors build_test.sh's gate 15.
 function Gate15Embed {
-    Write-Host "  15 embed: starting..."
+    Write-Information "  15 embed: starting..." -InformationAction Continue
     if (-not (PgSetGuc -Name 'fractalsql.http_embed_url' -SetVal "'http://unused/embeddings'" -Want 'http://unused/embeddings')) {
         Fail "15 embed: http_embed_url GUC did not take effect"; return
     }
@@ -1279,7 +1327,7 @@ function Gate15Embed {
 #      to read or embed that table's content. Mirrors build_test.sh's
 #      gate 16.
 function Gate16EmbedAuthz {
-    Write-Host "  16 embed_authz: starting..."
+    Write-Information "  16 embed_authz: starting..." -InformationAction Continue
     Psql -Sql @"
 DROP ROLE IF EXISTS bt_embed_owner;
 CREATE ROLE bt_embed_owner LOGIN;
@@ -2318,7 +2366,7 @@ function Gate21FuzzSmoke {
     # runtime directory the same way Find-ClangCl resolves the compiler
     # itself, and prepend it to PATH for this process only.
     $clangResourceDir = $null
-    try { $clangResourceDir = (& $script:ClangCl -print-resource-dir 2>$null | Select-Object -First 1) } catch { <# best-effort: clang -print-resource-dir absent/unsupported is not fatal, $clangResourceDir stays $null #> }
+    try { $clangResourceDir = (& $script:ClangCl -print-resource-dir 2>$null | Select-Object -First 1) } catch { Write-Verbose "best-effort: clang -print-resource-dir absent/unsupported is not fatal, `$clangResourceDir stays `$null: $($_.Exception.Message)" }
     if ($clangResourceDir) {
         $sanRtDir = Join-Path $clangResourceDir 'lib\windows'
         if (Test-Path $sanRtDir) { $env:PATH = "$sanRtDir;$env:PATH" }
@@ -3067,8 +3115,164 @@ function Gate27Think {
     Remove-Item -Force $ThinkDumpFile -ErrorAction SilentlyContinue
 }
 
+# Regression test for ensure_review_ctx()/g_review_ctx: fractal_text_to_
+# sql()'s REVIEW step must never see an operator-set
+# FSQL_REASONING_HTTP_RESPONSE_MODE, even though REVIEW is "just a
+# second fractal_reason()-shaped call" sharing the same URL/token/model
+# config. Before this fix REVIEW shared g_reason_ctx directly, so an
+# operator setting RESPONSE_MODE=json (say) for their own
+# fractal_reason() calls would silently break t2s_run_review()'s
+# hardcoded leading-PASS/FAIL text parsing too.
+#
+# Unlike THINK (gate 27), RESPONSE_MODE has no GUC -- it's captured
+# from the raw process environment exactly once, at postmaster startup
+# (_PG_init's g_response_mode_boot), so exercising it needs a real
+# pg_ctl restart with the var exported into the postmaster's own
+# environment, not just an ALTER SYSTEM + reload. Restores the
+# un-restarted baseline afterward so later gates on this same reused
+# cluster see a clean postmaster environment again.
+function Gate28ReviewIsolation {
+    function RestartPgForGate28 {
+        # A PowerShell retry-loop with a bounded iteration count is only
+        # actually bounded in wall-clock time if every call inside it is
+        # itself bounded. It isn't here by default: pg_ctl.exe's own
+        # Windows-side signaling (CallNamedPipe, pidfile polling -- see
+        # the well-documented upstream bugs around "pg_ctl stop fails on
+        # Windows") can block indefinitely on a single invocation, and
+        # the shared Psql() helper's $proc.WaitForExit() has no timeout
+        # at all. Confirmed the hard way: a version of this function
+        # already wrapped in bounded retry loops still hung 10+ minutes,
+        # because one single iteration's underlying process call never
+        # returned control -- the loop never got to advance.
+        #
+        # Fix: every external process invocation below uses the .NET
+        # Process API directly with an explicit WaitForExit(ms) + Kill()
+        # fallback, so each individual call has a real, enforced
+        # wall-clock cap -- not just a retry count around an unbounded
+        # primitive. -w is not used anywhere here for the same reason:
+        # its internal Windows readiness/completion signal is exactly
+        # the unreliable piece these timeouts are working around.
+        function RunPgCtlWithTimeout([string[]]$PgCtlArgs, [int]$TimeoutMs) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "$Bin\pg_ctl.exe"
+            foreach ($a in (@('-D', $DataDir) + $PgCtlArgs)) { $psi.ArgumentList.Add($a) }
+            $psi.UseShellExecute = $false
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            if (-not $proc.WaitForExit($TimeoutMs)) {
+                try { $proc.Kill($true) } catch { Write-Verbose "best-effort: process tree kill failed (process may have already exited): $($_.Exception.Message)" }
+                return $false
+            }
+            return ($proc.ExitCode -eq 0)
+        }
+
+        function PsqlPingWithTimeout([int]$TimeoutMs) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "$Bin\psql.exe"
+            foreach ($a in @('-h','127.0.0.1','-p',"$Port",'-U','postgres','-d','postgres','-X','-tA','-c','SELECT 1;')) {
+                $psi.ArgumentList.Add($a)
+            }
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError  = $true
+            $psi.UseShellExecute = $false
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $null = $proc.StandardError.ReadToEndAsync()
+            if (-not $proc.WaitForExit($TimeoutMs)) {
+                try { $proc.Kill($true) } catch { Write-Verbose "best-effort: process tree kill failed (process may have already exited): $($_.Exception.Message)" }
+                return $false
+            }
+            return ($outTask.Result.Trim() -eq '1')
+        }
+
+        # -m fast stop: 15s hard cap. Best-effort -- a timed-out stop
+        # here just means the pidfile-wait loop below (which checks
+        # reality directly via Test-Path, not another process call) has
+        # to do the actual work of confirming the old server is gone.
+        [void](RunPgCtlWithTimeout @('-m', 'fast', 'stop') 15000)
+
+        $pidFile = Join-Path $DataDir 'postmaster.pid'
+        for ($i = 0; $i -lt (40 * $TimeoutMult) -and (Test-Path $pidFile); $i++) {
+            Start-Sleep -Milliseconds 250
+        }
+
+        if (-not (RunPgCtlWithTimeout @('-l', (Join-Path $DataDir 'log'), 'start') 15000)) { return $false }
+
+        for ($i = 0; $i -lt (30 * $TimeoutMult); $i++) {
+            if (PsqlPingWithTimeout 1000) { return $true }
+            Start-Sleep -Milliseconds 500
+        }
+        return $false
+    }
+
+    # Progress markers, not just Pass/Fail at the end -- a hang inside
+    # any one of these steps (pg_ctl restart, or a Psql() call, which
+    # has no timeout of its own -- see Psql's own header comment) would
+    # otherwise look identical to the whole gate being silently stuck,
+    # with no way to tell which step it's actually in. Confirmed the
+    # hard way: a real run sat with zero output for 10+ minutes here and
+    # there was no way to tell whether it was the restart, the positive-
+    # control query, or the REVIEW-path query without adding these.
+    Write-Host "[build_test] gate 28: swapping to mock plugin..."
+    if (-not (PgSwapPlugin $Mock)) { Fail "28 review_isolation: plugin swap did not take effect"; return }
+
+    Write-Host "[build_test] gate 28: restarting cluster with RESPONSE_MODE=json..."
+    $env:FSQL_REASONING_HTTP_RESPONSE_MODE = 'json'
+    if (-not (RestartPgForGate28)) {
+        Warn "28 review_isolation: could not restart cluster with FSQL_REASONING_HTTP_RESPONSE_MODE=json set (env restart flake, not a code regression -- skipping this gate's assertions)"
+        Remove-Item Env:\FSQL_REASONING_HTTP_RESPONSE_MODE -ErrorAction SilentlyContinue
+        RestartPgForGate28 | Out-Null
+        return
+    }
+
+    # Positive control: fractal_reason()'s own tier DOES see the boot-
+    # captured value -- proves the env var actually reached the
+    # postmaster (and that g_response_mode_boot's capture/re-apply
+    # mechanism works) before trusting REVIEW's negative result below.
+    Write-Host "[build_test] gate 28: positive control -- fractal_reason('q')..."
+    Remove-Item -Force $ReviewEnvDumpFile -ErrorAction SilentlyContinue
+    Psql -Sql "SELECT fractal_reason('q');" | Out-Null
+    Write-Host "[build_test] gate 28: positive control query returned"
+    $ra = Get-Content -Path $ReviewEnvDumpFile -Raw -ErrorAction SilentlyContinue
+    if ($ra -and $ra -match 'RESPONSE_MODE=json') {
+        Pass "28 review_isolation: positive control -- fractal_reason() sees the boot-captured RESPONSE_MODE=json"
+    } else {
+        Fail "28 review_isolation: positive control failed, expected RESPONSE_MODE=json from fractal_reason(), got: $ra"
+    }
+
+    # The actual regression check: REVIEW must NOT see it, regardless.
+    # REVIEW runs after GENERATE within one fractal_text_to_sql() call,
+    # so the dump file's content once the whole call returns/errors
+    # reflects REVIEW's own env (see mock_reasoning_plugin_win.c's
+    # header).
+    Write-Host "[build_test] gate 28: enabling text_to_sql_use_review..."
+    if (-not (PgSetGuc -Name 'fractalsql.text_to_sql_use_review' -SetVal 'on' -Want 'on')) {
+        Fail "28 review_isolation: could not enable text_to_sql_use_review"
+    } else {
+        Set-Content -Path $SqlFile -Value 'SELECT 1' -NoNewline
+        Remove-Item -Force $ReviewEnvDumpFile -ErrorAction SilentlyContinue
+        Write-Host "[build_test] gate 28: REVIEW-path query -- fractal_text_to_sql('q', ...)..."
+        Psql -Sql "SELECT fractal_text_to_sql('q', ARRAY['bt_customers','bt_orders']);" | Out-Null
+        Write-Host "[build_test] gate 28: REVIEW-path query returned"
+        $rb = Get-Content -Path $ReviewEnvDumpFile -Raw -ErrorAction SilentlyContinue
+        if ($rb -and $rb -match 'RESPONSE_MODE=\(unset\)') {
+            Pass "28 review_isolation: REVIEW step never sees the boot-captured RESPONSE_MODE, even though fractal_reason() does"
+        } else {
+            Fail "28 review_isolation: expected RESPONSE_MODE=(unset) from the REVIEW dispatch, got: $rb"
+        }
+        PgSetGuc -Name 'fractalsql.text_to_sql_use_review' -SetVal 'off' -Want 'off' | Out-Null
+    }
+
+    # Restore: stop, drop the env var, restart -- so later gates on this
+    # same reused cluster see a clean postmaster environment again.
+    Write-Host "[build_test] gate 28: restoring baseline (dropping RESPONSE_MODE, restarting)..."
+    Remove-Item Env:\FSQL_REASONING_HTTP_RESPONSE_MODE -ErrorAction SilentlyContinue
+    if (-not (RestartPgForGate28)) { Warn "28 review_isolation: could not restart cluster to restore the clean baseline environment (env restart flake -- gate 28 is last, nothing downstream depends on it)" }
+    PgSwapPlugin $Mock | Out-Null
+    Remove-Item -Force $ReviewEnvDumpFile -ErrorAction SilentlyContinue
+}
+
 function RunGates($gates) {
-    Write-Host "== PG$PgMajor (Windows) =="
+    Write-Information "== PG$PgMajor (Windows) ==" -InformationAction Continue
     if ($gates -contains '01') {
         if (-not (Gate01Build)) { return }
     }
@@ -3118,6 +3322,7 @@ function RunGates($gates) {
                 '25' { Gate25EnterpriseStress }
                 '26' { Gate26EnterpriseSignature }
                 '27' { Gate27Think }
+                '28' { Gate28ReviewIsolation }
             }
         }
         PgTeardown

@@ -271,7 +271,7 @@ function Select-PgTarget {
     if ($Installs.Count -eq 1) { return $Installs[0] }
     Write-Step "Found multiple PostgreSQL installs:"
     for ($i = 0; $i -lt $Installs.Count; $i++) {
-        Write-Host "  $($i+1)) PG$($Installs[$i].Major) (port $($Installs[$i].Port))"
+        Write-Information "  $($i+1)) PG$($Installs[$i].Major) (port $($Installs[$i].Port))" -InformationAction Continue
     }
     $choice = Prompt-Value "Which one? (1-$($Installs.Count), or a PG major like 17)"
     if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $Installs.Count) {
@@ -327,7 +327,7 @@ function Test-Installed {
 }
 
 # --- Phase B: install the package (default-on, confirmed) ------------------
-function Install-Package {
+function Install-FractalSqlPackage {
     param($Target)
     if (Test-Installed $Target.Dir) { return }
     if ($NoInstall) {
@@ -387,7 +387,7 @@ function Invoke-ColdStartTimeoutOffer {
     }
     $envValues = @('FSQL_REASONING_HTTP_TIMEOUT_MS=330000', 'FSQL_REASONING_HTTP_LOW_SPEED_SECS=300')
     Write-Step "Writing service environment for '$serviceName':"
-    $envValues | ForEach-Object { Write-Host "  $_" }
+    $envValues | ForEach-Object { Write-Information "  $_" -InformationAction Continue }
     if ($DryRun) {
         Write-Step "(-DryRun: not actually writing or restarting)"
         return
@@ -399,9 +399,15 @@ function Invoke-ColdStartTimeoutOffer {
     $doRestart = Confirm-Step "Restart the PostgreSQL service now to apply it?"
 
     $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+    $elevatedScript = {
+        param([string]$RegPath, [string]$ServiceName, [string[]]$EnvValues, [bool]$DoRestart)
+        Set-ItemProperty -Path $RegPath -Name Environment -Value $EnvValues -Type MultiString
+        if ($DoRestart) { Restart-Service -Name $ServiceName -Force }
+    }
     $quotedValues = ($envValues | ForEach-Object { "'$_'" }) -join ','
-    $elevatedCmd = "Set-ItemProperty -Path '$regPath' -Name Environment -Value @($quotedValues) -Type MultiString"
-    if ($doRestart) { $elevatedCmd += "; Restart-Service -Name '$serviceName' -Force" }
+    $elevatedText = "Set-ItemProperty -Path '$regPath' -Name Environment -Value @($quotedValues) -Type MultiString"
+    if ($doRestart) { $elevatedText += "; Restart-Service -Name '$serviceName' -Force" }
+    $encodedElevated = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevatedText))
 
     # Writing a service's Environment value lives under HKLM\SYSTEM, which
     # is protected even for a member of Administrators unless the process
@@ -413,7 +419,7 @@ function Invoke-ColdStartTimeoutOffer {
     # once, the same way a single `sudo` prompt works on Linux.
     if (Test-IsAdmin) {
         try {
-            Invoke-Expression $elevatedCmd
+            & $elevatedScript -RegPath $regPath -ServiceName $serviceName -EnvValues $envValues -DoRestart:$doRestart
         } catch {
             Write-Warn2 "Could not write the service environment ($($_.Exception.Message)). Set those two values by hand and restart $serviceName, or skip this and rely on the default timeout."
             return
@@ -422,7 +428,7 @@ function Invoke-ColdStartTimeoutOffer {
         Write-Step "This needs administrator access. Windows will show a permission prompt. Accept it to continue."
         try {
             $p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru `
-                -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $elevatedCmd)
+                -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedElevated)
             if ($p.ExitCode -ne 0) { throw "elevated step exited with code $($p.ExitCode)" }
         } catch {
             Write-Warn2 "Couldn't complete this as administrator ($($_.Exception.Message)). Set FSQL_REASONING_HTTP_TIMEOUT_MS=330000 and FSQL_REASONING_HTTP_LOW_SPEED_SECS=300 by hand under $regPath and restart $serviceName yourself, or re-run this whole script from an Administrator PowerShell to skip the extra prompt."
@@ -451,7 +457,7 @@ function Invoke-Wizard {
 
     Write-Step "Activating the extension in database 'postgres' on PG$($Target.Major)..."
     $extver = ''
-    try { $extver = Invoke-Psql $bin $pgPort "SELECT extversion FROM pg_extension WHERE extname='fractalsql';" } catch {}
+    try { $extver = Invoke-Psql $bin $pgPort "SELECT extversion FROM pg_extension WHERE extname='fractalsql';" } catch { Write-Verbose "fractalsql not installed yet (psql probe failed): $($_.Exception.Message)" }
     $stale = $false
     if ($extver) {
         if ($extver -ne '1.0') {
@@ -467,7 +473,7 @@ function Invoke-Wizard {
             # against it, leaving stale catalog objects that are missing
             # fractal_version(). Check for the function directly instead.
             $hasFn = ''
-            try { $hasFn = Invoke-Psql $bin $pgPort "SELECT 1 FROM pg_proc WHERE proname = 'fractal_version';" } catch {}
+            try { $hasFn = Invoke-Psql $bin $pgPort "SELECT 1 FROM pg_proc WHERE proname = 'fractal_version';" } catch { Write-Verbose "probe failed, treating fractal_version() as missing: $($_.Exception.Message)" }
             if (-not $hasFn) { $stale = $true }
         }
     }
@@ -628,7 +634,7 @@ function Invoke-Uninstall {
         }
     }
 
-    Write-Host "  To remove the package: uninstall 'FractalSQL for PostgreSQL $($Target.Major)' from Windows Settings > Apps, or msiexec /x <product code>"
+    Write-Information "  To remove the package: uninstall 'FractalSQL for PostgreSQL $($Target.Major)' from Windows Settings > Apps, or msiexec /x <product code>" -InformationAction Continue
 }
 
 # --- main ------------------------------------------------------------------
@@ -641,5 +647,5 @@ if ($Uninstall) {
     exit 0
 }
 
-Install-Package $target
+Install-FractalSqlPackage $target
 Invoke-Wizard $target

@@ -60,9 +60,10 @@ SELECT fractal_vectorizer_process_queue();
 
 ### 4. Monitor Progress
 ```sql
-SELECT * FROM fractal_vectorizer_status;
--- View pending/processing/done/failed counts and recent errors
+SELECT * FROM fractal_vectorizer_status WHERE vectorizer_id = 1;
+-- vectorizer_id | source_table | text_col | embedding_col | enabled | status | n | last_failure_at | last_error
 ```
+`fractal_vectorizer_status` is a view, not a function: one row per `(vectorizer_id, status)` pair, with the count of rows currently in that status and the most recent failure detail.
 
 ---
 
@@ -192,16 +193,16 @@ fractalsql.http_embed_model = 'text-embedding-005'
 Sets up the automation trigger and backfills the queue. Requires a single-column primary key.
 
 ### `fractal_vectorizer_pause(id)` / `fractal_vectorizer_resume(id)`
-Toggles the `enabled` state. When paused, new writes are not queued and the processor skips existing pending rows.
+Toggles the `enabled` state. When paused, new writes are not queued and the processor skips existing pending rows. Raises a clean exception on a nonexistent id. Idempotent: pausing an already-paused vectorizer is a no-op.
 
 ### `fractal_vectorizer_drop(id)`
-Permanently deregisters the vectorizer: drops its trigger and deletes its config/queue history. Irreversible -- for a temporary stop, use `fractal_vectorizer_pause()` instead. Needed before re-creating a vectorizer on the same `(source_table, text_col, embedding_col)`, since that triple is unique.
+Permanently deregisters the vectorizer: drops its trigger and deletes its config/queue history (`fractal_vectorizer_queue` rows cascade via foreign key). Raises a clean exception on a nonexistent id. Irreversible -- for a temporary stop, use `fractal_vectorizer_pause()` instead. Needed before re-creating a vectorizer on the same `(source_table, text_col, embedding_col)`, since that triple is unique.
 
 ### `fractal_vectorizer_process_queue(batch_size DEFAULT 100, stale_after DEFAULT '10 minutes')`
 The engine that drives the synchronization. Safe for concurrent execution via `SKIP LOCKED`.
 
 ### Rate Capping
-To prevent provider throttling, set `options.max_embeds_per_window` (int) and `options.rate_window_secs` (default 3600) during creation.
+To prevent provider throttling, set `options.max_embeds_per_window` (int) and `options.rate_window_secs` (default 3600) during creation. Tracked per-vectorizer in `fractal_vectorizer_rate_window`: the cap holds attempts (not just successes) within a window, and rolls over once `rate_window_secs` elapses since the window started.
 ```sql
 SELECT fractal_vectorizer_create(
     'documents', 'body', 'embedding',

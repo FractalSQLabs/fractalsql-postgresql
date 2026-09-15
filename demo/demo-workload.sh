@@ -78,7 +78,7 @@ done
 
 PSQL=(docker exec -i "$CONTAINER" psql -U "$DBUSER" -d "$DB" -tA)
 G="\033[32m"; Y="\033[33m"; Z="\033[0m"
-log() { printf "%b\n" "$*"; }
+log() { printf "%b\n" "$*"; return 0; }
 
 # --------------------------------------------------------------------
 # --ollama-host / --model: point the container's reasoning endpoint
@@ -285,6 +285,7 @@ worker() {
             echo "$op fail 0" >> "$RESULTS_DIR/worker_$wid.log"
         fi
     done
+    return 0
 }
 
 # Scheduler: drains the vectorizer queue on a fixed cadence, same as a
@@ -297,6 +298,7 @@ scheduler() {
         sleep 5
         "${PSQL[@]}" -c "SELECT fractal_vectorizer_process_queue();" >/dev/null 2>&1
     done
+    return 0
 }
 
 log "\nRunning ${G}${CONCURRENCY}${Z} concurrent workers for ${G}${DURATION}s${Z}..."

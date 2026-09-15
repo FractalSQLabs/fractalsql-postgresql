@@ -56,18 +56,41 @@ Generates SQL from natural language. It uses a three-stage safety pipeline:
 
 ## 🤖 Tier 3: Agency
 
-The Agent Tier composes the Discovery and Cognition primitives into autonomous routines. These are "Universal Agents" that provide the high-level logic for complex workflows, which can then be composed into "Domain Agents" using PL/pgSQL.
+The Agency tier composes the Discovery and Cognition primitives into autonomous routines: 16 installable agents, each a productized recipe for a recurring pattern, built on 6 reusable Universal Agent primitives you can also call directly. See [`docs/api-agency.md`](api-agency.md) for the full argument reference, examples, and notes.
 
-### Agent Dependency Matrix
+### Agents
 
-| Agent Function | Dependencies | Capability Provided |
+| Agent | Recipe | Reasoning |
 | --- | --- | --- |
-| `fractal_search_agent` | Embed $\rightarrow$ Scout $\rightarrow$ Reason | End-to-end synthesis of diverse context into a final answer. |
-| `fractal_rag_agent` | Embed $\rightarrow$ Scout $\rightarrow$ Reason | Single-turn RAG: the lighter, focused form of the above. |
-| `fractal_sql_agent` | T2S $\rightarrow$ Parser $\rightarrow$ EXPLAIN $\rightarrow$ LLM | Robust SQL generation with automatic self-correction via retries. |
-| `fractal_agent_plan_explore` | SFS Core $\rightarrow$ Diversify/Repulsion | MCTS-style exploration of non-overlapping strategy trajectories. |
-| `fractal_agent_trajectory_predict` | Telemetry $\rightarrow$ Delta-Vector Logic | Preemptive forecast of state drift by searching the delta vector. |
-| `fractal_agent_detect_loop` | DFA $\rightarrow$ Dimension Analysis | Safety monitor that flags repetitive behavior via scaling exponents. |
+| `fractal_agent_anomaly_triage` | drift exponent on one entity's series → reasoning triage | ✓ |
+| `fractal_agent_regime_triage` | DFA + drift over one series → reasoning triage | ✓ |
+| `fractal_agent_track_anomaly` | trajectory deviation + heading DFA → reasoning triage | ✓ |
+| `fractal_agent_detour_classify` | trajectory deviation + box-counting → reasoning classify | ✓ |
+| `fractal_agent_network_coverage_alert` | spatial morphology + telemetry drift → reasoning alert | ✓ |
+| `fractal_agent_allocate` | SFS Sharpe optimizer → reasoning rationale | ✓ |
+| `fractal_agent_rebalance_sibling` | optimizer + trajectory search → reasoning rationale | ✓ |
+| `fractal_agent_diverse_portfolios` (enterprise) | multimodal optimizer → reasoning tradeoff summary | ✓ |
+| `fractal_agent_route_task` | nearest-capability search + budget accounting → reasoning rationale | ✓ |
+| `fractal_agent_schedule_workload` | `fractal_search` refine + nearest node → reasoning rationale | ✓ |
+| `fractal_agent_outlier_intercept` | distance-to-bad-state safety barrier → reasoning justification | ✓ |
+| `fractal_agent_patient_deterioration_triage` | cohort search + trajectory drift → reasoning triage | ✓ |
+| `fractal_agent_data_analyst` | NL → SQL → execute → reasoning analysis | ✓ |
+| `fractal_agent_recall_hybrid` | cohort-restricted vector recall | — |
+| `fractal_agent_recommend_diverse` | repulsion-diverse top-k | — |
+| `fractal_agent_feedback_audit` | diversify loop + collapse detection | — |
+
+### Universal Agents
+
+The six building blocks the agents above compose. Call them directly to build your own recipe.
+
+| Function | What it does |
+| --- | --- |
+| `fractal_search_agent` | Embed a query, Scout-search a table, and reason over the matched rows. |
+| `fractal_rag_agent` | Focused single-turn RAG: embed, Scout-search, and reason over the result. |
+| `fractal_sql_agent` | Self-correcting NL-to-SQL, retrying on `EXPLAIN`/execution failure. |
+| `fractal_agent_plan_explore` | MCTS-style exploration of multiple non-overlapping strategy trajectories. |
+| `fractal_agent_trajectory_predict` | Forecasts future state from a delta against historical telemetry. |
+| `fractal_agent_detect_loop` | Flags infinite/repetitive agent loops via a DFA scaling exponent. |
 
 ### Safe Agency & Guardrails
 
@@ -128,12 +151,11 @@ Using the native `fractal_vector` type gives close to a **~2x** speedup over `fl
 - `fractal_text_to_sql(question, table_names?)`: Safe SQL generation. $\rightarrow$ **[api-cognition.md](api-cognition.md)**
 
 **Agency**
-- `fractal_search_agent(...)`: End-to-end synthesis. $\rightarrow$ **[api-agency.md](api-agency.md)**
-- `fractal_rag_agent(...)`: Single-turn RAG. $\rightarrow$ **[api-agency.md](api-agency.md)**
-- `fractal_sql_agent(...)`: Self-correcting SQL execution. $\rightarrow$ **[api-agency.md](api-agency.md)**
-- `fractal_agent_plan_explore(...)`: Strategy exploration. $\rightarrow$ **[api-agency.md](api-agency.md)**
-- `fractal_agent_trajectory_predict(...)`: Drift projection. $\rightarrow$ **[api-agency.md](api-agency.md)**
-- `fractal_agent_detect_loop(...)`: Loop safety monitoring. $\rightarrow$ **[api-agency.md](api-agency.md)**
+- `fractal_agent_data_analyst(...)`: NL question over tables + reasoned summary. $\rightarrow$ **[api-agency.md](api-agency.md)**
+- `fractal_agent_route_task(...)`: Sub-agent dispatch. $\rightarrow$ **[api-agency.md](api-agency.md)**
+- `fractal_agent_regime_triage(...)` / `_anomaly_triage(...)`: Drift/regime detection. $\rightarrow$ **[api-agency.md](api-agency.md)**
+- `fractal_agent_recommend_diverse(...)` / `_recall_hybrid(...)`: Diverse/cohort-restricted retrieval. $\rightarrow$ **[api-agency.md](api-agency.md)**
+- 10 more, full list $\rightarrow$ **[api-agency.md](api-agency.md#which-agent-should-i-use)**
 
 **Analytics**
 - `fractal_dimension_dfa(series)`: DFA scaling exponent. $\rightarrow$ **[api-analytics.md](api-analytics.md)**

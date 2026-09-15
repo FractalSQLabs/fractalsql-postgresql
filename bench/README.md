@@ -114,7 +114,7 @@ matters more than scan throughput.
 
 ```
 --n        total points (default 100000)
---dim      vector dimension (default 768)
+--dim      vector dimension (default 128)
 --clusters number of Gaussian islands (default 50)
 --sigma    intra-cluster std (default 0.05)
 ```

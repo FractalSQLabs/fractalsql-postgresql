@@ -17,8 +17,8 @@ By bringing reasoning and agency directly into the PostgreSQL backend, FractalSQ
 enables **Sovereign Data Intelligence**: the ability to reason, plan, and act upon
 your data with the deployment topology under your control. Run fully on-prem or in
 your own containers with Ollama/vLLM for zero data egress, or point at your
-organization's cloud AI accounts (Bedrock, Azure OpenAI, Vertex) — where your compliance 
-posture requires it — for managed-model scale. You control the trade, not the product.
+organization's cloud AI accounts (Bedrock, Azure OpenAI, Vertex), where your compliance 
+posture requires it for managed-model scale. You control the trade, not the product.
 
 | Traditional RAG Stack | The Sovereign Way (FractalSQL) |
 | --- | --- |

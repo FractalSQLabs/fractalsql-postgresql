@@ -6,7 +6,7 @@
 # prebuilt .so from dist/${arch}/fractalsql_pg${pg_major}.so.
 
 Name:           postgresql-%{pg_major}-fractalsql
-Version:        1.0.0
+Version:        2.0.11
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search extension for PostgreSQL %{pg_major}
 
@@ -21,11 +21,12 @@ Requires:       postgresql%{pg_major}-server
 Requires:       libcurl.so.4()(64bit)
 
 %description
-FractalSQL registers the fractal_search() and fractal_search_explore()
-functions — a pure-C Stochastic Fractal Search optimizer for
-high-diversity vector search inside PostgreSQL %{pg_major}, with an
-optional LLM reasoning plugin (fractalsql-reasoning-http, which links
-libcurl).
+FractalSQL registers a pure-C Stochastic Fractal Search optimizer
+(fractal_search()/fractal_search_explore()) inside PostgreSQL %{pg_major}
+plus the full Discovery/Cognition/Text-to-SQL/Agency/Analytics/Enterprise
+tier surface (see docs/features.md), including the dependent
+fractalsql_agents extension's sixteen installable agents. Optional LLM
+reasoning plugin (fractalsql-reasoning-http, which links libcurl).
 
 %prep
 %setup -q
@@ -60,5 +61,8 @@ install -Dm0644 fractalsql_agents/sql/fractalsql_agents--1.0.sql \
 /usr/pgsql-%{pg_major}/share/extension/fractalsql_agents--1.0.sql
 
 %changelog
+* Fri Sep 11 2026 FractalSQLabs - 2.0.11-1
+- Description updated for the full Discovery/Cognition/Text-to-SQL/
+  Agency/Analytics/Enterprise tier surface; Version was stale at 1.0.0.
 * Sat Apr 18 2026 FractalSQLabs - 1.0.0-1
 - Initial Factory-standardized release for PostgreSQL 16 / 17 / 18.

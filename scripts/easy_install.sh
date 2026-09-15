@@ -66,11 +66,11 @@ REPO="FractalSQLabs/fractalsql-postgresql"
 
 # --- output helpers ------------------------------------------------------
 if [[ -t 1 ]]; then G="\033[32m"; R="\033[31m"; Y="\033[33m"; B="\033[1m"; Z="\033[0m"; else G=""; R=""; Y=""; B=""; Z=""; fi
-log()  { printf "${B}==>${Z} %s\n" "$1"; }
-ok()   { printf "  ${G}✓${Z} %s\n" "$1"; }
-warn() { printf "  ${Y}!${Z} %s\n" "$1" >&2; }
-err()  { printf "  ${R}✗${Z} %s\n" "$1" >&2; }
-die()  { err "$1"; exit 1; }
+log()  { local msg="$1"; printf "${B}==>${Z} %s\n" "$msg"; }
+ok()   { local msg="$1"; printf "  ${G}✓${Z} %s\n" "$msg"; }
+warn() { local msg="$1"; printf "  ${Y}!${Z} %s\n" "$msg" >&2; }
+err()  { local msg="$1"; printf "  ${R}✗${Z} %s\n" "$msg" >&2; }
+die()  { local msg="$1"; err "$msg"; exit 1; }
 
 # --- /dev/tty-aware prompting --------------------------------------------
 # `curl ... | bash` makes stdin the pipe, not the terminal. Reading a
@@ -363,14 +363,14 @@ phase_b_install() {
         debian)
             local asset="postgresql-${TARGET_MAJOR}-fractalsql-${ARCH_DEB}.deb"
             log "Downloading ${asset}..."
-            curl -fsSL "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             log "sudo apt-get install -y ${TMP_DIR}/${asset}"
             [[ "${DRY_RUN}" -eq 1 ]] || sudo apt-get install -y "${TMP_DIR}/${asset}"
             ;;
         rhel)
             local asset="postgresql-${TARGET_MAJOR}-fractalsql-${ARCH_DEB}.rpm"
             log "Downloading ${asset}..."
-            curl -fsSL "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             if [[ "${PKG_MGR}" == "zypper" ]]; then
                 # zypper enforces signature checks by default, even for a
                 # locally-supplied file; dnf/yum don't. --no-gpg-checks is
@@ -386,11 +386,14 @@ phase_b_install() {
         darwin)
             local asset="fractalsql-postgresql-${INSTALL_VERSION}-pg${TARGET_MAJOR}-darwin-${ARCH_DARWIN}.tar.gz"
             log "Downloading ${asset}..."
-            curl -fsSL "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             tar xzf "${TMP_DIR}/${asset}" -C "${TMP_DIR}"
             local dir="${TMP_DIR}/${asset%.tar.gz}"
             log "Running the bundled scripts/macos/install.sh (reused, not reimplemented)..."
             [[ "${DRY_RUN}" -eq 1 ]] || PG_CONFIG="${TARGET_PG_CONFIG}" "${dir}/install.sh"
+            ;;
+        *)
+            die "unsupported OS family: ${OS_FAMILY}"
             ;;
     esac
     ok "Package installed for PG${TARGET_MAJOR}."
@@ -401,8 +404,8 @@ phase_b_install() {
 # literal. Values here come from user input (a URL, a model name, a
 # token), and a literal quote in one of them would otherwise break the
 # ALTER SYSTEM SET statement's syntax.
-sqlq() { printf '%s' "${1//\'/\'\'}"; }
-guc_set() { PSQL_ARGS+=(-c "ALTER SYSTEM SET fractalsql.$1 = $2"); }
+sqlq() { local val="$1"; printf '%s' "${val//\'/\'\'}"; }
+guc_set() { local name="$1" value="$2"; PSQL_ARGS+=(-c "ALTER SYSTEM SET fractalsql.$name = $value"); }
 guc_reset_all() {
     local g
     for g in reasoning_plugin http_url http_token http_model http_allow_plaintext \
@@ -505,6 +508,9 @@ offer_cold_start_timeout() {
             ;;
         darwin)
             warn "macOS (launchd) needs this set by hand. See docs/reasoning-setup.md's 'Handling Constrained Hardware' section for the brew services and launchctl steps. Not automated here."
+            ;;
+        *)
+            die "unsupported OS family: ${OS_FAMILY}"
             ;;
     esac
 }
@@ -688,6 +694,9 @@ uninstall_flow() {
             fi
             ;;
         darwin) echo "  To remove the files: rm \$($TARGET_PG_CONFIG --pkglibdir)/fractalsql* \$($TARGET_PG_CONFIG --sharedir)/extension/fractalsql*" ;;
+        *)
+            die "unsupported OS family: ${OS_FAMILY}"
+            ;;
     esac
 }
 

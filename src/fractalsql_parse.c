@@ -127,7 +127,9 @@ fsql_extract_topk(const char *json, int max_k, int *out_idx, double *out_dist)
         p = strchr(p, '}');
         if (!p) return -1;
         p++;
-        if (idx >= 0) {                         /* skip unfilled (-1) slots */
+        if (idx >= 0 && idx <= INT_MAX) {       /* skip unfilled (-1) slots;
+                                                 * reject values that would
+                                                 * wrap in the int cast */
             out_idx[n]  = (int) idx;
             out_dist[n] = dist;
             n++;

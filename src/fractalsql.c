@@ -230,12 +230,31 @@ static char *fractal_text_to_sql_internal(const char *question, ArrayType *table
  * guards in this file. */
 #define MAX_EMBED_DIM  16384
 
-/* Reject an implausibly large plugin response, freeing it first. NULL
- * summary is already guaranteed non-NULL by fsql_dispatch_ai on rc==0,
- * so callers only invoke this after a successful dispatch. */
+/* Cap on a single fractal_embed() input (4 MiB, matching the cap used
+ * across the other integrations): the reasoning plugin is invoked with
+ * the caller's text verbatim, and an unbounded input turns one SQL
+ * call into an unbounded HTTP body. 4 MiB is far above any real
+ * embedding input (embedding models cap out at ~8k tokens) -- a clean
+ * rejection, never a silent truncation. */
+#define FSQL_MAX_INPUT_BYTES  ((size_t) 4 * 1024 * 1024)
+
+/* Reject an implausibly large plugin response, freeing it first. The
+ * rc==0 fsql_dispatch_ai contract says summary is non-NULL, but every
+ * consumer copies it immediately (pnstrdup/cstring_to_text_with_len),
+ * and pnstrdup(NULL, ...) crashes -- so the guard defends beyond the
+ * contract too: a contract-violating plugin gets a clean error, not a
+ * backend crash. Callers only invoke this after a successful dispatch. */
 static void
 guard_ai_response_len(fsql_ai_response_t *resp)
 {
+    if (resp->summary == NULL)
+    {
+        fsql_ai_response_free(resp);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("fractalsql: reasoning plugin returned a NULL "
+                        "summary on a success status -- likely a plugin bug")));
+    }
     if (resp->summary_len > FSQL_MAX_AI_RESPONSE_BYTES)
     {
         size_t len = resp->summary_len;
@@ -299,7 +318,7 @@ PGDLLEXPORT void _PG_fini(void);
  * satisfies the plugin's single-CURL*-per-ctx contract automatically. */
 static fsql_ctx *g_ctx = NULL;
 
-/* Reasoning runs through three INDEPENDENT contexts, not one shared
+/* Reasoning runs through four INDEPENDENT contexts, not one shared
  * one. A single fsql_ctx has exactly one reasoning-plugin slot --
  * fsql_load_reasoning() called again on the same ctx REPLACES whatever
  * was previously loaded (runs that plugin's fini, inits the new one),
@@ -307,12 +326,13 @@ static fsql_ctx *g_ctx = NULL;
  * FSQL_REASONING_HTTP_MODE/RESPONSE_MODE/SYSTEM_TAG are read once at
  * plugin init from the process environment (no per-call override in
  * the ABI), fractal_reason() (chat, text), fractal_text_to_sql()'s
- * GENERATE step (chat, code-mode extraction), and fractal_embed()
+ * GENERATE step (chat, code-mode extraction) and REVIEW step (chat,
+ * always text -- see ensure_review_ctx()), and fractal_embed()
  * (embedding mode) each need their own ctx with its own load, or
  * they'd stomp on each other's config the moment more than one is used
  * in the same backend. Each is lazy -- only created if that specific
  * SQL function is actually called in a given backend. */
-static fsql_ctx *g_reason_ctx    = NULL;   /* fractal_reason(), t2s review */
+static fsql_ctx *g_reason_ctx    = NULL;   /* fractal_reason() */
 static bool      g_reason_loaded = false;
 
 static fsql_ctx *g_t2s_ctx       = NULL;   /* fractal_text_to_sql() GENERATE */
@@ -320,6 +340,9 @@ static bool      g_t2s_loaded    = false;
 
 static fsql_ctx *g_embed_ctx     = NULL;   /* fractal_embed() */
 static bool      g_embed_loaded  = false;
+
+static fsql_ctx *g_review_ctx    = NULL;   /* fractal_text_to_sql() REVIEW */
+static bool      g_review_loaded = false;
 
 /* An operator can set FSQL_REASONING_HTTP_RESPONSE_MODE at the process
  * level (same mechanism as FSQL_REASONING_HTTP_TIMEOUT_MS) to control
@@ -713,9 +736,11 @@ _PG_fini(void)
     if (g_reason_ctx) { fsql_free(g_reason_ctx); g_reason_ctx = NULL; }
     if (g_t2s_ctx)    { fsql_free(g_t2s_ctx);    g_t2s_ctx    = NULL; }
     if (g_embed_ctx)  { fsql_free(g_embed_ctx);  g_embed_ctx  = NULL; }
+    if (g_review_ctx) { fsql_free(g_review_ctx); g_review_ctx = NULL; }
     g_reason_loaded = false;
     g_t2s_loaded    = false;
     g_embed_loaded  = false;
+    g_review_loaded = false;
 
     /* Drop the enterprise core library AFTER the ctxs are freed: fsql_free
      * may invoke the storage VFS seal (no-op here) and -- if the vendored
@@ -1551,6 +1576,37 @@ ensure_reason_ctx(void)
     ensure_reasoning_tier_ctx(&g_reason_ctx, &g_reason_loaded, "fractal_reason");
 }
 
+/* fractal_text_to_sql()'s REVIEW step: a plain PASS/FAIL-then-explain
+ * text judgment call, sharing fractal_reason()'s config (URL/token/
+ * model/THINK) but its own ctx, not g_reason_ctx: RESPONSE_MODE is
+ * hardcoded unset here, always, regardless of what an operator has set
+ * FSQL_REASONING_HTTP_RESPONSE_MODE to for fractal_reason() -- the
+ * review parser (t2s_run_review below) does a hardcoded pg_strncasecmp
+ * for a leading "PASS"/"FAIL", which a code- or json-mode-extracted
+ * response would essentially never start with. RESPONSE_MODE is
+ * fractal_reason()'s own opt-in lever, not review's. */
+static void
+ensure_review_ctx(void)
+{
+    if (g_review_loaded) return;
+    if (!g_reasoning_plugin || !*g_reasoning_plugin) return;
+
+    if (g_http_url   && *g_http_url)
+        setenv("FSQL_REASONING_HTTP_URL",   g_http_url,   1);
+    if (g_http_token && *g_http_token)
+        setenv("FSQL_REASONING_HTTP_TOKEN", g_http_token, 1);
+    if (g_http_model && *g_http_model)
+        setenv("FSQL_REASONING_HTTP_MODEL", g_http_model, 1);
+    if (g_http_allow_plain)
+        setenv("FSQL_REASONING_HTTP_ALLOW_PLAINTEXT", "1", 1);
+    unsetenv("FSQL_REASONING_HTTP_MODE");
+    unsetenv("FSQL_REASONING_HTTP_SYSTEM_TAG");
+    unsetenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
+    apply_think_env();
+
+    ensure_reasoning_tier_ctx(&g_review_ctx, &g_review_loaded, "fractal_text_to_sql review");
+}
+
 /* fractal_text_to_sql()'s GENERATE step: chat mode, RESPONSE_MODE=code
  * so the plugin's fenced-block extraction (including its "2+ blocks ->
  * fail, don't guess" rule) does the SQL cleanup. SYSTEM_TAG is derived,
@@ -2025,13 +2081,17 @@ spi_scan_corpus(const char *table, const char *col, int dim,
  * chat endpoint fails ("reasoning_vfs.generate failed"). Instead we fetch
  * the matched rows' actual content by ctid and pass that.
  *
- * rowids[r] is the ctid string captured during the corpus scan; idx[i] is a
- * 0-based position into that scan (a search result index). The context is
- * built in dst_ctx so it survives this helper's SPI_finish. */
+ * rowids[r] is the ctid string captured during the corpus scan (the array
+ * has n_rows entries); idx[i] is a 0-based position into that scan (a
+ * search result index). idx comes out of the core's result JSON via
+ * fsql_extract_topk, which validates only idx >= 0 -- the upper bound
+ * against n_rows is enforced HERE, not assumed: an out-of-range index
+ * is skipped rather than dereferenced past the rowids array. The context
+ * is built in dst_ctx so it survives this helper's SPI_finish. */
 static char *
 build_retrieval_context(const char *table, const char *vector_col,
                         char **rowids, const int *idx, int got,
-                        MemoryContext dst_ctx)
+                        size_t n_rows, MemoryContext dst_ctx)
 {
     if (got <= 0)
         return pstrdup("[]");
@@ -2048,7 +2108,7 @@ build_retrieval_context(const char *table, const char *vector_col,
     int listed = 0;
     for (int i = 0; i < got; i++) {
         int r = idx[i];
-        if (r < 0) continue;
+        if (r < 0 || (size_t) r >= n_rows) continue;   /* core-reported, untrusted */
         const char *rid = rowids ? rowids[r] : NULL;
         if (!rid || !rid[0]) continue;
         if (listed > 0) appendStringInfoChar(&inlist, ',');
@@ -2303,6 +2363,7 @@ fractal_search_agent(PG_FUNCTION_ARGS)
         fsql_ai_response_free(&emb_resp);
         ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION), errmsg("fractal_search_agent: embedding failed")));
     }
+    guard_ai_response_len(&emb_resp);
     char *raw_emb = pnstrdup(emb_resp.summary, emb_resp.summary_len);
     fsql_ai_response_free(&emb_resp);
     double *query_vec = palloc(MAX_EMBED_DIM * sizeof(double));
@@ -2342,7 +2403,8 @@ fractal_search_agent(PG_FUNCTION_ARGS)
      * the chat endpoint's context window. build_retrieval_context fetches the
      * matched rows' non-vector columns as a compact JSON array instead. */
     char *ctx_json = build_retrieval_context(table_name, vector_col,
-                                             rowids, idx, got, per_query_ctx);
+                                             rowids, idx, got, n_rows,
+                                             per_query_ctx);
 
     fsql_ai_response_t reason_resp;
     memset(&reason_resp, 0, sizeof(reason_resp));
@@ -2561,6 +2623,7 @@ fractal_agent_plan_explore(PG_FUNCTION_ARGS)
         fsql_ai_response_free(&emb_resp);
         ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION), errmsg("fractal_agent_plan_explore: embedding failed")));
     }
+    guard_ai_response_len(&emb_resp);
     char *raw_emb = pnstrdup(emb_resp.summary, emb_resp.summary_len);
     fsql_ai_response_free(&emb_resp);
     double *query_vec = palloc(MAX_EMBED_DIM * sizeof(double));
@@ -2622,6 +2685,11 @@ fractal_agent_plan_explore(PG_FUNCTION_ARGS)
      * crash. */
     if (got < 0) got = 0;
     for (int i = 0; i < got; i++) {
+        /* idx comes out of the core's result JSON, untrusted: skip any
+         * index outside the corpus scan rather than dereferencing past
+         * the palloc'd corpus (the comment below describes the CONTRACT;
+         * the bounds check is the ENFORCEMENT). */
+        if (idx[i] < 0 || (size_t) idx[i] >= n_rows) continue;
         Datum values[3];
         bool  nulls[3] = { false, false, false };
         values[0] = Int64GetDatum(idx[i]);
@@ -2800,6 +2868,14 @@ fractal_agent_trajectory_predict(PG_FUNCTION_ARGS)
     if (got <= 0)
         ereport(ERROR, (errcode(ERRCODE_NO_DATA_FOUND), errmsg("fractal_agent_trajectory_predict: no predicted state found")));
 
+    /* idx[0] is core-reported (fsql_extract_topk validates only >= 0):
+     * refuse an out-of-corpus index instead of dereferencing past the
+     * palloc'd corpus scan. */
+    if (idx[0] < 0 || (size_t) idx[0] >= n_rows)
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("fractal_agent_trajectory_predict: core reported an out-of-range corpus index (%d, corpus has %zu rows)",
+                               idx[0], n_rows)));
+
     double *best_point = corpus + (idx[0] * dim);
     double drift = dist[0];
     bool risk_exceeded = (drift > 0.5); /* Threshold should ideally be a GUC */
@@ -2905,6 +2981,7 @@ fractal_rag_agent(PG_FUNCTION_ARGS)
         fsql_ai_response_free(&emb_resp);
         ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION), errmsg("fractal_rag_agent: embedding failed")));
     }
+    guard_ai_response_len(&emb_resp);
     char *raw_emb = pnstrdup(emb_resp.summary, emb_resp.summary_len);
     fsql_ai_response_free(&emb_resp);
     double *query_vec = palloc(MAX_EMBED_DIM * sizeof(double));
@@ -2944,7 +3021,8 @@ fractal_rag_agent(PG_FUNCTION_ARGS)
     /* 3. Reason over the retrieved rows' CONTENT (non-vector columns), not the
      * raw Scout vectors -- see fractal_search_agent for why. */
     char *ctx_json = build_retrieval_context(table_name, vector_col,
-                                             rowids, idx, got, per_query_ctx);
+                                             rowids, idx, got, n_rows,
+                                             per_query_ctx);
 
     fsql_ai_response_t reason_resp;
     memset(&reason_resp, 0, sizeof(reason_resp));
@@ -2997,6 +3075,14 @@ fractal_embed(PG_FUNCTION_ARGS)
                  errmsg("fractal_embed: input must not be NULL")));
 
     const char *input_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+    /* Same 4 MiB dispatch budget used across the other integrations:
+     * reject oversized inputs before they reach the plugin (see the
+     * FSQL_MAX_INPUT_BYTES define above). */
+    if (strlen(input_str) > FSQL_MAX_INPUT_BYTES)
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("fractal_embed: input exceeds the 4 MiB limit")));
 
     fsql_ai_response_t resp;
     memset(&resp, 0, sizeof(resp));
@@ -3594,16 +3680,20 @@ t2s_run_review(const char *question, const char *candidate_sql, char **critique_
     bool                 passed;
 
     /* Review is "just a second fractal_reason()-shaped call with a
-     * critique prompt" (see this function's own header comment above),
-     * so it shares fractal_reason()'s own ctx -- a plain PASS/FAIL-then-
-     * explain text judgment, not SQL generation. It must NOT use
-     * g_t2s_ctx (RESPONSE_MODE=code): the code-mode extractor would try
-     * to pull a fenced block out of this response and, on the rare
-     * occasion the model quotes the candidate SQL back inside its
-     * explanation, could return just that quoted fragment instead of
-     * the leading "PASS"/"FAIL" the pg_strncasecmp check below expects. */
-    ensure_reason_ctx();
-    if (!g_reason_loaded)
+     * critique prompt" (see this function's own header comment above) --
+     * a plain PASS/FAIL-then-explain text judgment, not SQL generation.
+     * It uses its own ctx (see ensure_review_ctx()), not g_reason_ctx or
+     * g_t2s_ctx: it must never run with RESPONSE_MODE=code (the
+     * code-mode extractor would try to pull a fenced block out of this
+     * response and, on the rare occasion the model quotes the candidate
+     * SQL back inside its explanation, could return just that quoted
+     * fragment instead of the leading "PASS"/"FAIL" the
+     * pg_strncasecmp check below expects) or =json (an operator setting
+     * fractal_reason()'s RESPONSE_MODE to json for their own use would
+     * otherwise silently break review's parsing too, since a review ctx
+     * sharing g_reason_ctx would inherit that setting). */
+    ensure_review_ctx();
+    if (!g_review_loaded)
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("fractal_text_to_sql: no reasoning plugin loaded for review")));
@@ -3616,15 +3706,24 @@ t2s_run_review(const char *question, const char *candidate_sql, char **critique_
         "Answer PASS or FAIL on the first line, then explain briefly.",
         question, candidate_sql);
 
+    /* ensure_review_ctx() already unsets RESPONSE_MODE at ctx-load time,
+     * but that alone isn't sufficient -- confirmed by a real gate-28
+     * failure where the REVIEW dispatch still saw RESPONSE_MODE=code
+     * (GENERATE's own hardcoded mode) despite that. Same lesson the
+     * GENERATE step's own dispatch call already documents: assert again
+     * right around the call, don't trust load-time state to still hold
+     * by dispatch time. */
+    unsetenv("FSQL_REASONING_HTTP_RESPONSE_MODE");
+
     memset(&resp, 0, sizeof(resp));
-    int rc = fsql_dispatch_ai(g_reason_ctx,
+    int rc = fsql_dispatch_ai(g_review_ctx,
                               prompt.data, strlen(prompt.data),
                               "{}", 2,
                               &resp);
     if (rc != 0 || resp.rc != 0)
     {
         int          err_rc = rc != 0 ? rc : resp.rc;
-        const char  *err = fsql_last_error(g_reason_ctx);
+        const char  *err = fsql_last_error(g_review_ctx);
         fsql_ai_response_free(&resp);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
@@ -4334,6 +4433,14 @@ fractal_optimize_portfolio_multimodal(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("fractalsql: fractal_optimize_portfolio_multimodal rc=%d", rc)));
 
+    /* n_found is core-reported and weights/sharpes are sized from
+     * n_restarts: clamp it to what was actually allocated before any
+     * consumer indexes the arrays with it (a buggy or tampered core
+     * reporting more candidates than it was asked to search must not
+     * turn into a heap overread here or in the audit-log helper below). */
+    if (n_found > n_restarts) n_found = n_restarts;
+    if (n_found < 0)          n_found = 0;
+
     StringInfoData out;
     initStringInfo(&out);
     appendStringInfoString(&out, "{\"candidates\":[");
@@ -4476,6 +4583,12 @@ fractal_optimize_portfolio_multimodal_pareto(PG_FUNCTION_ARGS)
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("fractalsql: fractal_optimize_portfolio_multimodal_pareto rc=%d", rc)));
+
+    /* Same untrusted-count clamp as the sharpe-mode sibling above:
+     * weights/returns/risks are sized from max_front, not from whatever
+     * the core reports back in n_found. */
+    if (n_found > max_front) n_found = max_front;
+    if (n_found < 0)         n_found = 0;
 
     StringInfoData out;
     initStringInfo(&out);
@@ -4892,6 +5005,11 @@ telemetry_topk_srf(FunctionCallInfo fcinfo,
                         errmsg("fractalsql: malformed top_k in search result")));
 
     for (int i = 0; i < n; i++) {
+        /* idx comes out of the core's result JSON, untrusted
+         * (fsql_extract_topk validates only >= 0): skip an index outside
+         * the corpus scan rather than reading doc_id_map past its n_rows
+         * entries or reporting a corpus position that was never searched. */
+        if (idx[i] < 0 || (size_t) idx[i] >= n_rows) continue;
         Datum values[2];
         bool  nulls[2] = { false, false };
         int64 doc_id = doc_id_map ? doc_id_map[idx[i]] : (int64) idx[i];
@@ -5416,7 +5534,11 @@ ledger_verify_latest(void)
             uint8_t tag[32];
             fsql_hmac_sha256((const uint8_t *) key, strlen(key),
                              blob_data, blob_len, tag);
-            if (memcmp(tag, mac_bytes, 32) != 0)
+            /* Constant-time compare: the stored mac column is
+             * attacker-positionable (anyone who can write rows), unlike
+             * the structural chain/hash compares below which compare
+             * attacker-derived but non-secret values. */
+            if (fsql_ct_memcmp(tag, mac_bytes, 32) != 0)
             {
                 SPI_finish();
                 ereport(ERROR,
@@ -5817,11 +5939,15 @@ fractal_audit_unpack(PG_FUNCTION_ARGS)
 
     size_t cap = 8192;
     char  *buf;
+    size_t need;
     int    rc;
     for (;;)
     {
-        buf = palloc(cap);
-        size_t need = cap;
+        /* +1 beyond the capacity handed to the engine so the explicit
+         * NUL below is always in bounds even when the engine reports
+         * need == cap. */
+        buf = palloc(cap + 1);
+        need = cap;
         rc = g_ent_audit_unpack(blob_data, blob_len, buf, &need);
         if (rc == FSQL_OK)
             break;
@@ -5836,6 +5962,17 @@ fractal_audit_unpack(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("fractalsql: fsql_audit_unpack rc=%d", rc)));
     }
+
+    /* The ABI does not promise NUL-termination within the caller's
+     * buffer, and jsonb_in below requires a NUL-terminated C string --
+     * terminate explicitly at the engine-reported length. A core that
+     * reports a need larger than the capacity it was given (and returned
+     * OK anyway) is refusing the result, not trusting the tail bytes. */
+    if (need > cap)
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("fractalsql: fsql_audit_unpack reported an out-of-range length -- refusing the result")));
+    buf[need] = '\0';
 
     /* Parse the JSON array the engine produced into jsonb for
      * queryability (the CISO audit view is a JSON array of
