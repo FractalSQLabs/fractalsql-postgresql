@@ -278,8 +278,8 @@ BEGIN
     -- surface BEFORE the post-call NULL guard below -- so check first and raise
     -- this engine's clearer, engine-named message instead. NOTE: EXECUTE ...
     -- INTO of a SELECT does NOT set FOUND (only PERFORM / static SELECT INTO
-    -- do), so guard on the target variable itself: 0 rows -> has_row stays
-    -- NULL; >=1 row -> has_row = 1.
+    -- do), so guard on the target variable itself: with 0 rows the
+    -- variable stays NULL, and with one or more rows it is set.
     EXECUTE format('SELECT 1 FROM %I LIMIT 1', cap_table) INTO has_row;
     IF has_row IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_route_task: no capability rows in %',

@@ -50,7 +50,19 @@ static const uint32_t fsql_sha256_k[64] = {
 static void
 fsql_sha256_transform(fsql_sha256_ctx *ctx, const uint8_t data[])
 {
-    uint32_t a, b, c, d, e, f, g, h, t1, t2, m[64], i, j;
+    uint32_t a;
+    uint32_t b;
+    uint32_t c;
+    uint32_t d;
+    uint32_t e;
+    uint32_t f;
+    uint32_t g;
+    uint32_t h;
+    uint32_t t1;
+    uint32_t t2;
+    uint32_t m[64];
+    uint32_t i;
+    uint32_t j;
 
     for (i = 0, j = 0; i < 16; ++i, j += 4)
         m[i] = ((uint32_t)data[j] << 24) | ((uint32_t)data[j + 1] << 16) |
@@ -87,8 +99,7 @@ fsql_sha256_init(fsql_sha256_ctx *ctx)
 static void
 fsql_sha256_update(fsql_sha256_ctx *ctx, const uint8_t *data, size_t len)
 {
-    uint32_t i;
-    for (i = 0; i < len; ++i)
+    for (uint32_t i = 0; i < len; ++i)
     {
         ctx->data[ctx->datalen++] = data[i];
         if (ctx->datalen == 64)
@@ -165,8 +176,10 @@ fsql_hmac_sha256(const uint8_t *key, size_t keylen,
                  const uint8_t *msg, size_t msglen,
                  uint8_t out[32])
 {
-    uint8_t         k_ipad[64], k_opad[64], tk[32], inner[32];
-    size_t          i;
+    uint8_t k_ipad[64];
+    uint8_t k_opad[64];
+    uint8_t tk[32];
+    uint8_t inner[32];
     fsql_sha256_ctx ctx;
 
     if (keylen > 64)
@@ -182,7 +195,7 @@ fsql_hmac_sha256(const uint8_t *key, size_t keylen,
     memset(k_opad, 0, 64);
     memcpy(k_ipad, key, keylen);
     memcpy(k_opad, key, keylen);
-    for (i = 0; i < 64; ++i)
+    for (size_t i = 0; i < 64; ++i)
     {
         k_ipad[i] ^= 0x36;
         k_opad[i] ^= 0x5c;

@@ -33,7 +33,7 @@ INSERT INTO spike_negative_control (model, sql_text) VALUES (
 );
 
 \echo '=== What the wrong candidate actually produces (for reference) ==='
-SELECT service, severity, COUNT(*) FROM demo_alerts GROUP BY service, severity ORDER BY service, severity;
+SELECT service, severity, COUNT(*) FROM demo_alerts GROUP BY service, severity ORDER BY service ASC, severity ASC;
 \echo 'Note payments and auth-service present -- that is the bug review should catch.'
 
 \echo === REVIEW (wrong candidate): :model ===

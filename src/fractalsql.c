@@ -1168,7 +1168,8 @@ ledger_ensure_table(void)
     if (rc != SPI_OK_SELECT || SPI_processed == 0)
         return false;
 
-    bool  isnull1, isnull2;
+    bool  isnull1;
+    bool  isnull2;
     Datum d_exists = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull1);
     Datum d_has_id = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull2);
     bool  tbl_exists     = !isnull1 && DatumGetBool(d_exists);
@@ -2932,7 +2933,9 @@ fractal_agent_detect_loop(PG_FUNCTION_ARGS)
 
     double alpha;
     fsql_dimension_dfa(series, (size_t) n2, &alpha);
-    double drift, r_a, b_a;
+    double drift;
+    double r_a;
+    double b_a;
     fsql_dimension_drift(series, (size_t) n2, 16, &drift, &r_a, &b_a);
 
     TupleDesc tupdesc;
@@ -3867,7 +3870,7 @@ fractal_text_to_sql(PG_FUNCTION_ARGS)
             continue;
         }
 
-        /* ---- REVIEW (optional, default off) ---- */
+        /* REVIEW step: optional, off by default. */
         if (g_t2s_use_review)
         {
             char *critique = NULL;
@@ -3916,10 +3919,11 @@ fractal_text_to_sql(PG_FUNCTION_ARGS)
 }
 
 /* ------------------------------------------------------------------ */
-/* v2.x additions -- Diversify/Repulsion controls, feedback,          */
-/* fractal-dimension analysis, portfolio optimization, domain-        */
-/* specific geometry. All operate on g_ctx (same sovereign ctx used   */
-/* by fractal_search/fractal_search_explore) unless noted.            */
+/* v2.x additions: Diversify and Repulsion controls, feedback,        */
+/* fractal-dimension analysis, portfolio optimization, and            */
+/* domain-specific geometry. These operate on g_ctx, the same         */
+/* sovereign context used by fractal_search and fractal_search_explore */
+/* unless noted otherwise.                                            */
 /* ------------------------------------------------------------------ */
 
 static size_t *
@@ -4173,7 +4177,9 @@ fractal_dimension_drift(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_DATA_EXCEPTION),
                  errmsg("fractalsql: window must be > 0")));
 
-    double drift, recent_alpha, baseline_alpha;
+    double drift;
+    double recent_alpha;
+    double baseline_alpha;
     int rc = fsql_dimension_drift(series, (size_t) n, (size_t) window,
                                   &drift, &recent_alpha, &baseline_alpha);
     if (rc != FSQL_OK)
@@ -4635,7 +4641,9 @@ fractal_vascular_network(PG_FUNCTION_ARGS)
                         errmsg("fractalsql: edge_arc_length length (%d) must equal "
                                "edges length / 2 (%d)", al_n, e_n / 2)));
 
-    double mean_tortuosity, branch_density, fractal_dimension;
+    double mean_tortuosity;
+    double branch_density;
+    double fractal_dimension;
     int rc = fsql_vascular_network(node_coords, (size_t) (nc_n / 3),
                                    edges, arc_length, (size_t) (e_n / 2),
                                    &mean_tortuosity, &branch_density, &fractal_dimension);
@@ -4666,7 +4674,9 @@ fractal_cortical_folding(PG_FUNCTION_ARGS)
         ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
                         errmsg("fractalsql: faces length must be a multiple of 3")));
 
-    double mesh_area, hull_area, gi;
+    double mesh_area;
+    double hull_area;
+    double gi;
     int rc = fsql_cortical_folding(vertices, (size_t) (v_n / 3),
                                    faces, (size_t) (f_n / 3),
                                    &mesh_area, &hull_area, &gi);
@@ -4700,7 +4710,9 @@ fractal_nerve_plexus_metric(PG_FUNCTION_ARGS)
         ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
                         errmsg("fractalsql: edges length must be a multiple of 2")));
 
-    double fiber_length_density, branch_density, fractal_dimension;
+    double fiber_length_density;
+    double branch_density;
+    double fractal_dimension;
     int rc = fsql_nerve_plexus_metric(node_coords, (size_t) (nc_n / dim), (size_t) dim,
                                       edges, (size_t) (e_n / 2),
                                       &fiber_length_density, &branch_density,
@@ -4729,7 +4741,8 @@ fractal_morphological_complexity(PG_FUNCTION_ARGS)
                         errmsg("fractalsql: points length (%d) must be a positive "
                                "multiple of dim (%d)", p_n, dim)));
 
-    double dimension, lacunarity;
+    double dimension;
+    double lacunarity;
     int rc = fsql_morphological_complexity(points, (size_t) (p_n / dim), (size_t) dim,
                                            &dimension, &lacunarity);
     if (rc != FSQL_OK)
@@ -5207,7 +5220,8 @@ fractal_search_trajectory(PG_FUNCTION_ARGS)
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("fractalsql: k must be > 0")));
 
-    int     base_dim, cur_dim;
+    int     base_dim;
+    int     cur_dim;
     double *baseline = float8_array_to_doubles(base_arr, &base_dim);
     double *current  = float8_array_to_doubles(cur_arr, &cur_dim);
     if (base_dim != cur_dim)
@@ -5253,7 +5267,8 @@ fractal_cross_modal_search(PG_FUNCTION_ARGS)
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("fractalsql: alpha_weight must be in [0,1]")));
 
-    int     mo_dim, cl_dim;
+    int     mo_dim;
+    int     cl_dim;
     double *morph    = float8_array_to_doubles(mo_arr, &mo_dim);
     double *clinical = float8_array_to_doubles(cl_arr, &cl_dim);
 
@@ -5461,7 +5476,10 @@ ledger_verify_latest(void)
         return;                         /* no persisted blob yet -- empty start */
     }
 
-    bool  blob_isnull, mac_isnull, prev_isnull, hash_isnull;
+    bool  blob_isnull;
+    bool  mac_isnull;
+    bool  prev_isnull;
+    bool  hash_isnull;
     Datum blob_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &blob_isnull);
     Datum mac_d  = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &mac_isnull);
     Datum prev_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 3, &prev_isnull);
