@@ -280,6 +280,7 @@ BIN=""; SO=""; MOCK=""; EVIL=""; CRASH=""; LYING=""; RETRY=""; EMBED=""; THINK="
 FAILED=0
 
 pg_bindir() {
+  local pg_ver="$1"
   if [[ -n "${PG_BINDIR:-}" ]]; then
     echo "$PG_BINDIR"
   elif [[ "$(uname -s)" = "Darwin" ]]; then
@@ -297,19 +298,19 @@ pg_bindir() {
     # Linux branch below -- this only widens what gets tried first.
     local brew_bin
     if command -v brew >/dev/null 2>&1; then
-      brew_bin="$(brew --prefix "postgresql@$1" 2>/dev/null)/bin"
+      brew_bin="$(brew --prefix "postgresql@$pg_ver" 2>/dev/null)/bin"
     else
-      brew_bin="/opt/homebrew/opt/postgresql@$1/bin"
+      brew_bin="/opt/homebrew/opt/postgresql@$pg_ver/bin"
     fi
     if [[ -x "$brew_bin/pg_config" ]]; then
       echo "$brew_bin"
-    elif [[ -x "/Library/PostgreSQL/$1/bin/pg_config" ]]; then
-      echo "/Library/PostgreSQL/$1/bin"
+    elif [[ -x "/Library/PostgreSQL/$pg_ver/bin/pg_config" ]]; then
+      echo "/Library/PostgreSQL/$pg_ver/bin"
     else
       echo "$brew_bin"
     fi
   else
-    echo "/usr/lib/postgresql/$1/bin"
+    echo "/usr/lib/postgresql/$pg_ver/bin"
   fi
   return 0
 }
@@ -356,6 +357,7 @@ cleanup() {
   [[ -n "$DATADIR" ]] && rm -rf "$DATADIR"
   [[ -n "$SOCKDIR" ]] && rm -rf "$SOCKDIR"
   rm -f /tmp/fractalsql_bt_sql.txt /tmp/fractalsql_bt_evil_trigger_call.txt
+  return 0
 }
 trap cleanup EXIT
 
@@ -2720,6 +2722,7 @@ gate_24_enterprise() {
       SELECT convert_from(blob, 'UTF8')::jsonb->>'type'
         FROM fractalsql_ledger WHERE kind = 2
         ORDER BY id DESC LIMIT 1;" 2>/dev/null
+    return 0
   }
 
   "${PSQL[@]}" -c "
@@ -3311,6 +3314,7 @@ gate_28_review_isolation() {
     "$BIN/pg_ctl" -D "$DATADIR" -w -l "$DATADIR/log" \
        -o "-p $PORT -k $SOCKDIR -c listen_addresses='' -c shared_preload_libraries=$SO" \
        start >/tmp/fractalsql_bt_gate28_restart.log 2>&1
+    return
   }
 
   export FSQL_REASONING_HTTP_RESPONSE_MODE=json

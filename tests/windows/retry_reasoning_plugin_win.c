@@ -28,6 +28,10 @@
  *      /Fe<out>\retry.dll ^
  *      /link /DEF:tests\windows\fractalsql-test-plugin.def
  */
+/* MSVC's CRT-deprecation warnings (fopen/getenv/strcpy below) are
+ * expected in these fixtures -- silenced at the source. */
+#define _CRT_SECURE_NO_WARNINGS
+
 #include "fractalsql_sql.h"
 
 #include <stdio.h>

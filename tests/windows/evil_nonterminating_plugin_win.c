@@ -23,9 +23,13 @@
  *      /Fe<out>\evil_nonterminating.dll ^
  *      /link /DEF:tests\windows\fractalsql-test-plugin.def
  */
+/* MSVC's CRT-deprecation warnings (fopen/fscanf below) are expected in
+ * these fixtures -- silenced at the source, not chased file-by-file. */
+#define _CRT_SECURE_NO_WARNINGS
+
 #include "fractalsql_sql.h"
 
-#include <windows.h>
+#include <Windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

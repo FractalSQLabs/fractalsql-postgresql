@@ -3212,10 +3212,10 @@ function Gate28ReviewIsolation {
     # hard way: a real run sat with zero output for 10+ minutes here and
     # there was no way to tell whether it was the restart, the positive-
     # control query, or the REVIEW-path query without adding these.
-    Write-Host "[build_test] gate 28: swapping to mock plugin..."
+    Write-Information "[build_test] gate 28: swapping to mock plugin..." -InformationAction Continue
     if (-not (PgSwapPlugin $Mock)) { Fail "28 review_isolation: plugin swap did not take effect"; return }
 
-    Write-Host "[build_test] gate 28: restarting cluster with RESPONSE_MODE=json..."
+    Write-Information "[build_test] gate 28: restarting cluster with RESPONSE_MODE=json..." -InformationAction Continue
     $env:FSQL_REASONING_HTTP_RESPONSE_MODE = 'json'
     if (-not (RestartPgForGate28)) {
         Warn "28 review_isolation: could not restart cluster with FSQL_REASONING_HTTP_RESPONSE_MODE=json set (env restart flake, not a code regression -- skipping this gate's assertions)"
@@ -3228,10 +3228,10 @@ function Gate28ReviewIsolation {
     # captured value -- proves the env var actually reached the
     # postmaster (and that g_response_mode_boot's capture/re-apply
     # mechanism works) before trusting REVIEW's negative result below.
-    Write-Host "[build_test] gate 28: positive control -- fractal_reason('q')..."
+    Write-Information "[build_test] gate 28: positive control -- fractal_reason('q')..." -InformationAction Continue
     Remove-Item -Force $ReviewEnvDumpFile -ErrorAction SilentlyContinue
     Psql -Sql "SELECT fractal_reason('q');" | Out-Null
-    Write-Host "[build_test] gate 28: positive control query returned"
+    Write-Information "[build_test] gate 28: positive control query returned" -InformationAction Continue
     $ra = Get-Content -Path $ReviewEnvDumpFile -Raw -ErrorAction SilentlyContinue
     if ($ra -and $ra -match 'RESPONSE_MODE=json') {
         Pass "28 review_isolation: positive control -- fractal_reason() sees the boot-captured RESPONSE_MODE=json"
@@ -3244,15 +3244,15 @@ function Gate28ReviewIsolation {
     # so the dump file's content once the whole call returns/errors
     # reflects REVIEW's own env (see mock_reasoning_plugin_win.c's
     # header).
-    Write-Host "[build_test] gate 28: enabling text_to_sql_use_review..."
+    Write-Information "[build_test] gate 28: enabling text_to_sql_use_review..." -InformationAction Continue
     if (-not (PgSetGuc -Name 'fractalsql.text_to_sql_use_review' -SetVal 'on' -Want 'on')) {
         Fail "28 review_isolation: could not enable text_to_sql_use_review"
     } else {
         Set-Content -Path $SqlFile -Value 'SELECT 1' -NoNewline
         Remove-Item -Force $ReviewEnvDumpFile -ErrorAction SilentlyContinue
-        Write-Host "[build_test] gate 28: REVIEW-path query -- fractal_text_to_sql('q', ...)..."
+        Write-Information "[build_test] gate 28: REVIEW-path query -- fractal_text_to_sql('q', ...)..." -InformationAction Continue
         Psql -Sql "SELECT fractal_text_to_sql('q', ARRAY['bt_customers','bt_orders']);" | Out-Null
-        Write-Host "[build_test] gate 28: REVIEW-path query returned"
+        Write-Information "[build_test] gate 28: REVIEW-path query returned" -InformationAction Continue
         $rb = Get-Content -Path $ReviewEnvDumpFile -Raw -ErrorAction SilentlyContinue
         if ($rb -and $rb -match 'RESPONSE_MODE=\(unset\)') {
             Pass "28 review_isolation: REVIEW step never sees the boot-captured RESPONSE_MODE, even though fractal_reason() does"
@@ -3264,7 +3264,7 @@ function Gate28ReviewIsolation {
 
     # Restore: stop, drop the env var, restart -- so later gates on this
     # same reused cluster see a clean postmaster environment again.
-    Write-Host "[build_test] gate 28: restoring baseline (dropping RESPONSE_MODE, restarting)..."
+    Write-Information "[build_test] gate 28: restoring baseline (dropping RESPONSE_MODE, restarting)..." -InformationAction Continue
     Remove-Item Env:\FSQL_REASONING_HTTP_RESPONSE_MODE -ErrorAction SilentlyContinue
     if (-not (RestartPgForGate28)) { Warn "28 review_isolation: could not restart cluster to restore the clean baseline environment (env restart flake -- gate 28 is last, nothing downstream depends on it)" }
     PgSwapPlugin $Mock | Out-Null

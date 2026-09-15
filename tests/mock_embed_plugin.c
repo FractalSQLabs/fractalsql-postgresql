@@ -23,7 +23,7 @@
  * Cross-platform, no OS-specific code (no file I/O, no POSIX-only
  * calls) -- built directly on both build_test.sh (Linux) and
  * build_test.ps1 (Windows), same as tests/evil_lying_length_plugin.c,
- * no separate tests/windows/*_win.c copy needed.
+ * no separate tests/windows/<plugin>_win.c copy needed.
  *
  * Build: cc -shared -fPIC -std=c99 -Iinclude \
  *          tests/mock_embed_plugin.c -o <tmp>/mock_embed_plugin.so

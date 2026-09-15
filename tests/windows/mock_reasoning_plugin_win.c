@@ -20,12 +20,16 @@
  *      /Fe<out>\mock.dll ^
  *      /link /DEF:tests\windows\fractalsql-test-plugin.def
  */
+/* MSVC's CRT-deprecation warnings (fopen/strcpy below) are expected in
+ * these fixtures -- silenced at the source, not chased file-by-file. */
+#define _CRT_SECURE_NO_WARNINGS
+
 #include "fractalsql_sql.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include <Windows.h>
 
 /* Bare relative filename, not an absolute C:\Windows\Temp\... path --
  * that absolute path was the previous attempt, and it silently never

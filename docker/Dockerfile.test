@@ -42,7 +42,7 @@ RUN apt-get update \
         binutils \
         build-essential \
         file \
-        postgresql-server-dev-${PG_MAJOR} \
+        "postgresql-server-dev-${PG_MAJOR}" \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -55,5 +55,5 @@ ENV PG_MAJOR=${PG_MAJOR}
 ENV FSQL_TEST_TIMEOUT_MULT=${FSQL_TEST_TIMEOUT_MULT}
 
 RUN chmod +x build_test.sh \
- && ./build_test.sh --pg ${PG_MAJOR} \
+ && ./build_test.sh --pg "${PG_MAJOR}" \
       $(case "${FSQL_SAN_MODE}" in asan) echo --asan ;; ubsan) echo --ubsan ;; esac)

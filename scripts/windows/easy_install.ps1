@@ -399,14 +399,20 @@ function Invoke-ColdStartTimeoutOffer {
     $doRestart = Confirm-Step "Restart the PostgreSQL service now to apply it?"
 
     $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+    # -ErrorAction Stop on both statements: a failed registry write (or
+    # restart) is a NON-terminating error by default, so the elevated
+    # child would otherwise exit 0 and both branches below would report
+    # success for a step that never happened. With Stop, the failure
+    # becomes the child's non-zero exit / a caught exception and the
+    # existing "set those two values by hand" fallback fires instead.
     $elevatedScript = {
         param([string]$RegPath, [string]$ServiceName, [string[]]$EnvValues, [bool]$DoRestart)
-        Set-ItemProperty -Path $RegPath -Name Environment -Value $EnvValues -Type MultiString
-        if ($DoRestart) { Restart-Service -Name $ServiceName -Force }
+        Set-ItemProperty -Path $RegPath -Name Environment -Value $EnvValues -Type MultiString -ErrorAction Stop
+        if ($DoRestart) { Restart-Service -Name $ServiceName -Force -ErrorAction Stop }
     }
     $quotedValues = ($envValues | ForEach-Object { "'$_'" }) -join ','
-    $elevatedText = "Set-ItemProperty -Path '$regPath' -Name Environment -Value @($quotedValues) -Type MultiString"
-    if ($doRestart) { $elevatedText += "; Restart-Service -Name '$serviceName' -Force" }
+    $elevatedText = "Set-ItemProperty -Path '$regPath' -Name Environment -Value @($quotedValues) -Type MultiString -ErrorAction Stop"
+    if ($doRestart) { $elevatedText += "; Restart-Service -Name '$serviceName' -Force -ErrorAction Stop" }
     $encodedElevated = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevatedText))
 
     # Writing a service's Environment value lives under HKLM\SYSTEM, which
