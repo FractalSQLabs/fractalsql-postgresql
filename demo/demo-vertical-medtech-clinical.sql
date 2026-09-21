@@ -78,17 +78,14 @@ UPDATE vmc_patients SET age = 70, condition = 'sepsis'
 -- age>65 AND condition='sepsis' sepsis-watch cohort). Generalized by the
 -- shipped fractal_agent_patient_deterioration_triage preset in Section 3,
 -- which folds this cohort search together with the baseline->current
--- drift search and a reasoning step. (The preset builds cohort_doc_ids
--- in ctid order -- the scan order the underlying search actually uses --
--- rather than this raw form's id order, which only matches scan order
--- for a never-UPDATEd table; vmc_patients' Section 1 cohort-force UPDATE
--- relocates tuples, so ctid order is the correct one.)
--- WITH cohort_rows AS (
---     SELECT (row_number() OVER (ORDER BY id) - 1) AS idx
+-- drift search and a reasoning step. (v2.0.25: doc_ids/doc_id are now
+-- real ctid row locators, not a 0-indexed scan position -- so cohort
+-- membership and the search's own result identity are BOTH exact,
+-- regardless of any UPDATE relocating a tuple in between; vmc_patients'
+-- Section 1 cohort-force UPDATE is exactly the scenario this fixes.)
+-- WITH cohort AS (
+--     SELECT array_agg(ctid::text) AS ids
 --       FROM vmc_patients WHERE age > 65 AND condition = 'sepsis'
--- ),
--- cohort AS (
---     SELECT array_agg(idx) AS ids FROM cohort_rows
 -- )
 -- SELECT doc_id, distance
 -- FROM cohort, fractal_hybrid_clinical_search(
@@ -126,8 +123,8 @@ UPDATE vmc_patients SET age = 70, condition = 'sepsis'
 -- then reasons. nearest_cohort_id/cohort_distance/drift_distance are
 -- real; rationale is the real fractal_reason output. cohort_doc_ids is
 -- caller-built from age>65 AND condition='sepsis' (the two-predicate
--- cohort fractal_agent_recall_hybrid's single filter can't express) in
--- ctid scan order.
+-- cohort fractal_agent_recall_hybrid's single filter can't express),
+-- as real ctid row locators.
 \echo '--- Preset: fractal_agent_patient_deterioration_triage (raw hybrid+trajectory form preserved above) ---'
 SELECT nearest_cohort_id, cohort_distance, drift_distance, rationale, cohort_matches
 FROM fractal_agent_patient_deterioration_triage(
@@ -135,10 +132,8 @@ FROM fractal_agent_patient_deterioration_triage(
     ARRAY[1, -1, 1, 1, 0.5]::float8[],
     ARRAY[0.1, 0.05, 0.0, 0.0, 0.0]::float8[],
     ARRAY[1.4, -1.1, 0.9, 0.7, 1.2]::float8[],
-    (SELECT array_agg(doc_id ORDER BY doc_id) FROM
-       (SELECT row_number() OVER (ORDER BY ctid) - 1 AS doc_id
-          FROM vmc_patients
-         WHERE age > 65 AND condition = 'sepsis') x),
+    (SELECT array_agg(ctid::text) FROM vmc_patients
+      WHERE age > 65 AND condition = 'sepsis'),
     5, 'id');
 
 -- ------------------------------------------------------------------

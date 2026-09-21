@@ -6,7 +6,9 @@
 -- 4-factor covariance model, optimize down to an 8-asset book) plus a
 -- price series with a deliberate volatility regime change for DFA-based
 -- regime detection -- a real, established DFA application (detecting
--- when a market series stops behaving like its own recent history).
+-- when a market series stops behaving like its own recent history) --
+-- and change-point detection to localize exactly where that shift
+-- happens, rather than only characterizing the series' overall scaling.
 --
 -- Prerequisites: extension installed (sections 0-3 need nothing else).
 -- Section 4 calls fractal_reason() -- see ../docs/reasoning-setup.md.
@@ -131,6 +133,20 @@ SELECT dfa_exponent, drift_detected, recent_alpha, baseline_alpha, rationale
 FROM fractal_agent_regime_triage(
     (SELECT series FROM vqf_price_series),
     64, 0.5);
+
+-- fractal_change_point_detect: DFA/drift above characterize the series'
+-- OVERALL scaling behavior and flag THAT something shifted; this
+-- localizes WHERE. Original work -- a sliding two-sample mean/variance
+-- test over adjacent windows, not a port of a specific published
+-- algorithm (not CUSUM/Page-Hinkley), so no citation. win=32 keeps
+-- both windows comfortably inside either regime on either side of the
+-- t=150 boundary baked into Section 3's series.
+\echo ''
+\echo '=== 3b. fractal_change_point_detect: localizing the volatility-regime boundary ==='
+SELECT fractal_change_point_detect(
+    (SELECT series FROM vqf_price_series),
+    32, 2.0, 16
+) AS boundary_indices;
 
 -- ------------------------------------------------------------------
 -- 4. fractal_search_trajectory: which of 10 historical quarterly

@@ -1,8 +1,9 @@
 -- demo/demo-fractal-vector.sql
 -- Runnable walkthrough of the fractal_vector(n) native type: typmod
 -- dimension enforcement, the vectorizer writing into a typed column,
--- fractal_search_trajectory's fractal_vector overload, and a storage
--- comparison against an equivalent float8[] table.
+-- fractal_search_trajectory's fractal_vector overload, the L_p /
+-- quantization helpers, and a storage comparison against an equivalent
+-- float8[] table.
 -- See ../docs/vectorizer-setup.md's "Storage: float8[] vs
 -- fractal_vector(n)" section for the full writeup this demo walks
 -- through interactively.
@@ -141,6 +142,42 @@ SELECT
 \echo 'be roughly half the float8[] size (raw float8, ~dim*8 bytes + array'
 \echo 'overhead), or less if TOAST compression kicks in on the float8[] side'
 \echo '-- see docs/vectorizer-setup.md for why the realized ratio varies.'
+
+\echo ''
+\echo '=== Section 7: L_p distance and quantization ==='
+\echo 'Known 3-dim inputs, so the outputs are readable at a glance.'
+
+-- Generalized L_p distance. p=2 here matches the <-> operator
+-- mathematically (0.1414 for these two vectors); p=0.5 is shown for
+-- contrast but is NOT a proper metric -- use it explicitly, never as a
+-- silent <-> substitute (see docs/vectorizer-setup.md). Note: the
+-- bracket-style string literal casts DIRECTLY to fractal_vector (its
+-- own input function); it is NOT valid as an intermediate ::float8[]
+-- cast -- PostgreSQL array literals for float8[] use {1,0,0} braces.
+SELECT
+    fractal_vector_lp_distance(
+        '[1,0,0]'::fractal_vector,
+        '[0.9,0.1,0]'::fractal_vector, 2.0::float8) AS lp2_distance,
+    fractal_vector_lp_distance(
+        '[1,0,0]'::fractal_vector,
+        '[0.9,0.1,0]'::fractal_vector, 0.5::float8) AS lp_half_distance;
+
+-- Symmetric int8 quantization: 4x compression. codes is one raw signed
+-- byte per dimension (decode client-side), scale dequantizes via
+-- v[i] ~= codes[i] * scale.
+SELECT codes, scale
+FROM fractal_vector_quantize_int8('[1,-2,3]'::fractal_vector);
+
+-- Binary (1-bit) quantization: 32x compression, bit i = (v[i] >= 0),
+-- paired with fractal_vector_hamming_distance for cheap candidate
+-- filtering ahead of a full-precision <-> / <=> re-rank. These two
+-- vectors differ in exactly one sign bit, so the Hamming distance is 1.
+SELECT fractal_vector_quantize_binary('[1,-2,3]'::fractal_vector) AS binary_a,
+       fractal_vector_quantize_binary('[1,2,3]'::fractal_vector)  AS binary_b;
+SELECT fractal_vector_hamming_distance(
+    fractal_vector_quantize_binary('[1,-2,3]'::fractal_vector),
+    fractal_vector_quantize_binary('[1,2,3]'::fractal_vector)
+) AS hamming_distance;
 
 \echo ''
 \echo '================================================================'

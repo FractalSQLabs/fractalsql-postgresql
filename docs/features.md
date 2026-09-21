@@ -90,7 +90,7 @@ The six building blocks the agents above compose. Call them directly to build yo
 | `fractal_sql_agent` | Self-correcting NL-to-SQL, retrying on `EXPLAIN`/execution failure. |
 | `fractal_agent_plan_explore` | MCTS-style exploration of multiple non-overlapping strategy trajectories. |
 | `fractal_agent_trajectory_predict` | Forecasts future state from a delta against historical telemetry. |
-| `fractal_agent_detect_loop` | Flags infinite/repetitive agent loops via a DFA scaling exponent. |
+| `fractal_agent_detect_loop` | Flags infinite/repetitive agent loops via SimHash state fingerprints and Brent's cycle detector, with a DFA drift check. |
 
 ### Safe Agency & Guardrails
 
@@ -109,6 +109,17 @@ The final tier provides mathematical primitives for analyzing the "shape" of dat
 - **DFA (`fractal_dimension_dfa`)**: Analyzes the scaling exponent of a time series to distinguish between noise, random walks, and structured signals.
 - **Box-Counting (`fractal_dimension_boxcount`)**: Measures the Minkowski-Bouligand dimension of a point cloud to evaluate spatial complexity.
 - **Drift (`fractal_dimension_drift`)**: Detects regime changes by comparing the DFA exponent of a recent window against a baseline.
+- **Change-Point Localization (`fractal_change_point_detect`)**: Localizes where a series' mean or variance shifted, complementing DFA's overall characterization.
+- **Periodogram (`fractal_periodogram`)**: Exact power spectrum (direct DFT) for cadence detection such as beaconing or retry loops.
+
+### Topology and State Fingerprints
+- **Persistence (`fractal_tda_persistence_diagram`)**: Exact 0-dimensional persistence over a point cloud's Vietoris-Rips filtration, plus the graph cycle rank as an informational Betti-number estimate.
+- **SimHash (`fractal_state_fingerprint`)**: Folds a state vector into a Hamming-comparable fingerprint where nearly-identical states collide.
+- **Cycle Detection (`fractal_cycle_detect`)**: Streaming Brent's algorithm over a fingerprint stream, one output per cycle closure.
+
+### Vector Math
+- **$L_p$ Distance (`fractal_vector_lp_distance`)**: Generalized distance over `fractal_vector` for any $p > 0$.
+- **Quantization (`fractal_vector_quantize_int8` / `_binary`)**: 4x/32x per-vector compression with optional Hamming pre-filtering ahead of a full-precision re-rank.
 
 ### Domain-Specific Geometry
 FractalSQL provides optimized routines for pre-extracted biological and technical geometry:
@@ -119,6 +130,7 @@ FractalSQL provides optimized routines for pre-extracted biological and technica
 
 ### Portfolio Optimization
 `fractal_optimize_portfolio` uses the SFS engine to solve cardinality-constrained Sharpe-ratio maximization. It finds the best $K$ assets in a large universe without the exponential cost of a brute-force search.
+`fractal_optimize_subset` generalizes the same search to value-weighted allocation over any scored item list with per-item bounds.
 
 ---
 
@@ -161,6 +173,11 @@ Using the native `fractal_vector` type gives close to a **~2x** speedup over `fl
 - `fractal_dimension_dfa(series)`: DFA scaling exponent. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_dimension_boxcount(points, dim)`: Box-counting dimension. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_dimension_drift(series, win)`: Regime change detection. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
+- `fractal_change_point_detect(series, win, ...)`: Change-point localization. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
+- `fractal_periodogram(series, max_peaks?)`: Exact power spectrum. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
+- `fractal_tda_persistence_diagram(points, dim, ...)`: Point-cloud persistence. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
+- `fractal_state_fingerprint(v, ...)` / `fractal_cycle_detect(fingerprints, ...)`: SimHash + Brent cycle detection. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
+- `fractal_vector_lp_distance(a, b, p)` / `fractal_vector_quantize_int8(v)` / `_binary(v)`: Vector math and quantization. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_optimize_portfolio(...)`: Cardinality-constrained optimization. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_vascular_network(...)`: Vessel tortuosity/density. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_cortical_folding(...)`: Gyrification Index. $\rightarrow$ **[api-analytics.md](api-analytics.md)**

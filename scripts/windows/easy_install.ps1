@@ -591,7 +591,9 @@ function Invoke-Wizard {
                 $reply = Invoke-Psql $bin $pgPort "SELECT fractal_reason('say ok');"
                 Write-Host "  $reply"
             } catch {
-                Write-Warn2 "That failed. If it looks like a timeout on a slow/cold local model, re-run and accept the cold-start timeout offer above, or see docs/reasoning-setup.md's 'Handling Constrained Hardware' section."
+                # Include the underlying error so a refusal, timeout, or
+                # plugin load failure is distinguishable on its own.
+                Write-Warn2 "That failed: $($_.Exception.Message). If it looks like a timeout on a slow/cold local model, re-run and accept the cold-start timeout offer above, or see docs/reasoning-setup.md's 'Handling Constrained Hardware' section."
             }
         }
     }

@@ -2,7 +2,8 @@
 -- FractalSQL Industry Vertical Demo: Autonomous Incident Triage & Self-Healing
 -- =============================================================================
 -- End-to-end regression test for the embed-coupled agents. Exercises:
---   * fractal_agent_detect_loop   -- period-2 loop detection (C fix A4)
+--   * fractal_agent_detect_loop   -- period-2 loop detection via SimHash +
+--                                    Brent's cycle detection (v2.0.25)
 --   * fractal_search_agent        -- runs on a real 768-dim fractal_vector
 --                                    column (was crashing / commented out;
 --                                    C fix A1 makes a wrong column type a
@@ -99,13 +100,33 @@ INSERT INTO known_bad_states (state_id, description, state_vec) VALUES
 -- DEMONSTRATION
 -- -----------------------------------------------------------------------------
 
--- 4. Loop Detection via DFA + short-period check
--- The state_hash sequence is a clean 12345<->67890 period-2 toggle. Its DFA
--- scaling exponent is ~0.1 (below the 0.9 threshold), so the DFA path alone
--- would NOT flag it -- but the short-period check (C fix A4) does. Result:
--- is_loop_detected = true.
+-- 4. Loop Detection via SimHash-fingerprinted cycle detection + DFA
+-- (v2.0.25 rewrite: fractal_agent_detect_loop now fingerprints real state
+-- vectors and streams them through Brent's cycle detector, rather than an
+-- exact-hash period scan). fsql_state_fingerprint is a cosine/direction-
+-- based SimHash (consistent with this whole extension's cosine-distance
+-- search functions) -- it is invariant to magnitude, so a raw scalar
+-- state_hash cast to a 1-dimensional vector would collapse to just its
+-- sign (both 12345 and 67890 are positive, so EVERY same-signed sequence
+-- would false-positive as "looping", not only a genuine toggle). Each
+-- state_hash is instead one-hot encoded into a 2-dimensional direction
+-- (12345 -> [1,0], 67890 -> [0,1]) so the two states are genuinely
+-- distinguishable by direction. The state_hash sequence is a clean
+-- 12345<->67890 period-2 toggle, so this one-hot direction toggles
+-- cleanly too. Its DFA exponent over the L2-norm trajectory is 0 (a
+-- one-hot vector's norm never changes), well below the 0.9 threshold, so
+-- the DFA signal alone would NOT flag it -- but the fingerprint-cycle
+-- check does (a clean period-2 toggle closes the cycle detector's
+-- Hamming-0 checkpoint immediately). Result: is_loop_detected = true.
 SELECT * FROM fractal_agent_detect_loop(
-    (SELECT array_agg(state_hash ORDER BY event_ts) FROM incident_logs WHERE agent_id = 'bot-deploy-01')
+    'bot-deploy-01',
+    (SELECT array_agg(v ORDER BY event_ts, dim)
+       FROM incident_logs, LATERAL (VALUES
+           ((state_hash = 12345)::int::float8, 1),
+           ((state_hash = 67890)::int::float8, 2)
+       ) AS onehot(v, dim)
+      WHERE agent_id = 'bot-deploy-01'),
+    2
 );
 
 -- 5. Multi-Agent Routing (the real fractal_agent_route_task engine)

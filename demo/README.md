@@ -196,16 +196,22 @@ for history, not the recommended starting point.
 
 ## Industry vertical demos
 
-Eleven runnable walkthroughs — eight **industry verticals** and three
+Thirteen runnable walkthroughs — ten **industry verticals** and three
 **agentic verticals** — each with its own synthetic dataset and its own
 subset of the function surface chosen for genuine domain fit, not forced
-coverage. Every one ends with a `fractal_reason()` narrative call over
-real computed results, same closing pattern as `demo.sql`. Same
+coverage. Every reasoning-bearing one ends with a `fractal_reason()`
+narrative call over
+real computed results, same closing pattern as `demo.sql` (the two
+newest verticals, Biotech/Genomics and Agentic Edge Swarm, are
+raw-primitive showcases and run with no reasoning endpoint at all). Same
 prerequisites as `demo.sql` (extension installed; the final reasoning
 section in each needs [reasoning configured](../docs/reasoning-setup.md)
-— every earlier section runs without it). All eleven are also wired
-into the Docker demo — see [the Learning Path](../docs/docker-demo.md#the-learning-path).
-Four (MedTech, Maritime, Fleet, Cybersecurity) store their vector
+— every earlier section runs without it). All thirteen ship into the
+Docker image's `/demo/` directory (see
+[the Learning Path](../docs/docker-demo.md#the-learning-path) for the
+guided subset).
+Five (MedTech, Maritime, Fleet, Cybersecurity, Biotech/Genomics) store
+their vector
 columns as the native **`fractal_vector(n)`** type instead of
 `float8[]` — see
 [demo-fractal-vector.sql](demo-fractal-vector.sql) and
@@ -220,7 +226,8 @@ psql -d <your_database> -f demo/demo-vertical-quant-finance.sql
   Quantitative Finance & Algorithmic Trading. A 25-asset factor-model
   portfolio (`fractal_optimize_portfolio` picks the best 8) and a
   300-point price series with a deliberate volatility regime change at
-  t=150 (`fractal_dimension_dfa`/`fractal_dimension_drift`).
+  t=150 (`fractal_dimension_dfa`/`fractal_dimension_drift`, localized
+  to the boundary by `fractal_change_point_detect`).
   `fractal_search_trajectory` finds which of 10 historical quarterly
   rebalances the new allocation most resembles.
 - **[demo-vertical-medtech-clinical.sql](demo-vertical-medtech-clinical.sql)** —
@@ -295,7 +302,31 @@ psql -d <your_database> -f demo/demo-vertical-quant-finance.sql
   `fractal_hybrid_clinical_search` uses), compromise detection via
   `fractal_search_trajectory` (`fractal_vector` overload), and
   connection-rate regime-change detection via `fractal_dimension_dfa`/
-  `fractal_dimension_drift` on a beaconing-onset series.
+  `fractal_dimension_drift` on a beaconing-onset series, with
+  `fractal_periodogram` reading the beacon interval itself out of
+  the post-shift traffic.
+- **[demo-vertical-biotech-genomics.sql](demo-vertical-biotech-genomics.sql)** —
+  Biotech, Structural Biology & Genomics. A 40-residue synthetic cyclic
+  peptide backbone (Calpha coordinates traced around a closed ring in
+  3D) analyzed by `fractal_tda_persistence_diagram`: exact 0-dim
+  persistence (cluster birth/death bars) plus the graph-cycle-rank
+  Betti-1, which flags the closed loop the shape actually has. Then
+  `fractal_vector_lp_distance` over synthetic scRNA-seq-style per-cell
+  expression vectors (`fractal_vector(32)`), contrasting p=2 Euclidean
+  against a fractional p=0.5 (sharper high-dimensionality contrast)
+  between two related cell states. Raw primitives only, no reasoning
+  endpoint needed.
+- **[demo-vertical-agentic-edge-swarm.sql](demo-vertical-agentic-edge-swarm.sql)** —
+  Agentic Edge / Robotics Swarm Coordination. A battery- and
+  bandwidth-constrained 20-node edge swarm: `fractal_vector_quantize_int8`
+  (4x) and `_quantize_binary` (32x) for compressed peer-state memory
+  with `fractal_vector_hamming_distance` as the cheap candidate filter
+  ahead of a full-precision re-rank, `fractal_agent_detect_loop` on a
+  node stuck oscillating between two headings vs. one genuinely
+  exploring (the SimHash + Brent rewrite exercised on its actual
+  use case), and `fractal_optimize_subset`'s value-weighted allocation
+  for battery-constrained task routing. Raw primitives and shipped
+  presets only, no reasoning endpoint needed.
 
 ### Agentic verticals (Universal Agent composition)
 
@@ -314,7 +345,8 @@ path — nothing commented out, no `DO/EXCEPTION` skip-wrappers.
   wrong column type before the `spi_scan_corpus` type guard) and
   `fractal_rag_agent` (a zero-exerciser that returned garbage before the
   raw-vector context fix), `fractal_agent_detect_loop` on a period-2
-  state-hash array (the short-period check the DFA-only threshold missed),
+  one-hot state-vector sequence (the SimHash fingerprint cycle check
+  flags the toggle; the DFA exponent alone, 0 here, would miss it),
   `fractal_dimension_drift` over a non-degenerate latency series, plus
   `fractal_agent_route_task` and `fractal_agent_outlier_intercept` Domain
   Agent compositions.
@@ -478,6 +510,8 @@ DROP TABLE vmd_vessels;                                                -- demo-v
 DROP TABLE vfl_vehicles;                                               -- demo-vertical-fleet-logistics.sql
 DROP TABLE vsc_sensors;                                                -- demo-vertical-smart-cities-iot.sql
 DROP TABLE vcy_hosts;                                                  -- demo-vertical-cybersecurity-threat-detection.sql
+DROP TABLE vbg_backbone, vbg_cells;                                    -- demo-vertical-biotech-genomics.sql
+DROP TABLE vae_nodes, vae_quantized, vae_tasks, vae_route_result;      -- demo-vertical-agentic-edge-swarm.sql
 DROP TABLE incident_logs, agent_capabilities;                          -- demo-vertical-agentic-ops-devops.sql
 DROP TABLE trade_strategies, portfolios, assets, restrictions;        -- demo-vertical-agentic-fintech-mcts.sql
 DROP TABLE customer_sessions;                                         -- demo-vertical-agentic-customer-support.sql

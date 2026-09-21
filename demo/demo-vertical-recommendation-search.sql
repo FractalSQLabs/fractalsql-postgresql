@@ -110,7 +110,7 @@ SELECT fractal_diversify_disable();
 SELECT c.title, t.distance
 FROM fractal_search_telemetry('vrs_catalog', 'emb_arr',
                               (SELECT center FROM vrs_genres WHERE genre_id = 1), 5) t
-JOIN vrs_catalog c ON c.id = t.doc_id + 1
+JOIN vrs_catalog c ON c.ctid::text = t.doc_id
 ORDER BY t.distance;
 
 -- ------------------------------------------------------------------
@@ -136,11 +136,13 @@ ORDER BY t.distance;
 -- Blueprint (raw primitive): the stateful diversify/repulsion loop --
 -- enable repulsion, set params, warm the D_q rolling window with varied
 -- genre-center queries, report negative feedback on the genre-3 top
--- result (fractal_isolate_background on its doc_id -- the doc_id IS the
--- handle), read back the real diversity_quotient + session diagnostics,
--- and disable. Generalized below by the shipped
--- fractal_agent_feedback_audit preset, which runs this whole audit cycle
--- self-contained (and self-disables diversify, unlike recommend_diverse).
+-- result (fractal_isolate_background on its scan_pos -- scan_pos IS the
+-- handle; doc_id is a ctid since v2.0.25, a different concept from the
+-- core engine's own internal result_handle), read back the real
+-- diversity_quotient + session diagnostics, and disable. Generalized
+-- below by the shipped fractal_agent_feedback_audit preset, which runs
+-- this whole audit cycle self-contained (and self-disables diversify,
+-- unlike recommend_diverse).
 -- SELECT fractal_diversify_enable();
 -- SELECT fractal_diversify_set_params(
 --     window_n => 5, repulsion_sigma => 0.3, repulsion_weight => 0.5
@@ -150,11 +152,11 @@ ORDER BY t.distance;
 -- CROSS JOIN LATERAL fractal_search_telemetry(
 --     'vrs_catalog', 'emb_arr', (SELECT center FROM vrs_genres WHERE genre_id = ((g % 6) + 1)), 3
 -- ) t;
--- SELECT c.title, t.doc_id, t.distance
+-- SELECT c.title, t.scan_pos, t.distance
 -- FROM fractal_search_telemetry('vrs_catalog', 'emb_arr',
 --                               (SELECT center FROM vrs_genres WHERE genre_id = 3), 1) t
--- JOIN vrs_catalog c ON c.id = t.doc_id + 1 \gset before_
--- SELECT fractal_isolate_background(:before_doc_id);
+-- JOIN vrs_catalog c ON c.ctid::text = t.doc_id \gset before_
+-- SELECT fractal_isolate_background(:before_scan_pos);
 -- SELECT fractal_detect_collapse() AS dq, fractal_explain_result() AS diagnostics;
 -- SELECT fractal_diversify_disable();
 
@@ -211,7 +213,7 @@ SELECT fractal_reason(
         SELECT c.title, c.genre_id, gt.distance
         FROM fractal_search_telemetry('vrs_catalog', 'emb_arr',
                                       ARRAY[0,0,0,0,0,0,0,0]::float8[], 8) gt
-        JOIN vrs_catalog c ON c.id = gt.doc_id + 1
+        JOIN vrs_catalog c ON c.ctid::text = gt.doc_id
     ) t)
 );
 

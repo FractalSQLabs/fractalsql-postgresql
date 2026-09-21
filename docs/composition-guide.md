@@ -35,7 +35,7 @@ here is the pick-list.
 | `fractal_sql_agent` | NL → SQL with self-correction on `EXPLAIN`/exec failure | You need structured answers from tables, not vector prose |
 | `fractal_agent_plan_explore` | MCTS-style diverse strategy trajectories | You need *multiple* non-overlapping plans, not one answer |
 | `fractal_agent_trajectory_predict` | Forecast state by matching a drift delta-vector in history | You need "where is this heading, based on past drift?" |
-| `fractal_agent_detect_loop` | DFA-based infinite-loop / repetition detector | You need a safety monitor on an autonomous agent's state log |
+| `fractal_agent_detect_loop` | SimHash + Brent cycle detector over a state-vector log | You need a safety monitor on an autonomous agent's state log |
 
 Underneath these, the **Discovery primitives** (`fractal_search`,
 `fractal_search_explore`, `fractal_search_trajectory`, `fractal_search_telemetry`,
@@ -130,7 +130,7 @@ CREATE OR REPLACE FUNCTION tier1_resolve(
     incident_id bigint, question text
 ) RETURNS table(step text, detail text) LANGUAGE plpgsql AS $$
 DECLARE
-    retrieved jsonb;  sql_res record;  state_hashes bigint[];
+    retrieved jsonb;  sql_res record;  state_log float8[];  state_dim int;
 BEGIN
   -- 1. RETRIEVE: Scout-search the incident corpus for relevant context
   SELECT jsonb_agg(row_to_json(t))
@@ -150,17 +150,21 @@ BEGIN
   RETURN QUERY SELECT 'answer',
     fractal_reason(question, retrieved::text);
 
-  -- 4. GUARD: log this agent step's state hash and check for a loop
-  state_hashes := array_agg(hashtextextended(question || retrieved::text, 0));  -- your state hash
-  -- on a real loop: array_agg(state_hash ORDER BY event_ts) from an event log
+  -- 4. GUARD: check this agent's state log for a loop
+  -- state_log is a float8[] of state vectors flattened row-major;
+  -- on a real loop: your agent's recent state vectors in order
   RETURN QUERY SELECT 'loop_check',
     (SELECT ('loop=' || is_loop_detected || ' alpha=' || dfa_exponent::text)
-       FROM fractal_agent_detect_loop(state_hashes));
+       FROM fractal_agent_detect_loop('tier1-resolver', state_log, state_dim));
 END $$;
 ```
 
-> The skeleton is illustrative. `hashtextextended` is a stand-in; your state-hash scheme is yours
-> to define. The wiring (retrieve, fall back to `fractal_sql_agent`, reason,
+> The skeleton is illustrative. The state-vector scheme is yours
+> to define (real vectors work best; the SimHash fingerprint inside
+> `fractal_agent_detect_loop` is direction-based, so encode scalar states
+> into a distinguishable direction, for example one-hot, rather than
+> casting them to 1-dimensional vectors). The wiring (retrieve, fall back to
+> `fractal_sql_agent`, reason,
 > then `fractal_agent_detect_loop` on the state log) is the part to copy. The
 > shipped `route_task` + `outlier_intercept` +
 > `detect_loop` composition in
@@ -186,7 +190,7 @@ you'd treat any NL→SQL surface:
   the role and allowlist already locked down.
 
 For autonomous agents (Pattern C), add the **safety barriers** the DevOps
-blueprint uses: `fractal_agent_detect_loop` on the state-hash log to catch
+blueprint uses: `fractal_agent_detect_loop` on the state-vector log to catch
 infinite loops, and an `outlier_intercept`-style screen that checks a proposed
 action's state vector against known-bad state clusters before the action runs.
 
@@ -198,10 +202,11 @@ Two issues surfaced while building the shipped agents, and apply equally to any 
 
 - **`id_col` must be bigint-castable.** The table-searching agents
   (`recall_hybrid`, `recommend_diverse`, `patient_deterioration_triage`,
-  `schedule_workload`, `rebalance_sibling`, `detour_classify`,
-  `track_anomaly`) resolve the C code's 0-indexed row position to your named
-  id column via `row_number() OVER (ORDER BY ctid) - 1`. A text label column
-  won't do; pass the numeric PK. See
+  `schedule_workload`) resolve the returned ctid `doc_id` to your named id
+  column via a direct ctid predicate, and the trajectory-based agents
+  (`rebalance_sibling`, `detour_classify`, `track_anomaly`) resolve their
+  0-indexed scan position via `row_number() OVER (ORDER BY ctid) - 1`. A text
+  label column won't do; pass the numeric PK. See
   [api-agency.md → A note on id resolution](api-agency.md#a-note-on-id-resolution).
 - **Diversify is session-global.** `recommend_diverse` calls
   `fractal_diversify_enable()` as a session side effect so re-searches avoid

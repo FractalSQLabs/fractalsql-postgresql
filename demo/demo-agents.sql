@@ -270,17 +270,16 @@ FROM fractal_agent_patient_deterioration_triage(
     ARRAY[0.9, -0.8, 0.7, 0.6]::float8[],
     ARRAY[0.1, 0.1, 0.1, 0.1]::float8[],
     ARRAY[0.95, -0.85, 0.75, 0.65]::float8[],
-    (SELECT array_agg(doc_id ORDER BY doc_id) FROM
-       (SELECT row_number() OVER (ORDER BY ctid) - 1 AS doc_id
-          FROM agents_demo_patients
-         WHERE age > 65 AND condition = 'sepsis') x),
+    (SELECT array_agg(ctid::text ORDER BY ctid) FROM agents_demo_patients
+      WHERE age > 65 AND condition = 'sepsis'),
     5, 'id');
 
 -- 11. fractal_agent_feedback_audit (pure analytics, NO LLM).
 -- A self-contained audit cycle: enables session-global repulsion, warms the
 -- D_q rolling window with varied queries from a warmup table, reports
 -- negative feedback on the audit target (fractal_isolate_background on the
--- k=1 telemetry doc_id -- the doc_id IS the handle), then reads back the real
+-- k=1 telemetry scan_pos -- scan_pos IS the handle, not doc_id, which is a
+-- ctid since v2.0.25), then reads back the real
 -- diversity_quotient (fractal_detect_collapse, NOT NaN once the window is
 -- warm) and session diagnostics (fractal_explain_result). Self-disables
 -- diversify (unlike recommend_diverse, which leaves it on).

@@ -108,14 +108,12 @@ SELECT fractal_diversify_disable();
 \echo ''
 \echo '=== 3. Cohort-restricted search: route-3 vehicles only ==='
 
--- v.id = t.doc_id + 1 holds here only because vehicle 5 (route_no = 1,
--- the sole UPDATEd row -- see section 1) is never in the route-3
--- filter: the UPDATE relocates ITS tuple, but leaves every route-3
--- vehicle's relative scan order untouched. Don't copy this shortcut
--- into a query whose cohort could include the updated row -- see
--- section 4 below and demo-vertical-maritime-defense.sql/
--- demo-vertical-cybersecurity-threat-detection.sql for the ctid-mapped
--- version this needs once that's no longer true.
+-- v2.0.25: doc_id is a real ctid, so this join is exact regardless of
+-- any UPDATE relocating a tuple -- no more "only holds because this
+-- particular cohort excludes the updated row" caveat (that used to be
+-- true when doc_id was a 0-indexed scan position; see section 4 below
+-- for the still-int8-based fractal_search_trajectory, which retains
+-- that caveat).
 DROP TABLE IF EXISTS vfl_route3_cohort;
 CREATE TEMP TABLE vfl_route3_cohort AS
 SELECT * FROM vfl_vehicles WHERE route_no = 3;
@@ -123,7 +121,7 @@ SELECT * FROM vfl_vehicles WHERE route_no = 3;
 SELECT v.van_id, t.distance
 FROM fractal_search_telemetry('vfl_route3_cohort', 'current',
                               ARRAY[0.3, -0.3, 0.2, 0.1]::float8[], 5) t
-JOIN vfl_route3_cohort v ON v.id = t.doc_id + 1
+JOIN vfl_route3_cohort v ON v.ctid::text = t.doc_id
 ORDER BY t.distance;
 
 -- ------------------------------------------------------------------

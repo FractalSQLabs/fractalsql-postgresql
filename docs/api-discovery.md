@@ -105,7 +105,7 @@ fractal_search_telemetry(
     vector_col  text,
     query       float8[],
     k           int4
-) RETURNS TABLE(doc_id int8, distance float8)
+) RETURNS TABLE(doc_id text, distance float8, scan_pos int8)
 ```
 
 ### Arguments
@@ -115,6 +115,17 @@ fractal_search_telemetry(
 | `vector_col` | `text` | The `float8[]` or `fractal_vector` column. |
 | `query` | `float8[]` | The target vector. |
 | `k` | `int4` | Number of nearest neighbors to return. |
+
+### Returns
+Rows ascending by distance:
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `doc_id` | `text` | The row's `ctid`, as text: a real Postgres row locator. Resolve back to the row with `WHERE ctid::text = doc_id`. |
+| `distance` | `float8` | Exact cosine distance from the query (brute-force scan, not approximate). Diversify/Repulsion applies if enabled on the session. |
+| `scan_pos` | `int8` | The raw 0-indexed position within this call's corpus scan. Distinct from `doc_id`: it identifies a result within this call (for example the `result_handle` argument of `fractal_isolate_background`), not a database row. |
+
+**Why `doc_id` is a `ctid` and not an index.** A `ctid` stays valid for the lifetime of the current transaction and still resolves to the correct row even if an `UPDATE` relocates a tuple between this search and a followup lookup, unlike a 0-indexed scan position.
 
 ---
 
@@ -129,15 +140,29 @@ fractal_hybrid_clinical_search(
     table_name  text,
     vector_col  text,
     query       float8[],
-    doc_ids     int8[],
+    doc_ids     text[],
     k           int4
-) RETURNS TABLE(doc_id int8, distance float8)
+) RETURNS TABLE(doc_id text, distance float8, scan_pos int8)
 ```
 
 ### Arguments
 | Argument | Type | Description |
 | --- | --- | --- |
-| `doc_ids` | `int8[]` | The subset of row indices to search. Must be computed via SQL (e.g., `SELECT array_agg(...)`). |
+| `doc_ids` | `text[]` | The cohort: an array of `ctid` strings, computed by ordinary SQL, for example `SELECT array_agg(ctid::text) FROM patients WHERE age > 65 AND condition = 'sepsis'`. Deliberately a row-id array rather than a raw SQL filter string, so no dynamic-SQL injection surface exists here. |
+
+`doc_id`, `distance`, and `scan_pos` have the same semantics as `fractal_search_telemetry`, with `scan_pos` counted within this call's cohort-filtered corpus rather than the whole table. Errors with `doc_ids cohort matched no rows` if the cohort matches zero rows.
+
+### Example
+```sql
+SELECT t.doc_id, d.id, t.distance
+  FROM fractal_hybrid_clinical_search(
+           'patients', 'vitals_emb',
+           $vec$[0.4, 0.1, 0.2]::float8[]$vec$,
+           (SELECT array_agg(ctid::text)
+              FROM patients WHERE age > 65 AND condition = 'sepsis'),
+           5) t
+  JOIN patients d ON d.ctid::text = t.doc_id;
+```
 
 ---
 
@@ -156,6 +181,8 @@ fractal_search_trajectory(
     k                int4
 ) RETURNS TABLE(doc_id int8, distance float8)
 ```
+
+**Note.** `doc_id` here is still the 0-indexed scan position, not a `ctid`. Only `fractal_search_telemetry` and `fractal_hybrid_clinical_search` return `doc_id` as a `ctid` string.
 
 ### Overloads
 Also available with `fractal_vector` arguments for direct varlena read performance.
@@ -252,7 +279,7 @@ Diversify is enabled (inert otherwise).
 
 | Argument | Type | Description |
 | --- | --- | --- |
-| `result_handle` | `int8` | The 0-based corpus row index the result came from (matches the `doc_id` returned by the telemetry search functions). |
+| `result_handle` | `int8` | The 0-based corpus scan position the result came from (matches the `scan_pos` returned by the telemetry search functions, not their `ctid` `doc_id`). |
 | `kind` | `text` | One of `'dwell'`, `'positive'`, `'negative'`. Anything else raises `kind must be one of ...`. |
 | `dwell_ms` | `int4` | Optional dwell time in ms (omitted for a bare negative report). |
 

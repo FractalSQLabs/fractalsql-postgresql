@@ -837,7 +837,7 @@ function PgSwapPlugin($path) {
 
 function Gate02Smoke {
     $ver = Psql -Sql "SELECT fractal_version();"
-    if ($ver -eq '2.0.11') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.11)" }
+    if ($ver -eq '2.0.17') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.17)" }
     $r = Psql -Sql @"
 WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
 SELECT CASE WHEN sqrt(v[1]*v[1]+v[2]*v[2])>1e-9
@@ -1831,18 +1831,26 @@ INSERT INTO bt_telemetry_docs (emb) VALUES
   (ARRAY[0.5,0.5,0.0]::float8[]);
 "@ | Out-Null
 
-    $r12 = Psql -Sql "SELECT doc_id, distance FROM fractal_search_telemetry('bt_telemetry_docs', 'emb', ARRAY[1.0,0.0,0.0]::float8[], 2);"
-    if ($r12 -match '^0\|0') { Pass "22 v2_functions: fractal_search_telemetry finds the exact match at distance 0" }
-    else { Fail "22 v2_functions: expected doc_id=0 dist=0 first, got: $r12" }
+    # telemetry/hybrid report doc_id as a ctid (text), not a 0-indexed scan
+    # position. Each assertion joins t.doc_id back to the real row via
+    # d.ctid::text = t.doc_id and checks the table's own id. This verifies
+    # the ctid mapping and stays independent of the physical page layout.
+    $r12 = Psql -Sql "SELECT d.id, t.distance FROM fractal_search_telemetry('bt_telemetry_docs', 'emb', ARRAY[1.0,0.0,0.0]::float8[], 2) t JOIN bt_telemetry_docs d ON d.ctid::text = t.doc_id ORDER BY t.distance LIMIT 1;"
+    if ($r12 -eq '1|0') { Pass "22 v2_functions: fractal_search_telemetry finds the exact match at distance 0 (ctid doc_id resolves to id 1)" }
+    else { Fail "22 v2_functions: expected id=1 dist=0 first via the ctid doc_id, got: $r12" }
 
+    # The old 0-indexed cohort doc_ids [1,3,4] were scan positions of
+    # physical rows 2,4,5. In the ctid world the cohort is built with
+    # ordinary SQL (array_agg of ctid::text) and the expected id order is
+    # the same three rows in the same distance order: 2,5,4.
     # CRLF normalization: psql -tA prints one row per line, and the Windows
     # C runtime writes \r\n -- see Gate20ApiFunc's matching note. The
     # multi-line exact-equality check below needs LF-only to compare.
-    $r13 = (Psql -Sql "SELECT doc_id FROM fractal_hybrid_clinical_search('bt_telemetry_docs', 'emb', ARRAY[0.0,1.0,0.0]::float8[], ARRAY[1,3,4]::int8[], 3) ORDER BY distance;") -replace "`r", ""
-    if ($r13 -eq "1`n4`n3") { Pass "22 v2_functions: fractal_hybrid_clinical_search restricts to the cohort and returns real doc_ids" }
-    else { Fail "22 v2_functions: expected doc_ids 1,4,3 in that order, got: $r13" }
+    $r13 = (Psql -Sql "SELECT d.id FROM fractal_hybrid_clinical_search('bt_telemetry_docs', 'emb', ARRAY[0.0,1.0,0.0]::float8[], (SELECT array_agg(ctid::text) FROM bt_telemetry_docs WHERE id IN (2,4,5)), 3) t JOIN bt_telemetry_docs d ON d.ctid::text = t.doc_id ORDER BY t.distance;") -replace "`r", ""
+    if ($r13 -eq "2`n5`n4") { Pass "22 v2_functions: fractal_hybrid_clinical_search restricts to the ctid cohort and returns real row ids" }
+    else { Fail "22 v2_functions: expected doc_ids 2,5,4 in that order, got: $r13" }
 
-    $r14 = Psql -Sql "SELECT fractal_hybrid_clinical_search('bt_telemetry_docs', 'emb', ARRAY[0.0,1.0,0.0]::float8[], ARRAY[999]::int8[], 1);"
+    $r14 = Psql -Sql "SELECT fractal_hybrid_clinical_search('bt_telemetry_docs', 'emb', ARRAY[0.0,1.0,0.0]::float8[], ARRAY['(999,1)']::text[], 1);"
     if ($r14 -match 'cohort matched no rows') { Pass "22 v2_functions: fractal_hybrid_clinical_search rejects a cohort matching zero rows" }
     else { Fail "22 v2_functions: expected a no-rows-matched rejection, got: $r14" }
 
@@ -1985,6 +1993,21 @@ INSERT INTO bt_agents_badstates VALUES (ARRAY[1,0,0]), (ARRAY[0.9,0.1,0.0]);
     if ($r7c -match 'gap-analysis-canary') { Pass "23 agents: outlier_intercept reason is the real reason step output (canary)" }
     else { Fail "23 agents: expected the reasoning canary in reason, got: $r7c" }
 
+    # The explicit metric argument: a threshold is calibrated against one
+    # metric, so the metric is caller-chosen, and the same probe can get
+    # opposite decisions under different metrics. [0.05,0,0] is
+    # cosine-parallel to the bad x-axis states (cosine distance ~0, so
+    # intercepted, as r7 showed for [1,0,0]) but L2-far: the nearest bad
+    # state is [0.9,0.1,0.0] at sqrt(0.7225+0.01) = 0.856 > 0.5, so
+    # allowed. An unknown metric must be a hard error, never a fallback.
+    $r7d = Psql -Sql "SELECT intercepted FROM fractal_agent_outlier_intercept(ARRAY[0.05,0,0]::float8[], 'bt_agents_badstates','emb', 0.5, 'l2');"
+    if ($r7d -match '^f$') { Pass "23 agents: outlier_intercept metric=l2 allows the parallel state cosine intercepts (real L2 distance 0.856 > 0.5)" }
+    else { Fail "23 agents: expected intercepted=f for metric=l2 (L2 distance 0.856 > 0.5), got: $r7d" }
+
+    $r7e = Psql -Sql "SELECT * FROM fractal_agent_outlier_intercept(ARRAY[1,0,0]::float8[], 'bt_agents_badstates','emb', 0.5, 'euclid');"
+    if ($r7e -match "metric must be 'cosine' or 'l2'") { Pass "23 agents: outlier_intercept rejects an unknown metric (no silent fallback)" }
+    else { Fail "23 agents: expected a metric rejection, got: $r7e" }
+
     # --- 8: fractal_agent_recall_hybrid happy path + guard --------------
     # Real session_ids + real content (NOT the stub's generate_series 1-5 /
     # 'recalled memory snippet N'); the cohort (customer_id filter) excludes
@@ -2072,15 +2095,15 @@ INSERT INTO bt_agents_patients VALUES
   (3,72,'flu',  ARRAY[0.2,0.2,0.2,0.2]),
   (4,80,'sepsis',ARRAY[0.85,-0.75,0.65,0.55]);
 "@ | Out-Null
-    $r11 = Psql -Sql "SELECT nearest_cohort_id FROM fractal_agent_patient_deterioration_triage('bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[], ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[], (SELECT array_agg(doc_id ORDER BY doc_id) FROM (SELECT row_number() OVER (ORDER BY ctid)-1 AS doc_id FROM bt_agents_patients WHERE age>65 AND condition='sepsis') x), 5, 'id');"
+    $r11 = Psql -Sql "SELECT nearest_cohort_id FROM fractal_agent_patient_deterioration_triage('bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[], ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[], (SELECT array_agg(ctid::text) FROM bt_agents_patients WHERE age>65 AND condition='sepsis'), 5, 'id');"
     if ($r11 -match '^[0-9]+$') { Pass "23 agents: patient_deterioration_triage returns the real nearest cohort id (hybrid search + ctid resolution)" }
     else { Fail "23 agents: expected a numeric nearest_cohort_id, got: $r11" }
 
-    $r11m = Psql -Sql "SELECT jsonb_array_length(cohort_matches) FROM fractal_agent_patient_deterioration_triage('bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[], ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[], (SELECT array_agg(doc_id ORDER BY doc_id) FROM (SELECT row_number() OVER (ORDER BY ctid)-1 AS doc_id FROM bt_agents_patients WHERE age>65 AND condition='sepsis') x), 5, 'id');"
+    $r11m = Psql -Sql "SELECT jsonb_array_length(cohort_matches) FROM fractal_agent_patient_deterioration_triage('bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[], ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[], (SELECT array_agg(ctid::text) FROM bt_agents_patients WHERE age>65 AND condition='sepsis'), 5, 'id');"
     if ($r11m -eq '2') { Pass "23 agents: patient_deterioration_triage cohort_matches now honors k (got 2 of 2 qualifying rows)" }
     else { Fail "23 agents: expected cohort_matches length 2, got: $r11m" }
 
-    $r11b = Psql -Sql "SELECT rationale FROM fractal_agent_patient_deterioration_triage('bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[], ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[], (SELECT array_agg(doc_id ORDER BY doc_id) FROM (SELECT row_number() OVER (ORDER BY ctid)-1 AS doc_id FROM bt_agents_patients WHERE age>65 AND condition='sepsis') x), 5, 'id');"
+    $r11b = Psql -Sql "SELECT rationale FROM fractal_agent_patient_deterioration_triage('bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[], ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[], (SELECT array_agg(ctid::text) FROM bt_agents_patients WHERE age>65 AND condition='sepsis'), 5, 'id');"
     if ($r11b -match 'gap-analysis-canary') { Pass "23 agents: patient_deterioration_triage composes hybrid+trajectory -> reason (canary)" }
     else { Fail "23 agents: expected the canary in rationale, got: $r11b" }
 

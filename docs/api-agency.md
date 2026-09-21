@@ -205,8 +205,9 @@ nearest capability row and accounts a token budget.
 | `cost_per_route` | `int` | `150` | tokens one routing decision costs |
 
 **How it works.** (1) `fractal_search_telemetry(cap_table, cap_emb_col, task_emb, 1)`
-finds the nearest capability. (2) Resolves the 0-indexed scan position to the
-named capability id via the [ctid mapping](#a-note-on-id-resolution). (3) Derives
+finds the nearest capability. (2) Resolves the returned `ctid` `doc_id` to the
+named capability id via a direct predicate (see
+[id resolution](#a-note-on-id-resolution)). (3) Derives
 `confidence = 1/(1+distance)`, accounts `remaining_budget = budget − cost_per_route`.
 (4) `fractal_reason` writes a one-line routing rationale.
 
@@ -248,12 +249,15 @@ if that distance is within a threshold.
 | `state_vec` | `float8[]` | — | the proposed action's state vector |
 | `history_table` | `text` | — | your known-bad-state table |
 | `emb_col` | `text` | — | the embedding column in that table |
-| `threshold` | `float8` | — | intercept if the nearest bad state is within this cosine distance |
+| `threshold` | `float8` | — | intercept if the nearest bad state is within this distance |
+| `metric` | `text` | `'cosine'` | the distance measure: `'cosine'` (exact telemetry engine, ignores magnitude) or `'l2'` (exact Euclidean via the `<->` operator). Any other value raises `metric must be 'cosine' or 'l2'`. |
 
-**How it works.** (1) `fractal_search_telemetry(history_table, emb_col, state_vec, 1)`
-for the distance to the nearest known-bad state. (2) `intercepted = distance < threshold`,
-a real comparison of a real distance. (3) `fractal_reason` justifies the
-decision in one sentence.
+**How it works.** With `metric = 'cosine'` (default): (1)
+`fractal_search_telemetry(history_table, emb_col, state_vec, 1)` for the
+distance to the nearest known-bad state. (2) `intercepted = distance <
+threshold`, a real comparison of a real distance. With `metric = 'l2'`: an
+exact `ORDER BY ... <-> ... LIMIT 1` Euclidean scan of the same table. (3)
+`fractal_reason` justifies the decision in one sentence.
 
 **Returns** `(intercepted boolean, reason text)`.
 
@@ -264,7 +268,7 @@ INSERT INTO agents_demo_badstates VALUES
     (ARRAY[1.0, 0.0, 0.0]),
     (ARRAY[0.9, 0.1, 0.0]);
 
--- Near a bad state -> intercepted.
+-- Near a bad state -> intercepted (cosine, the default).
 SELECT intercepted, reason
 FROM fractal_agent_outlier_intercept(
     ARRAY[0.95, 0.05, 0.0]::float8[], 'agents_demo_badstates', 'emb', 0.5);
@@ -273,12 +277,19 @@ FROM fractal_agent_outlier_intercept(
 SELECT intercepted, reason
 FROM fractal_agent_outlier_intercept(
     ARRAY[0.0, 1.0, 0.0]::float8[], 'agents_demo_badstates', 'emb', 0.5);
+
+-- Same check under Euclidean distance, where magnitude matters:
+SELECT intercepted, reason
+FROM fractal_agent_outlier_intercept(
+    ARRAY[0.05, 0.0, 0.0]::float8[], 'agents_demo_badstates', 'emb', 0.5, 'l2');
 ```
 
 **Notes.** Cosine distance **ignores magnitude**: `[0.1,0.1,0.1]` vs
 `[0.9,0.9,0.9]` are parallel (distance 0, "near"), not far. To build a "far"
 known-bad fixture, point a *different direction* (e.g. `[0,1,0]` vs `[1,0,0]` →
-distance 1). Raises `no bad-state rows in …` if the history table is empty.
+distance 1). If magnitude should count, pass `metric => 'l2'`: there,
+`[0.05,0,0]` sits 0.95 away from `[1,0,0]` and is allowed under the same
+threshold. Raises `no bad-state rows in …` if the history table is empty.
 
 ---
 
@@ -303,8 +314,8 @@ the vector search so `k` is respected within the cohort.
 | `id_col` | `text` | `'id'` | the column to return as the id (must be bigint-castable) |
 | `content_col` | `text` | `NULL` | the text column to return (NULL = no content) |
 
-**How it works.** (1) Builds a cohort of 0-indexed scan positions from the
-optional filter via the [ctid mapping](#a-note-on-id-resolution). (2)
+**How it works.** (1) Builds a cohort of `ctid` strings from the optional
+filter via ordinary SQL. (2)
 `fractal_hybrid_clinical_search` restricts the vector search to that cohort. (3)
 Joins the returned `doc_id`s back to your named id and content columns.
 
@@ -356,7 +367,8 @@ session-global Diversify/Repulsion layer, then runs a repulsion-diverse top-k.
 re-searches avoid recently-rejected items reported via
 `fractal_feedback_report`. (2) `fractal_search_telemetry` for the top-k, which the
 primitive applies repulsion to when diversify is enabled. (3) Resolves the
-0-indexed `doc_id` to your named id via the [ctid mapping](#a-note-on-id-resolution).
+returned `ctid` `doc_id` to your named id via a direct predicate (see
+[id resolution](#a-note-on-id-resolution)).
 
 **Returns** `(item_id bigint, score float8)`: `score = 1 − cosine_distance`,
 real from the primitive (not canned `0.95 − i*0.01`).
@@ -450,15 +462,16 @@ that [recall_hybrid](#recall-hybrid--fractal_agent_recall_hybrid)'s single
 | `query_vec` | `float8[]` | — | the patient to triage |
 | `baseline_vec` | `float8[]` | — | the baseline state for the drift search |
 | `current_vec` | `float8[]` | — | the current state for the drift search |
-| `cohort_doc_ids` | `int8[]` | `NULL` | caller-built cohort (NULL = all rows) |
+| `cohort_doc_ids` | `text[]` | `NULL` | caller-built cohort of `ctid` strings (NULL = all rows) |
 | `k` | `int` | `5` | how many cohort neighbors |
 | `id_col` | `text` | `'id'` | the column to return as the id (must be bigint-castable) |
 
 **How it works.** (1) Builds the cohort: from `cohort_doc_ids` if supplied, else
-every row mapped to 0-indexed scan positions. (2)
+every row's `ctid`. (2)
 `fractal_hybrid_clinical_search` for up to `k` nearest patients in the cohort,
-ranked ascending by distance, each resolved to its named patient id via the
-[ctid mapping](#a-note-on-id-resolution) in the same query. (3)
+ranked ascending by distance, each resolved to its named patient id via a
+direct ctid predicate (see [id resolution](#a-note-on-id-resolution)) in the
+same query. (3)
 `fractal_search_trajectory` for the baseline→current drift — always a single
 result; `k` does not apply here. (4) `fractal_reason` synthesizes the triage
 over the single nearest cohort match and the drift, not over every entry in
@@ -484,10 +497,9 @@ FROM fractal_agent_patient_deterioration_triage(
     ARRAY[0.9, -0.8, 0.7, 0.6]::float8[],
     ARRAY[0.1, 0.1, 0.1, 0.1]::float8[],
     ARRAY[0.95, -0.85, 0.75, 0.65]::float8[],
-    (SELECT array_agg(doc_id ORDER BY doc_id) FROM
-       (SELECT row_number() OVER (ORDER BY ctid) - 1 AS doc_id
-          FROM agents_demo_patients
-         WHERE age > 65 AND condition = 'sepsis') x),
+    (SELECT array_agg(ctid::text)
+       FROM agents_demo_patients
+      WHERE age > 65 AND condition = 'sepsis'),
     5, 'id');
 ```
 
@@ -581,8 +593,8 @@ search" in the abstract search space before the nearest-node lookup.
 **How it works.** (1) `fractal_search(task_vec, iterations, population, 2)`:
 refines the task vector (diffusion factor 2). (2)
 `fractal_search_telemetry(node_table, node_emb_col, refined, 1)` for the nearest
-node. (3) Resolves the scan position to the named node id via the
-[ctid mapping](#a-note-on-id-resolution). (4) `fractal_reason` writes a one-line
+node. (3) Resolves the returned `ctid` `doc_id` to the named node id via a
+direct predicate (see [id resolution](#a-note-on-id-resolution)). (4) `fractal_reason` writes a one-line
 placement rationale.
 
 **Returns** `(assigned_node text, confidence float8, rationale text)`:
@@ -631,8 +643,10 @@ table, then reason over both. Generalizes the fintech-MCTS reference blueprint.
 **How it works.** (1) `fractal_optimize_portfolio(mu, cov, cardinality, seed)`.
 (2) Extracts the weights as a `float8[]` vector. (3)
 `fractal_search_trajectory(alloc_table, alloc_emb_col, baseline_vec, weights, 1)`
-for the nearest historical allocation. (4) Resolves its `doc_id` to the named
-allocation id via the [ctid mapping](#a-note-on-id-resolution). (5) `fractal_reason`
+for the nearest historical allocation. (4) Resolves its `doc_id` (a 0-indexed
+scan position) to the named
+allocation id via the row_number-over-ctid mapping (see
+[id resolution](#a-note-on-id-resolution)). (5) `fractal_reason`
 synthesizes the rebalance rationale.
 
 **Returns** `(sharpe float8, weights jsonb, nearest_alloc_id bigint, nearest_distance float8, rationale text)`.
@@ -769,8 +783,10 @@ fleet with the fractal (box-counting) complexity of the vehicle's GPS trace.
 
 **How it works.** (1) `fractal_search_trajectory(vehicle_table, emb_col, baseline_vec, current_vec, 1)`
 for the route deviation vs. the fleet. (2) `fractal_dimension_boxcount(gps_trace, boxcount_dim)`
-for the GPS trace complexity. (3) Resolves the nearest fleet peer's `doc_id` to
-the named vehicle id via the [ctid mapping](#a-note-on-id-resolution). (4)
+for the GPS trace complexity. (3) Resolves the nearest fleet peer's `doc_id` (a
+0-indexed scan position) to
+the named vehicle id via the row_number-over-ctid mapping (see
+[id resolution](#a-note-on-id-resolution)). (4)
 `fractal_reason` classifies the detour.
 
 **Returns** `(nearest_fleet_id bigint, trajectory_distance float8, trace_complexity float8, rationale text)`.
@@ -832,7 +848,9 @@ exponent of the heading-change series.
 **How it works.** (1) `fractal_search_trajectory(track_table, emb_col, baseline_vec, current_vec, 1)`
 for the track deviation vs. the fleet. (2) `fractal_dimension_dfa(heading_series)`
 for the heading-change exponent. (3) Resolves the nearest fleet peer's `doc_id`
-to the named track id via the [ctid mapping](#a-note-on-id-resolution). (4)
+(a 0-indexed scan position) to the
+named track id via the row_number-over-ctid mapping (see
+[id resolution](#a-note-on-id-resolution)). (4)
 `fractal_reason` triages the track.
 
 **Returns** `(nearest_fleet_id bigint, trajectory_distance float8, dfa_exponent float8, rationale text)`.
@@ -975,13 +993,22 @@ the boolean comparison.
 ### A note on id resolution
 
 `fractal_search_telemetry` and `fractal_hybrid_clinical_search` return `doc_id`
-as a **0-indexed row position** in the C code's heap scan, not a primary key.
-The table-searching agents (`recall_hybrid`, `recommend_diverse`,
-`patient_deterioration_triage`, `schedule_workload`, `rebalance_sibling`,
-`detour_classify`, `track_anomaly`) resolve that position to your named id column
-(`id_col`) via `row_number() OVER (ORDER BY ctid) - 1`: the same robust mapping
-the maritime/cybersecurity demos and the C source use internally for cohort
-construction. `id_col` must be **bigint-castable** (e.g. `rebalance_sibling`
+as the row's **`ctid`, as text** (for example `(0,1)`): a real Postgres row
+locator, valid for the lifetime of the current transaction. Resolve it back to
+your named id column with a direct predicate, for example
+`JOIN patients d ON d.ctid::text = t.doc_id`. A `ctid` keeps working even if an
+`UPDATE` relocates a tuple between the search and the lookup, unlike a
+0-indexed scan position; the raw scan position is still available separately as
+`scan_pos` (for core's own `result_handle`-style calls, not for row lookup).
+The agents that search through `fractal_search_telemetry` or
+`fractal_hybrid_clinical_search` (`route_task`, `recall_hybrid`,
+`recommend_diverse`, `patient_deterioration_triage`, `schedule_workload`)
+already resolve the `doc_id` for you: each joins it back to the named id column
+(`id_col`) via a direct ctid predicate. The agents that search through
+`fractal_search_trajectory` (`rebalance_sibling`, `detour_classify`,
+`track_anomaly`) keep the `row_number() OVER (ORDER BY ctid) - 1` mapping,
+because trajectory's `doc_id` is still a 0-indexed scan position.
+`id_col` must be **bigint-castable** (e.g. `rebalance_sibling`
 returns `nearest_alloc_id bigint`, so a text label column won't do; pass the
 numeric PK).
 
@@ -1122,30 +1149,41 @@ rows. `forecast_steps` is reserved for a future extrapolation step.
 - `risk_threshold_exceeded`: True if the drift exceeds 0.5.
 
 ### `fractal_agent_detect_loop`
-**DFA-Based Safety Monitor**
+**Loop-Detection Safety Monitor**
 
-Detects infinite agent loops or repetitive behavior by analyzing the scaling exponent of state hashes.
+Detects infinite agent loops or repetitive behavior by fingerprinting a
+trajectory of real state vectors and watching for a cycle to close.
 
 ```sql
 fractal_agent_detect_loop(
-    log_arr int8[]
+    agent_id          text,
+    state_log         float8[],
+    dim               int4,
+    n_bits            int4    DEFAULT 64,
+    seed              float8  DEFAULT 42.0,
+    hamming_threshold int4    DEFAULT 0
 ) RETURNS fractal_loop_detect_result
 LANGUAGE C VOLATILE STRICT
 ```
 
-`log_arr` is an `int8[]` (a `bigint[]`) of ordered agent state hashes:
-typically `array_agg(state_hash ORDER BY event_ts)` from an agent event
-log. A loop is flagged when **either** signal fires:
+`state_log` is a `float8[]` holding the agent's states flattened row-major
+(`n_states = length(state_log) / dim` doubles, the same convention
+`fractal_search_telemetry` uses for corpus flattening). Each state is
+fingerprinted via SimHash (`n_bits`, `seed`) and the fingerprints stream
+through Brent's cycle detector, so a loop is flagged when it closes:
 
-- the DFA scaling exponent $\alpha$ exceeds 0.9 (drift-to-chaos / random-walk-like
-  cycling), **or**
-- a tight discrete period $p \in [1, n/4]$ is found where
-  `series[i] == series[i+p]` for all `i` (a clean toggle such as
-  `12345 <-> 67890`, which the DFA scores as a low $\alpha \approx 0.1$ and
-  would otherwise miss).
-- `agent_id`: Identifier of the monitored agent (currently the constant `"monitor"`).
-- `dfa_exponent`: The calculated $\alpha$ scaling exponent.
-- `is_loop_detected`: True if either the DFA threshold or the short-period check fires.
+- with `hamming_threshold = 0`, only byte-identical repeated states count;
+  raise it (say 1 to 4) to catch near-identical repeats that are not
+  byte-identical, which an exact-hash period scan would miss.
+- independently, `dfa_exponent` (the DFA scaling exponent of each state's L2
+  norm across the trajectory) exceeding 0.9 flags a random-walk-like wander
+  the fingerprint-cycle check can miss if it never closes within the
+  threshold.
+
+- `agent_id`: echoed back in the result (so one monitor can serve several agents).
+- `dfa_exponent`: the calculated $\alpha$ scaling exponent.
+- `is_loop_detected`: true if either the fingerprint-cycle check or the DFA
+  threshold fires.
 
 ### `fractal_rag_agent`
 **Hybrid Retrieve-Reason Agent**
@@ -1184,7 +1222,7 @@ The three agentic-vertical demos (`demo/demo-vertical-agentic-ops-devops.sql` fo
 | Domain Agent | Composes | Purpose |
 | --- | --- | --- |
 | `fractal_agent_route_task(task, cap_map, budget)` → `(routed_to, confidence, remaining_budget)` | `fractal_search_agent` (embed → Scout → reason) | Sub-agent dispatcher: matches an incoming task to the best capable sub-agent and returns a confidence plus a token-budget accounting. |
-| `fractal_agent_outlier_intercept(state_vec, history_table, threshold)` → `(intercepted, reason)` | `fractal_search_telemetry` | Pre-commit safety barrier: screens a proposed action's state vector against known-bad state clusters and intercepts it when the nearest bad state is within `threshold`. |
+| `fractal_agent_outlier_intercept(state_vec, history_table, emb_col, threshold, metric)` → `(intercepted, reason)` | `fractal_search_telemetry` | Pre-commit safety barrier: screens a proposed action's state vector against known-bad state clusters and intercepts it when the nearest bad state is within `threshold`, measured by `metric` (`'cosine'` by default, or `'l2'`). |
 | `fractal_agent_threat_triage(host_id, log_table, baseline_window)` → `(threat_score, anomaly_type, triage_summary)` | `fractal_dimension_drift` + `fractal_reason` | SOC incident triage: scores drift on the host's latency series, then reasons a human-readable triage summary over the drift result. |
 
 ### FinTech — `demo/demo-vertical-agentic-fintech-mcts.sql`

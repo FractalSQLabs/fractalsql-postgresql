@@ -248,7 +248,7 @@ CREATE FUNCTION fractal_agent_route_task(
 ) RETURNS TABLE(routed_to text, confidence float8, remaining_budget int, rationale text)
 AS $$
 DECLARE
-    nearest_doc  int8;
+    nearest_doc  text;
     nearest_dist float8;
     routed_to    text;
     confidence   float8;
@@ -294,14 +294,11 @@ BEGIN
             cap_table;
     END IF;
 
-    -- 2. Resolve the 0-indexed heap-scan position to the named capability id
-    -- via the repo's robust ctid-row_number mapping (matches the C engine's
-    -- physical scan order; the same pattern the maritime/cybersecurity demos
-    -- use to map doc_id back to a PK).
+    -- 2. Resolve doc_id (now a real ctid, not a scan position) to the named
+    -- capability id -- a direct predicate, no row_number() mapping needed.
     EXECUTE format(
-        'SELECT %I FROM (SELECT %I, row_number() OVER (ORDER BY ctid) - 1 AS doc_id FROM %I) x '
-        'WHERE x.doc_id = %L',
-        cap_id_col, cap_id_col, cap_table, nearest_doc)
+        'SELECT %I FROM %I WHERE ctid::text = %L',
+        cap_id_col, cap_table, nearest_doc)
         INTO routed_to;
 
     -- 3. Real Cognition: reason a one-line routing rationale.
@@ -333,9 +330,9 @@ COMMENT ON FUNCTION fractal_agent_route_task(float8[], text, text, text, int, in
   'Sub-agent dispatcher engine. Embeds nothing itself -- the caller passes the '
   'task embedding (task_emb) at the same dimensionality as the capability '
   'embeddings -- then runs fractal_search_telemetry(cap_table, cap_emb_col, '
-  'task_emb, 1) to find the nearest capability, resolves the 0-indexed scan '
-  'position to the named capability id (cap_id_col) via a ctid-row_number '
-  'mapping, derives confidence = 1/(1+distance) from the real distance, '
+  'task_emb, 1) to find the nearest capability, resolves its ctid doc_id '
+  'to the named capability id (cap_id_col) via a direct ctid predicate, '
+  'derives confidence = 1/(1+distance) from the real distance, '
   'accounts the budget (remaining_budget = budget - cost_per_route), and '
   'calls fractal_reason for a one-line routing rationale. Returns (routed_to, '
   'confidence, remaining_budget, rationale). Raises a clean ERROR if the '
@@ -362,16 +359,24 @@ CREATE FUNCTION fractal_agent_outlier_intercept(
     state_vec      float8[],
     history_table  text,
     emb_col        text,
-    threshold      float8
+    threshold      float8,
+    metric         text    DEFAULT 'cosine'
 ) RETURNS TABLE(intercepted boolean, reason text)
 AS $$
 DECLARE
-    nearest_doc  int8;
+    nearest_doc  text;
     nearest_dist float8;
     intercepted  boolean;
     reason       text;
     has_row      int4;
 BEGIN
+    -- The distance metric is an explicit argument. A threshold is
+    -- calibrated against one metric, so the metric must be chosen by the
+    -- caller. The default is 'cosine', the metric existing callers were
+    -- calibrated against. Any other value, including NULL, is an error.
+    IF metric IS NULL OR metric NOT IN ('cosine', 'l2') THEN
+        RAISE EXCEPTION 'fractal_agent_outlier_intercept: metric must be ''cosine'' or ''l2''';
+    END IF;
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
     -- real base functions and cannot be shadowed by a hostile function in
@@ -401,12 +406,32 @@ BEGIN
     END IF;
 
     -- 1. Real Analytics: distance from the proposed state to the nearest
-    -- known-bad state in the history table.
-    SELECT doc_id, distance INTO nearest_doc, nearest_dist
-      FROM fractal_search_telemetry(history_table, emb_col, state_vec, 1);
-    IF nearest_doc IS NULL THEN
-        RAISE EXCEPTION 'fractal_agent_outlier_intercept: no bad-state rows in %',
-            history_table;
+    -- known-bad state in the history table, under the caller's metric.
+    -- 'cosine' uses the exact telemetry engine and works for float8[] and
+    -- fractal_vector columns. 'l2' finds the nearest bad state with an
+    -- exact ORDER BY over the extension's own <-> operator; the float8[]
+    -- and fractal_vector casts let both column types use the same query.
+    -- Identifiers are %I quoted and the state vector is a bound
+    -- parameter, so no caller data is interpolated.
+    IF metric = 'cosine' THEN
+        SELECT doc_id, distance INTO nearest_doc, nearest_dist
+          FROM fractal_search_telemetry(history_table, emb_col, state_vec, 1);
+        IF nearest_doc IS NULL THEN
+            RAISE EXCEPTION 'fractal_agent_outlier_intercept: no bad-state rows in %',
+                history_table;
+        END IF;
+    ELSE  -- 'l2', validated above
+        EXECUTE format(
+            'SELECT d.rid, d.dist FROM '
+            '(SELECT ctid::text AS rid, (%I)::fractal_vector <-> $1::fractal_vector AS dist '
+             'FROM %I WHERE %I IS NOT NULL) d ORDER BY d.dist LIMIT 1',
+            emb_col, history_table, emb_col)
+            USING state_vec
+            INTO nearest_doc, nearest_dist;
+        IF nearest_doc IS NULL THEN
+            RAISE EXCEPTION 'fractal_agent_outlier_intercept: no bad-state rows in %',
+                history_table;
+        END IF;
     END IF;
 
     -- 2. Real decision: intercept iff the nearest bad state is within the
@@ -414,13 +439,15 @@ BEGIN
     -- constant.
     intercepted := nearest_dist < threshold;
 
-    -- 3. Real Cognition: reason a one-line justification.
+    -- 3. Real Cognition: reason a one-line justification (names the metric
+    -- actually used, so the threshold's own basis is auditable).
     reason := fractal_reason(
-        'Outlier intercept: nearest known-bad state is at cosine distance '
+        'Outlier intercept: nearest known-bad state is at ' || metric || ' distance '
         || nearest_dist || ', threshold ' || threshold || ', so '
         || CASE WHEN intercepted THEN 'INTERCEPT' ELSE 'allow' END
         || '. Justify the decision in one sentence.',
-        jsonb_build_object('threshold', threshold, 'intercepted', intercepted)::text);
+        jsonb_build_object('threshold', threshold, 'metric', metric,
+                           'intercepted', intercepted)::text);
 
     -- 4. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users. High-value trail since
@@ -428,7 +455,7 @@ BEGIN
     BEGIN
         PERFORM fractal_audit_log('agent_outlier_intercept', jsonb_build_object(
             'intercepted', intercepted, 'nearest_distance', nearest_dist,
-            'threshold', threshold, 'reason', reason));
+            'threshold', threshold, 'metric', metric, 'reason', reason));
     EXCEPTION
         WHEN object_not_in_prerequisite_state THEN
             NULL;
@@ -438,17 +465,23 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-COMMENT ON FUNCTION fractal_agent_outlier_intercept(float8[], text, text, float8) IS
-  'Pre-commit safety-barrier engine. Runs fractal_search_telemetry('
-  'history_table, emb_col, state_vec, 1) to find the distance from the '
-  'proposed state vector to the nearest known-bad state, sets intercepted = '
-  '(distance < threshold) -- a real comparison of a real distance -- and '
-  'calls fractal_reason for a one-line justification. Returns (intercepted, '
-  'reason). Raises a clean ERROR if the history table is empty. Generalizes '
-  'the fractal_agent_outlier_intercept reference blueprint in '
-  'demo/demo-vertical-agentic-ops-devops.sql (which returned the constant '
-  'false/''state within normal variance'' and ignored its arguments, even '
-  'though its own comment described this exact composition).';
+COMMENT ON FUNCTION fractal_agent_outlier_intercept(float8[], text, text, float8, text) IS
+  'Pre-commit safety-barrier engine. Finds the distance from the '
+  'proposed state vector to the nearest known-bad state under the '
+  'caller-chosen metric. The threshold is calibrated against that '
+  'metric, so the metric must be explicit: metric=''cosine'' (the '
+  'default) uses fractal_search_telemetry(history_table, emb_col, '
+  'state_vec, 1), and metric=''l2'' finds the nearest bad state with an '
+  'exact ORDER BY over the extension''s own <-> operator. Any other '
+  'metric value is an error rather than a silent fallback. Sets '
+  'intercepted = (distance < threshold) and calls fractal_reason for a '
+  'one-line justification naming the metric used. Returns (intercepted, '
+  'reason). Raises a clean ERROR if the history table is empty or the '
+  'metric is unknown. Generalizes the fractal_agent_outlier_intercept '
+  'reference blueprint in demo/demo-vertical-agentic-ops-devops.sql '
+  '(which returned the constant false/''state within normal variance'' '
+  'and ignored its arguments, even though its own comment described this '
+  'exact composition).';
 
 -- =====================================================================
 -- Engine E: fractal_agent_recall_hybrid
@@ -482,7 +515,7 @@ CREATE FUNCTION fractal_agent_recall_hybrid(
 ) RETURNS TABLE(mem_id bigint, content text)
 AS $$
 DECLARE
-    cohort       int8[];
+    cohort       text[];
     where_clause text;
     content_sel  text;
 BEGIN
@@ -505,18 +538,13 @@ BEGIN
         RAISE EXCEPTION 'fractal_agent_recall_hybrid: identifier arguments must not be NULL';
     END IF;
     -- 1. The "hybrid" is the cohort: a strict SQL filter (filter_col =
-    -- filter_val) mapped to 0-indexed scan positions via row_number() over
-    -- ctid order -- the repo's own cohort recipe (see the
-    -- fractal_hybrid_clinical_search docstring and src/fractalsql.c). The
-    -- row_number() must be computed in a subquery before array_agg -- postgres
-    -- rejects array_agg(row_number() OVER (...)) directly ("aggregate
-    -- function calls cannot contain window function calls"); the C source
-    -- itself uses a WITH numbered AS (...) CTE for the same reason. When
-    -- filter_col is NULL the cohort is every row.
+    -- filter_val) mapped to real row identity (ctid) -- fractal_hybrid_
+    -- clinical_search's doc_ids cohort argument. When filter_col is NULL
+    -- the cohort is every row.
     where_clause := CASE WHEN filter_col IS NULL THEN ''
                          ELSE format(' WHERE %I = %L', filter_col, filter_val) END;
     EXECUTE format(
-        'SELECT array_agg(idx) FROM (SELECT (row_number() OVER (ORDER BY ctid) - 1)::int8 AS idx FROM %I%s) s',
+        'SELECT array_agg(ctid::text) FROM %I%s',
         mem_table, where_clause) INTO cohort;
     IF cohort IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_recall_hybrid: filter matched no rows in %',
@@ -524,27 +552,28 @@ BEGIN
     END IF;
 
     -- 2. Real Analytics: fractal_hybrid_clinical_search restricts the vector
-    -- search to the cohort. Then join its 0-indexed doc_ids back to the named
-    -- id (id_col, cast to bigint) and optional content via the ctid mapping.
+    -- search to the cohort. Then join its ctid doc_ids back to the named id
+    -- (id_col, cast to bigint) and optional content via a direct ctid
+    -- predicate -- no row_number() mapping needed.
     content_sel := CASE WHEN content_col IS NULL THEN 'NULL::text'
                         ELSE format('%I', content_col) END;
     RETURN QUERY EXECUTE format(
         'SELECT x.idv::bigint, x.cnt '
         'FROM fractal_hybrid_clinical_search(%L, %L, $1, $2, %L) r '
-        'JOIN (SELECT %I AS idv, %s AS cnt, row_number() OVER (ORDER BY ctid) - 1 AS doc_id FROM %I) x '
-        'ON x.doc_id = r.doc_id ORDER BY r.distance',
+        'JOIN (SELECT %I AS idv, %s AS cnt, ctid::text AS rid FROM %I) x '
+        'ON x.rid = r.doc_id ORDER BY r.distance',
         mem_table, vec_col, k, id_col, content_sel, mem_table)
         USING query_vec, cohort;
 END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION fractal_agent_recall_hybrid(text, text, float8[], text, text, int, text, text) IS
-  'Hybrid memory-recall engine. Builds a cohort of 0-indexed scan positions '
-  'from an optional metadata filter (filter_col = filter_val) via '
-  'row_number() over ctid order, then runs fractal_hybrid_clinical_search to '
-  'restrict the vector search to that cohort, and resolves the returned '
-  '0-indexed doc_ids back to the named id (id_col, cast to bigint) and '
-  'optional content (content_col) via the same ctid mapping. Returns (mem_id, '
+  'Hybrid memory-recall engine. Builds a cohort of real row ids (ctid) '
+  'from an optional metadata filter (filter_col = filter_val), then runs '
+  'fractal_hybrid_clinical_search to restrict the vector search to that '
+  'cohort, and resolves the returned ctid doc_ids back to the named id '
+  '(id_col, cast to bigint) and optional content (content_col) via a '
+  'direct ctid predicate. Returns (mem_id, '
   'content). The caller passes the query as an embedding (query_vec); the '
   'stub-era query text and alpha blend weight are replaced by the cohort (the '
   'blend is the filter, not a scalar). Raises a clean ERROR if the filter '
@@ -605,13 +634,13 @@ BEGIN
 
     -- 2. Real Analytics: telemetry with diversify enabled = repulsion-diverse
     -- top-k (per the primitive's docstring). score = 1 - cosine_distance is
-    -- real, from the primitive; the 0-indexed doc_id is resolved to the named
-    -- item id (id_col, cast to bigint) via the ctid mapping.
+    -- real, from the primitive; doc_id (a real ctid) is resolved to the
+    -- named item id (id_col, cast to bigint) via a direct ctid predicate.
     RETURN QUERY EXECUTE format(
         'SELECT x.idv::bigint, (1.0 - r.distance) '
         'FROM fractal_search_telemetry(%L, %L, $1, %L) r '
-        'JOIN (SELECT %I AS idv, row_number() OVER (ORDER BY ctid) - 1 AS doc_id FROM %I) x '
-        'ON x.doc_id = r.doc_id ORDER BY r.distance',
+        'JOIN (SELECT %I AS idv, ctid::text AS rid FROM %I) x '
+        'ON x.rid = r.doc_id ORDER BY r.distance',
         catalog_table, emb_col, k, id_col, catalog_table)
         USING query_vec;
 END;
@@ -623,8 +652,8 @@ COMMENT ON FUNCTION fractal_agent_recommend_diverse(text, text, float8[], int, t
   'fractal_feedback_report) then fractal_search_telemetry for the top-k, which '
   'the primitive applies repulsion to when diversify is enabled. score = '
   '1 - cosine_distance is real, from the primitive; item_id is the named '
-  'catalog id (id_col, cast to bigint) resolved from the 0-indexed scan '
-  'position via a ctid-row_number mapping. Returns (item_id, score). The '
+  'catalog id (id_col, cast to bigint) resolved from doc_id (a real ctid) '
+  'via a direct ctid predicate. Returns (item_id, score). The '
   'stub-era customer_id is dropped (diversify state is session-global, not '
   'per-customer). No LLM step -- pure retrieval. id_col must be bigint-'
   'castable. Note: diversify_enable is a session side effect the caller is '
@@ -730,13 +759,13 @@ CREATE FUNCTION fractal_agent_patient_deterioration_triage(
     query_vec       float8[],
     baseline_vec    float8[],
     current_vec     float8[],
-    cohort_doc_ids  int8[]  DEFAULT NULL,
+    cohort_doc_ids  text[]  DEFAULT NULL,
     k               int     DEFAULT 5,
     id_col          text    DEFAULT 'id'
 ) RETURNS TABLE(nearest_cohort_id bigint, cohort_distance float8, drift_distance float8, rationale text, cohort_matches jsonb)
 AS $$
 DECLARE
-    cohort         int8[];
+    cohort         text[];
     cohort_matches jsonb;
     cohort_dist    float8;
     traj_doc       int8;
@@ -771,15 +800,12 @@ BEGIN
             patient_table;
     END IF;
 
-    -- 1. Build the cohort. If cohort_doc_ids is NULL, use every row (mapped to
-    -- 0-indexed scan positions via the repo's row_number() recipe). Otherwise
-    -- the caller supplied a pre-built multi-predicate cohort. The row_number()
-    -- must be computed in a subquery before array_agg -- postgres rejects
-    -- array_agg(row_number() OVER (...)) directly.
+    -- 1. Build the cohort. If cohort_doc_ids is NULL, use every row's real
+    -- ctid; otherwise the caller supplied a pre-built multi-predicate
+    -- cohort (also ctid strings).
     IF cohort_doc_ids IS NULL THEN
         EXECUTE format(
-            'SELECT array_agg(idx) FROM (SELECT (row_number() OVER (ORDER BY ctid) - 1)::int8 AS idx FROM %I) s',
-            patient_table) INTO cohort;
+            'SELECT array_agg(ctid::text) FROM %I', patient_table) INTO cohort;
     ELSE
         cohort := cohort_doc_ids;
     END IF;
@@ -790,13 +816,14 @@ BEGIN
 
     -- 2. Real Analytics: up to k nearest patients in the cohort, ranked
     -- ascending by distance and resolved to the named patient id in one
-    -- query. nearest_cohort_id/cohort_distance below stay cohort_matches[0]
-    -- for backward compatibility.
+    -- query (via a direct ctid predicate, no row_number() mapping needed).
+    -- nearest_cohort_id/cohort_distance below stay cohort_matches[0] for
+    -- backward compatibility.
     EXECUTE format(
         'SELECT jsonb_agg(jsonb_build_object(''id'', x.idv, ''distance'', r.distance) ORDER BY r.distance) '
         'FROM fractal_hybrid_clinical_search(%L, %L, $1, $2, %L) r '
-        'JOIN (SELECT %I::bigint AS idv, row_number() OVER (ORDER BY ctid) - 1 AS doc_id FROM %I) x '
-        'ON x.doc_id = r.doc_id',
+        'JOIN (SELECT %I::bigint AS idv, ctid::text AS rid FROM %I) x '
+        'ON x.rid = r.doc_id',
         patient_table, vec_col, k, id_col, patient_table)
         USING query_vec, cohort
         INTO cohort_matches;
@@ -834,13 +861,13 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-COMMENT ON FUNCTION fractal_agent_patient_deterioration_triage(text, text, float8[], float8[], float8[], int8[], int, text) IS
-  'Patient-deterioration triage engine. Builds a cohort of 0-indexed scan '
-  'positions (from cohort_doc_ids if supplied, else every row), runs '
+COMMENT ON FUNCTION fractal_agent_patient_deterioration_triage(text, text, float8[], float8[], float8[], text[], int, text) IS
+  'Patient-deterioration triage engine. Builds a cohort of real row ids '
+  '(ctid, from cohort_doc_ids if supplied, else every row), runs '
   'fractal_hybrid_clinical_search for the k nearest cohort patients and '
   'fractal_search_trajectory for the baseline->current drift, resolves each '
-  'cohort match to its named patient id (id_col) via a ctid-row_number '
-  'mapping, and calls fractal_reason to synthesize a triage over the '
+  'cohort match to its named patient id (id_col) via a direct ctid '
+  'predicate, and calls fractal_reason to synthesize a triage over the '
   'nearest match and the drift. Returns (nearest_cohort_id, '
   'cohort_distance, drift_distance, rationale, cohort_matches), where '
   'cohort_matches is a jsonb array of up to k {"id":..,"distance":..} '
@@ -923,10 +950,13 @@ BEGIN
         PERFORM * FROM fractal_search_telemetry(catalog_table, emb_col, v, k);
     END LOOP;
 
-    -- 3. Capture the audit target's top doc_id and report negative feedback on
-    -- it. fractal_isolate_background takes the doc_id (the demo passes the k=1
-    -- telemetry doc_id as the handle).
-    SELECT doc_id INTO target_doc
+    -- 3. Capture the audit target's raw scan position and report negative
+    -- feedback on it. fractal_isolate_background/fsql_feedback_report takes
+    -- a result_handle -- core's own internal per-call result position, NOT
+    -- a database row -- so this uses scan_pos, not doc_id (which is now a
+    -- ctid; the two are different concepts since v2.0.25's ctid remap, see
+    -- fractal_search_telemetry's own doc comment).
+    SELECT scan_pos INTO target_doc
       FROM fractal_search_telemetry(catalog_table, emb_col, query_vec, 1);
     PERFORM fractal_isolate_background(target_doc);
 
@@ -946,8 +976,10 @@ COMMENT ON FUNCTION fractal_agent_feedback_audit(text, text, float8[], text, tex
   'Feedback-audit engine (pure analytics, NO LLM). Enables session-global '
   'repulsion (fractal_diversify_enable + set_params), warms the D_q rolling '
   'window by running fractal_search_telemetry over warmup_count varied vectors '
-  'pulled from warmup_table, captures the k=1 telemetry doc_id for the audit '
-  'target, calls fractal_isolate_background on it (the doc_id IS the handle), '
+  'pulled from warmup_table, captures the k=1 telemetry scan_pos for the audit '
+  'target, calls fractal_isolate_background on it (scan_pos IS the handle -- '
+  'not doc_id, which is a ctid, a different concept from the core engine''s '
+  'own internal result_handle), '
   'then returns (diversity_quotient, explanation) from fractal_detect_collapse '
   'and fractal_explain_result. Disables diversify itself -- a complete audit '
   'cycle (unlike fractal_agent_recommend_diverse, which leaves diversify on). '
@@ -977,7 +1009,7 @@ CREATE FUNCTION fractal_agent_schedule_workload(
 AS $$
 DECLARE
     refined      float8[];
-    nearest_doc  int8;
+    nearest_doc  text;
     nearest_dist float8;
     assigned     text;
     confidence   float8;
@@ -1017,11 +1049,11 @@ BEGIN
         RAISE EXCEPTION 'fractal_agent_schedule_workload: no node rows in %', node_table;
     END IF;
 
-    -- 3. Resolve the 0-indexed scan position to the named node id via ctid.
+    -- 3. Resolve doc_id (a real ctid) to the named node id -- a direct
+    -- predicate, no row_number() mapping needed.
     EXECUTE format(
-        'SELECT %I FROM (SELECT %I, row_number() OVER (ORDER BY ctid) - 1 AS doc_id FROM %I) x '
-        'WHERE x.doc_id = %L',
-        node_id_col, node_id_col, node_table, nearest_doc) INTO assigned;
+        'SELECT %I FROM %I WHERE ctid::text = %L',
+        node_id_col, node_table, nearest_doc) INTO assigned;
 
     -- 4. Real Cognition: reason a one-line placement rationale.
     rationale := fractal_reason(
@@ -1051,8 +1083,8 @@ COMMENT ON FUNCTION fractal_agent_schedule_workload(float8[], text, text, text, 
   'Workload-scheduling engine. Refines the task vector with fractal_search '
   '(iterations, population, diffusion_factor=2), then runs '
   'fractal_search_telemetry(node_table, node_emb_col, refined, 1) to find the '
-  'nearest node, resolves the 0-indexed scan position to the named node id '
-  '(node_id_col) via a ctid-row_number mapping, derives confidence = '
+  'nearest node, resolves its ctid doc_id to the named node id '
+  '(node_id_col) via a direct ctid predicate, derives confidence = '
   '1/(1+distance) from the real distance, and calls fractal_reason for a '
   'one-line placement rationale. Returns (assigned_node, confidence, '
   'rationale). Like fractal_agent_route_task but with the fractal_search '

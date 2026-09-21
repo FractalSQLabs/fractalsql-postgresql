@@ -1,8 +1,8 @@
 -- demo/benchmark-api-reference.sql
 --
 -- A `\timing on` pass over EVERY callable function in
--- sql/fractalsql--1.0.sql (34 functions: 9 core v1.0 + the 4-function
--- vectorizer group (create, process_queue, pause, resume) + 21 v2.x
+-- sql/fractalsql--1.0.sql (43 functions: 9 core v1.0 + the 4-function
+-- vectorizer group (create, process_queue, pause, resume) + 30 v2.x
 -- additions), grouped the same way that file groups them. Distinct
 -- from demo/benchmark.sql, which stays scoped to
 -- its own narrower Sniper/Scout/vectorizer comparison (see that file's
@@ -243,7 +243,7 @@ SELECT doc_id, distance FROM fractal_search_telemetry(
 
 SELECT doc_id, distance FROM fractal_hybrid_clinical_search(
     'bmk_corpus', 'emb_arr', ARRAY[0,0,0,0,0,0,0,0]::float8[],
-    (SELECT array_agg(id - 1) FROM bmk_corpus WHERE id <= 20), 3
+    (SELECT array_agg(ctid::text) FROM bmk_corpus WHERE id <= 20), 3
 );
 
 SELECT doc_id, distance FROM fractal_search_trajectory(
@@ -261,9 +261,82 @@ SELECT doc_id, distance FROM fractal_cross_modal_search(
     ARRAY[0.5,0.5]::float8[], ARRAY[-0.5,-0.5]::float8[], 0.5, 3
 );
 
+-- ------------------------------------------------------------------
+-- 10. New analytics + vector quantization (9 functions)
+-- ------------------------------------------------------------------
+\echo ''
+\echo '=== New analytics: fractal_change_point_detect, fractal_periodogram,'
+\echo 'fractal_state_fingerprint, fractal_cycle_detect,'
+\echo 'fractal_tda_persistence_diagram, fractal_vector_lp_distance,'
+\echo '_quantize_int8, _quantize_binary, _hamming_distance ==='
+
+-- Regime shift at t=50 (0.0 -> 2.0): expect a boundary near 50.
+SELECT fractal_change_point_detect(
+    (SELECT array_agg(CASE WHEN t < 50 THEN 0.0 ELSE 2.0 END
+                        + (random()-0.5)*0.1 ORDER BY t)
+       FROM generate_series(1, 100) t),
+    16
+) AS change_points;
+
+-- Pure 8-sample-period sine: expect the top bin at freq = 0.125 (1/8).
+SELECT freq, power FROM fractal_periodogram(
+    (SELECT array_agg(sin(2*pi()*t/8.0) ORDER BY t)
+       FROM generate_series(1, 64) t), 4
+);
+
+SELECT fractal_state_fingerprint(ARRAY[0.1, 0.0]::float8[], 64) AS fingerprint_a;
+
+-- Alternating A/B/A/B/A/B stream: the detector closes a cycle at index 2
+-- (length 2), re-arms, and closes again at index 4.
+WITH s AS (
+    SELECT fractal_state_fingerprint(ARRAY[0.1, 0.0]::float8[]) AS fa,
+           fractal_state_fingerprint(ARRAY[0.0, 0.1]::float8[]) AS fb
+)
+SELECT at_index, cycle_len FROM fractal_cycle_detect(
+    (SELECT array_agg(fp ORDER BY i) FROM
+        (SELECT i, CASE WHEN i % 2 = 0 THEN fa ELSE fb END AS fp
+           FROM generate_series(0, 5) i CROSS JOIN s) x),
+    0
+) AS cycles;
+
+-- Two tight 6-point clusters in dim 2: h0_bars should carry two
+-- dominant bars (one per cluster). betti1 is the graph cycle rank:
+-- each cluster forms a complete 6-point graph (15 edges) at this
+-- scale, so betti1 = 15+15-12+2 = 20 -- the informational
+-- over-count vs. true H1 the TDA section in docs/api-analytics.md
+-- documents (the triangles are not subtracted out).
+SELECT * FROM fractal_tda_persistence_diagram(
+    ARRAY[0,0, 0.1,0, 0,0.1, 0.1,0.1, 0.05,0.05, 0.1,0.05,
+          5,5, 5.1,5, 5,5.1, 5.1,5.1, 5.05,5.05, 5.1,5.05]::float8[], 2
+) AS tda;
+
+-- p=2 matches <-> mathematically (0.1414 for these vectors); p=0.5
+-- shown for contrast (not a proper metric, use explicitly). Note the
+-- bracket-style string literal casts DIRECTLY to fractal_vector -- it
+-- is NOT valid as an intermediate ::float8[] cast (PostgreSQL array
+-- literals for float8[] use {1,0,0} braces).
+SELECT
+    fractal_vector_lp_distance(
+        '[1,0,0]'::fractal_vector,
+        '[0.9,0.1,0]'::fractal_vector, 2.0::float8) AS lp2_distance,
+    fractal_vector_lp_distance(
+        '[1,0,0]'::fractal_vector,
+        '[0.9,0.1,0]'::fractal_vector, 0.5::float8) AS lp_half_distance;
+
+-- 4x / 32x compression: bit i = (v[i] >= 0), so a and b differ in
+-- exactly one sign bit -> Hamming distance 1.
+SELECT codes, scale
+FROM fractal_vector_quantize_int8('[1,-2,3]'::fractal_vector) AS q8;
+SELECT fractal_vector_quantize_binary('[1,-2,3]'::fractal_vector) AS binary_a,
+       fractal_vector_quantize_binary('[1,2,3]'::fractal_vector)  AS binary_b;
+SELECT fractal_vector_hamming_distance(
+    fractal_vector_quantize_binary('[1,-2,3]'::fractal_vector),
+    fractal_vector_quantize_binary('[1,2,3]'::fractal_vector)
+) AS hamming_distance;
+
 \echo ''
 \echo '================================================================'
-\echo 'Benchmark complete -- 34/34 functions exercised. Tables left in'
+\echo 'Benchmark complete -- 43/43 functions exercised. Tables left in'
 \echo 'place for inspection. Clean up with:'
 \echo '  DELETE FROM fractal_vectorizers WHERE source_table = ''bmk_docs'';'
 \echo '  DROP TABLE bmk_corpus, bmk_docs, bmk_modal;'

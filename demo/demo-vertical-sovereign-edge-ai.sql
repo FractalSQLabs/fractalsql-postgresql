@@ -90,15 +90,14 @@ SELECT fractal_dimension_boxcount(
 -- fractal_search (the "sniper search" in the abstract [-1,1]^5 space), then
 -- map that profile to a REAL node with fractal_search_telemetry. Generalized
 -- below by the shipped fractal_agent_schedule_workload preset, which folds
--- both steps together and reasons (and resolves the nearest node via ctid,
--- avoiding the raw form's doc_id+1 shortcut that only holds for an
--- never-UPDATEd table).
+-- both steps together and reasons. doc_id is a real ctid (v2.0.25), so this
+-- join is exact regardless of any UPDATE relocating a tuple.
 -- SELECT fractal_search(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], iterations => 50) AS ideal_profile;
 --
 -- SELECT n.node_name, t.distance
 -- FROM fractal_search_telemetry('vse_nodes', 'capability',
 --                               ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], 3) t
--- JOIN vse_nodes n ON n.id = t.doc_id + 1
+-- JOIN vse_nodes n ON n.ctid::text = t.doc_id
 -- ORDER BY t.distance;
 
 -- Productized preset: the shipped engine refines the task vector

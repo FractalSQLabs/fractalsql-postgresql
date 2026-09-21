@@ -123,7 +123,7 @@ Discovery demos do not.)
 
 ### Level 3: Autonomous Agency
 *Focus: Building self-correcting, safe, and predictive agentic workflows.*
-- **Goal**: Learn to use loop detection (DFA), trajectory prediction, and self-correcting SQL agents. The reference blueprint agents ship inline in each vertical demo; the sixteen installable agents are exercised by `demo-agents.sql` (which uses the real `CREATE EXTENSION fractalsql_agents` product path).
+- **Goal**: Learn to use loop detection (SimHash fingerprints + cycle detection), trajectory prediction, and self-correcting SQL agents. The reference blueprint agents ship inline in each vertical demo; the sixteen installable agents are exercised by `demo-agents.sql` (which uses the real `CREATE EXTENSION fractalsql_agents` product path).
 - **Demos**:
   ```bash
   # DevOps: Autonomous Incident Triage & Self-Healing
@@ -134,6 +134,8 @@ Discovery demos do not.)
   docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/demo-vertical-agentic-fintech-mcts.sql
   # Cyber: Threat Detection & Triage
   docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/demo-vertical-cybersecurity-threat-detection.sql
+  # Edge Swarm: quantized swarm memory, loop detection, task routing (no reasoning needed)
+  docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/demo-vertical-agentic-edge-swarm.sql
   # The sixteen installable agents (requires fractalsql_agents, already enabled)
   docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/demo-agents.sql
   ```
@@ -145,6 +147,8 @@ does and when to use it.
 
 `/demo/` also contains `demo.sql` (the base walkthrough), `response-modes.sql`,
 `demo-text-to-sql.sql`, the `text-to-sql-spike-*.sql` series, `demo-fractal-vector.sql`,
+`demo-vertical-biotech-genomics.sql` (TDA + L_p on a cyclic peptide and
+single-cell expression profiles, no reasoning needed),
 `benchmark.sql`, and `benchmark-api-reference.sql`. Run any the same way.
 
 ---

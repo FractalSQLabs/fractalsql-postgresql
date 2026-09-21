@@ -10,8 +10,9 @@
 -- spike; failed-auth rate barely moves -- this isn't a brute-force
 -- attempt, it's a stealthier C2 beaconing profile). Diverse
 -- traffic-profile clustering for threat hunting, a zone-restricted
--- search, current-vs-baseline drift detection, and connection-rate
--- regime-change detection via DFA.
+-- search, current-vs-baseline drift detection, connection-rate
+-- regime-change detection via DFA, and a periodogram over the
+-- post-shift traffic isolating the beacon interval itself.
 --
 -- Prerequisites: extension installed (sections 0-4 need nothing else).
 -- Section 6 calls fractal_reason() -- see ../docs/reasoning-setup.md.
@@ -120,15 +121,14 @@ SELECT fractal_diversify_disable();
 -- clinically-named function here -- same composition
 -- demo-vertical-fleet-logistics.sql uses for its route-3 cohort).
 --
--- doc_id is the row's 0-based position in the search's own internal
--- table scan, NOT id - 1 -- those only coincide for a table that has
--- never been UPDATEd (a plain heap scan then visits rows in insertion
--- order). vcy_dmz_cohort was built by filtering the ALREADY-UPDATEd
--- vcy_hosts (host 7's compromise UPDATE relocated its tuple to the
--- end of the heap, and host 7 is itself in the dmz zone), so its scan
--- order no longer matches id order. Map doc_id back to id via the
--- same ctid (physical scan) order the search actually used, rather
--- than assuming doc_id + 1 = id.
+-- doc_id is the row's real ctid (v2.0.25), NOT id - 1 -- those only
+-- coincide for a table that has never been UPDATEd (a plain heap scan
+-- then visits rows in insertion order). vcy_dmz_cohort was built by
+-- filtering the ALREADY-UPDATEd vcy_hosts (host 7's compromise UPDATE
+-- relocated its tuple to the end of the heap, and host 7 is itself in
+-- the dmz zone), so its scan order no longer matches id order. Map
+-- doc_id back to id via a direct ctid predicate, rather than assuming
+-- doc_id + 1 = id.
 -- ------------------------------------------------------------------
 \echo ''
 \echo '=== 3. Zone-restricted search: DMZ hosts only ==='
@@ -140,8 +140,7 @@ SELECT * FROM vcy_hosts WHERE zone = 'dmz';
 SELECT h.hostname, t.distance
 FROM fractal_search_telemetry('vcy_dmz_cohort', 'current',
                               ARRAY[0.3, 0.3, 0.3, 0.0]::float8[], 5) t
-JOIN (SELECT *, row_number() OVER (ORDER BY ctid) - 1 AS doc_id
-        FROM vcy_dmz_cohort) h ON h.doc_id = t.doc_id
+JOIN vcy_dmz_cohort h ON h.ctid::text = t.doc_id
 ORDER BY t.distance;
 
 -- ------------------------------------------------------------------
@@ -229,6 +228,26 @@ FROM fractal_agent_track_anomaly(
     (SELECT current::float8[]  FROM vcy_hosts WHERE id = 7),
     (SELECT array_agg(conn_rate ORDER BY t) FROM vcy_conn_series),
     5, 'id');
+
+-- ------------------------------------------------------------------
+-- 5b. fractal_periodogram: DFA above characterizes the CHANGE in
+-- long-range structure at t=220; this characterizes what the post-shift
+-- traffic actually IS -- a regular, higher-frequency beaconing interval,
+-- the signature C2 checks in for rather than genuinely noisy traffic.
+-- Restricted to the post-t=220 window (the beaconing regime itself);
+-- run over the whole series the pre-shift noise floor would dilute the
+-- peak. Citation: Schuster, A. (1898), "On the investigation of hidden
+-- periodicities...", Terrestrial Magnetism -- the classical periodogram,
+-- computed here via direct DFT.
+-- ------------------------------------------------------------------
+\echo ''
+\echo '=== 5b. fractal_periodogram: beacon-interval detection, host 7 post-shift traffic ==='
+SELECT freq, power
+FROM fractal_periodogram(
+    (SELECT array_agg(conn_rate ORDER BY t) FROM vcy_conn_series WHERE t >= 220),
+    4
+)
+ORDER BY power DESC;
 
 -- ------------------------------------------------------------------
 -- 6. Reasoning: the SOC triage narrative for host 7 is now split across

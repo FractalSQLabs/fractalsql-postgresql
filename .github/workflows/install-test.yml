@@ -109,7 +109,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.11"
+          test "\$VERSION" = "2.0.17"
           echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -130,6 +130,11 @@ jobs:
               (echo > /dev/tcp/127.0.0.1/18080) >/dev/null 2>&1 && break
               sleep 0.2
           done
+          # Fail fast, with the cause, if the mock LLM never came up --
+          # otherwise the wizard's reasoning round-trip fails later with
+          # an opaque "didn't reach the mock reply".
+          (echo > /dev/tcp/127.0.0.1/18080) 2>/dev/null \\
+              || { echo "FATAL: mock LLM never came up on 127.0.0.1:18080 (python3 failed to start/bind)"; exit 1; }
 
           # fractalsql.* GUCs are registered by _PG_init(), which runs
           # lazily on first dlopen -- a backend that has never called a
@@ -240,6 +245,11 @@ jobs:
               (echo > /dev/tcp/127.0.0.1/18080) >/dev/null 2>&1 && break
               sleep 0.2
           done
+          # Fail fast, with the cause, if the mock LLM never came up --
+          # otherwise the wizard's reasoning round-trip fails later with
+          # an opaque "didn't reach the mock reply".
+          (echo > /dev/tcp/127.0.0.1/18080) 2>/dev/null \\
+              || { echo "FATAL: mock LLM never came up on 127.0.0.1:18080 (python3 failed to start/bind)"; exit 1; }
 
           # Peer auth as the postgres OS user is easy_install.sh's own
           # "direct connection" path (resolve_psql_as() tries this before
@@ -328,7 +338,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.11"
+          test "\$VERSION" = "2.0.17"
           echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -349,6 +359,11 @@ jobs:
               (echo > /dev/tcp/127.0.0.1/18080) >/dev/null 2>&1 && break
               sleep 0.2
           done
+          # Fail fast, with the cause, if the mock LLM never came up --
+          # otherwise the wizard's reasoning round-trip fails later with
+          # an opaque "didn't reach the mock reply".
+          (echo > /dev/tcp/127.0.0.1/18080) 2>/dev/null \\
+              || { echo "FATAL: mock LLM never came up on 127.0.0.1:18080 (python3 failed to start/bind)"; exit 1; }
 
           # fractalsql.* GUCs are registered by _PG_init(), which runs
           # lazily on first dlopen -- a backend that has never called a
@@ -432,7 +447,7 @@ jobs:
           VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.11"
+          test "${VERSION}" = "2.0.17"
 
           # Search works with no further config.
           psql -d postgres -Atc \
@@ -641,8 +656,23 @@ jobs:
       - name: Run easy_install.ps1 against a mock LLM
         shell: pwsh
         run: |
-          Start-Process python -ArgumentList 'scripts\ci\mock_llm.py','18080' -WindowStyle Hidden
+          # Fail fast, with the cause, if the mock LLM never comes up --
+          # otherwise the wizard's reasoning round-trip fails later with
+          # an opaque "didn't reach the mock reply".
+          $mockProc = Start-Process python -ArgumentList 'scripts\ci\mock_llm.py','18080' -WindowStyle Hidden -PassThru `
+              -RedirectStandardOutput mock-stdout.txt -RedirectStandardError mock-stderr.txt
           Start-Sleep -Seconds 2
+          if ($mockProc.HasExited) {
+              Write-Host "FATAL: mock_llm.py exited immediately with code $($mockProc.ExitCode):"
+              Get-Content mock-stderr.txt -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+              exit 1
+          }
+          $listener = Get-NetTCPConnection -LocalPort 18080 -State Listen -ErrorAction SilentlyContinue
+          if (-not $listener) {
+              Write-Host "FATAL: mock LLM not listening on 127.0.0.1:18080 (python alive but never bound the port):"
+              Get-Content mock-stderr.txt -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+              exit 1
+          }
 
           # Deliberately no -PgDir: this exercises the script's own
           # registry-based auto-detection (Get-PgInstalls) against the

@@ -179,7 +179,7 @@ static T2SAllowedStmts t2s_allowed_stmts_mode(void);
 static char *fractal_text_to_sql_internal(const char *question, ArrayType *table_names, char *feedback);
 
 #define FSQL_EDITION "Community"
-#define FSQL_VERSION "2.0.11"
+#define FSQL_VERSION "2.0.17"
 
 /* B4-extended (H3) — supply-side DoS guards.
  *
@@ -2896,47 +2896,105 @@ fractal_agent_trajectory_predict(PG_FUNCTION_ARGS)
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
-/* Detect a tight repetition cycle in a discrete-valued series: the smallest
- * period p in [1, max_p] such that series[i] == series[i+p] for every i in
- * [0, n-p). Returns the period, or 0 if no such p. Exact equality is correct
- * here because the entries are integer state hashes cast to double (well
- * within 2^53), so a real loop is bit-identical. The DFA alpha>0.9 threshold
- * in fractal_agent_detect_loop catches drift-to-chaos loops but misses clean
- * low-period toggles (a 12345<->67890 cycle gives alpha~0.1); this catches
- * those. */
-static int
-detect_short_period(const double *s, int n, int max_p)
-{
-    if (max_p > n / 2) max_p = n / 2;
-    for (int p = 1; p <= max_p; p++) {
-        bool ok = true;
-        for (int i = 0; i < n - p; i++) {
-            if (s[i] != s[i + p]) { ok = false; break; }
-        }
-        if (ok) return p;
-    }
-    return 0;
-}
-
+/* fractal_agent_detect_loop (rewritten for v2.0.25): the old kernel ran
+ * detect_short_period (a brute-force O(n*max_p) exact-equality scan) over a
+ * caller-supplied int8[] of exact state hashes, plus a DFA-alpha>0.9
+ * heuristic over those same hash values. Two real problems with that: exact
+ * equality only catches bit-identical repeats (misses a "near enough"
+ * wobble), and DFA over arbitrary hash values has no numerical continuity to
+ * begin with -- it was really just borrowing DFA as a crude randomness
+ * detector, not a principled choice. This version takes the actual state
+ * vectors (state_log, flattened row-major: n_states * dim doubles, matching
+ * this file's existing corpus-flattening convention -- see spi_scan_corpus)
+ * and:
+ *   - fingerprints each state via fsql_state_fingerprint (SimHash) and
+ *     streams the fingerprints through fsql_cycle_detect_init/_feed (Brent's),
+ *     which tolerates near-identical states within hamming_threshold instead
+ *     of requiring byte-exact repeats -- replaces detect_short_period.
+ *   - runs DFA over each state's L2 norm across the trajectory instead of
+ *     over hash values -- a real, continuous drift-to-chaos signal (magnitude
+ *     wander over time), still flagging alpha > 0.9 as a random-walk-like
+ *     loop the fingerprint-cycle check can miss if the wander never closes
+ *     within hamming_threshold. */
 PG_FUNCTION_INFO_V1(fractal_agent_detect_loop);
 
 Datum
 fractal_agent_detect_loop(PG_FUNCTION_ARGS)
 {
-    ArrayType *log_arr = PG_GETARG_ARRAYTYPE_P(0);
-    int n = ARR_DIMS(log_arr)[0];
-    double *series = palloc(n * sizeof(double));
-    /* Convert hashes (int64) to doubles */
-    Datum *ds; bool *nulls; int n2;
-    deconstruct_array(log_arr, INT8OID, sizeof(int64), INT8PASSBYVAL, 'i', &ds, &nulls, &n2);
-    for (int i = 0; i < n2; i++) series[i] = (double) DatumGetInt64(ds[i]);
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
+        ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                        errmsg("fractalsql: agent_id, state_log, and dim are required")));
 
-    double alpha;
-    fsql_dimension_dfa(series, (size_t) n2, &alpha);
-    double drift;
-    double r_a;
-    double b_a;
-    fsql_dimension_drift(series, (size_t) n2, 16, &drift, &r_a, &b_a);
+    char      *agent_id = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    ArrayType *log_arr  = PG_GETARG_ARRAYTYPE_P(1);
+    int32      dim      = PG_GETARG_INT32(2);
+    int32      n_bits   = PG_ARGISNULL(3) ? 64   : PG_GETARG_INT32(3);
+    float8     seed     = PG_ARGISNULL(4) ? 42.0 : PG_GETARG_FLOAT8(4);
+    int32      hamming_threshold = PG_ARGISNULL(5) ? 0 : PG_GETARG_INT32(5);
+
+    if (dim <= 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: dim must be > 0")));
+    if (n_bits <= 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: n_bits must be > 0")));
+    if (hamming_threshold < 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: hamming_threshold must be >= 0")));
+
+    int     total;
+    double *flat = float8_array_to_doubles(log_arr, &total);
+    if (dim == 0 || total % dim != 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: state_log length (%d) is not a multiple of dim (%d)",
+                               total, dim)));
+    int n_states = total / dim;
+    if (n_states < 2)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: state_log must contain at least 2 states")));
+
+    /* Secondary signal: DFA over each state's L2 norm across the trajectory. */
+    double *norms = palloc((Size) n_states * sizeof(double));
+    for (int i = 0; i < n_states; i++) {
+        double sumsq = 0.0;
+        for (int j = 0; j < dim; j++) {
+            double x = flat[(Size) i * dim + j];
+            sumsq += x * x;
+        }
+        norms[i] = sqrt(sumsq);
+    }
+    double alpha = 0.0;
+    fsql_dimension_dfa(norms, (size_t) n_states, &alpha);
+
+    /* Primary signal: fingerprint each state and stream through Brent's. */
+    size_t   n_bytes = ((size_t) n_bits + 7) / 8;
+    uint8_t *fp       = palloc(n_bytes);
+    fsql_cycle_state_t cs;
+    int rc = fsql_cycle_detect_init(&cs, n_bytes, (size_t) hamming_threshold);
+    if (rc != FSQL_OK)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: fsql_cycle_detect_init rc=%d", rc)));
+
+    bool loop_found = false;
+    for (int i = 0; i < n_states; i++) {
+        rc = fsql_state_fingerprint(flat + (Size) i * dim, (size_t) dim,
+                                    (size_t) n_bits, seed, fp);
+        if (rc != FSQL_OK) {
+            fsql_cycle_detect_free(&cs);
+            ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                            errmsg("fractalsql: fsql_state_fingerprint rc=%d", rc)));
+        }
+        int    detected = 0;
+        size_t cycle_len = 0;
+        rc = fsql_cycle_detect_feed(&cs, fp, &detected, &cycle_len);
+        if (rc != FSQL_OK) {
+            fsql_cycle_detect_free(&cs);
+            ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                            errmsg("fractalsql: fsql_cycle_detect_feed rc=%d", rc)));
+        }
+        if (detected) { loop_found = true; break; }
+    }
+    fsql_cycle_detect_free(&cs);
 
     TupleDesc tupdesc;
     get_call_result_type(fcinfo, NULL, &tupdesc);
@@ -2944,13 +3002,9 @@ fractal_agent_detect_loop(PG_FUNCTION_ARGS)
 
     Datum values[3];
     bool tupnulls[3] = { false, false, false };
-    /* Flag a loop if EITHER the DFA scaling exponent exceeds 0.9 (drift-to-
-     * chaos / random-walk-like cycling) OR a tight discrete period was found
-     * (clean toggles like 12345<->67890 that the DFA scores as low alpha). */
-    int period = detect_short_period(series, n2, n2 / 4);
-    values[0] = CStringGetTextDatum("monitor");
+    values[0] = CStringGetTextDatum(agent_id);
     values[1] = Float8GetDatum(alpha);
-    values[2] = BoolGetDatum(alpha > 0.9 || period > 0);
+    values[2] = BoolGetDatum(alpha > 0.9 || loop_found);
 
     HeapTuple tuple = heap_form_tuple(tupdesc, values, tupnulls);
 
@@ -4195,6 +4249,297 @@ fractal_dimension_drift(PG_FUNCTION_ARGS)
     PG_RETURN_DATUM(cstring_json_to_jsonb(buf));
 }
 
+/* ----- Change-Point Detection / Periodogram (v2.0.25) --------------- */
+
+PG_FUNCTION_INFO_V1(fractal_change_point_detect);
+Datum
+fractal_change_point_detect(PG_FUNCTION_ARGS)
+{
+    int     n;
+    double *series     = float8_array_to_doubles(PG_GETARG_ARRAYTYPE_P(0), &n);
+    int32   window      = PG_GETARG_INT32(1);
+    float8  threshold   = PG_GETARG_FLOAT8(2);
+    int32   max_points  = PG_GETARG_INT32(3);
+    if (window <= 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: win must be > 0")));
+    if (max_points <= 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: max_points must be > 0")));
+
+    size_t *out_indices = palloc((Size) max_points * sizeof(size_t));
+    size_t  out_n;
+    int rc = fsql_change_point_detect(series, (size_t) n, (size_t) window, threshold,
+                                      out_indices, (size_t) max_points, &out_n);
+    if (rc != FSQL_OK)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("fractalsql: fractal_change_point_detect rc=%d "
+                        "(need n >= 2*win, threshold > 0)", rc)));
+
+    Datum *elems = palloc((Size) out_n * sizeof(Datum));
+    for (size_t i = 0; i < out_n; i++)
+        elems[i] = Int64GetDatum((int64) out_indices[i]);
+    ArrayType *result = construct_array(elems, (int) out_n, INT8OID,
+                                        sizeof(int64), INT8PASSBYVAL, 'i');
+    PG_RETURN_ARRAYTYPE_P(result);
+}
+
+static Datum
+periodogram_srf(FunctionCallInfo fcinfo, const double *series, int n, int32 max_peaks)
+{
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    if (rsinfo == NULL || !(rsinfo->allowedModes & SFRM_Materialize))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("fractalsql: set-valued function called in context "
+                        "that cannot accept a set")));
+
+    MemoryContext per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+    MemoryContext oldcontext    = MemoryContextSwitchTo(per_query_ctx);
+
+    TupleDesc tupdesc;
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("fractalsql: function returning record called "
+                               "in context that cannot accept type record")));
+    tupdesc = BlessTupleDesc(tupdesc);
+
+    Tuplestorestate *tupstore = tuplestore_begin_heap(false, false, work_mem);
+    rsinfo->returnMode = SFRM_Materialize;
+    rsinfo->setResult  = tupstore;
+    rsinfo->setDesc    = tupdesc;
+
+    MemoryContextSwitchTo(oldcontext);
+
+    double *out_freqs = palloc((Size) max_peaks * sizeof(double));
+    double *out_power = palloc((Size) max_peaks * sizeof(double));
+    size_t  out_n_peaks;
+    int rc = fsql_periodogram(series, (size_t) n, out_freqs, out_power,
+                              (size_t) max_peaks, &out_n_peaks);
+    if (rc != FSQL_OK)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("fractalsql: fractal_periodogram rc=%d (need n >= 4)", rc)));
+
+    for (size_t i = 0; i < out_n_peaks; i++)
+    {
+        Datum values[2];
+        bool  nulls[2] = { false, false };
+        values[0] = Float8GetDatum(out_freqs[i]);
+        values[1] = Float8GetDatum(out_power[i]);
+        tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+    }
+    return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(fractal_periodogram);
+Datum
+fractal_periodogram(PG_FUNCTION_ARGS)
+{
+    int     n;
+    double *series    = float8_array_to_doubles(PG_GETARG_ARRAYTYPE_P(0), &n);
+    int32   max_peaks = PG_GETARG_INT32(1);
+    if (max_peaks <= 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: max_peaks must be > 0")));
+    return periodogram_srf(fcinfo, series, n, max_peaks);
+}
+
+/* ----- State Fingerprinting / Cycle Detection (v2.0.25) -------------- */
+
+PG_FUNCTION_INFO_V1(fractal_state_fingerprint);
+Datum
+fractal_state_fingerprint(PG_FUNCTION_ARGS)
+{
+    int     dim;
+    double *v      = float8_array_to_doubles(PG_GETARG_ARRAYTYPE_P(0), &dim);
+    int32   n_bits = PG_GETARG_INT32(1);
+    float8  seed   = PG_GETARG_FLOAT8(2);
+    if (n_bits <= 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: n_bits must be > 0")));
+
+    size_t  n_bytes = ((size_t) n_bits + 7) / 8;
+    bytea  *out = (bytea *) palloc(n_bytes + VARHDRSZ);
+    SET_VARSIZE(out, n_bytes + VARHDRSZ);
+    int rc = fsql_state_fingerprint(v, (size_t) dim, (size_t) n_bits, seed,
+                                    (uint8_t *) VARDATA(out));
+    if (rc != FSQL_OK)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("fractalsql: fractal_state_fingerprint rc=%d", rc)));
+    PG_RETURN_BYTEA_P(out);
+}
+
+/* Collapses fsql_cycle_detect_init/_feed/_free's stateful C API into a
+ * single SQL call: feeds every fingerprint in the caller-supplied array
+ * (in order) through one cycle detector, returning one row per cycle
+ * closure (the detector re-arms after each closure, so more than one
+ * independent cycle in the same stream is caught, matching the core's
+ * documented semantics). Every fingerprint must be the same length
+ * (the first element's length sets n_bytes for the whole call). */
+PG_FUNCTION_INFO_V1(fractal_cycle_detect);
+Datum
+fractal_cycle_detect(PG_FUNCTION_ARGS)
+{
+    ArrayType *fp_arr = PG_GETARG_ARRAYTYPE_P(0);
+    int32      hamming_threshold = PG_GETARG_INT32(1);
+    if (hamming_threshold < 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: hamming_threshold must be >= 0")));
+
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    if (rsinfo == NULL || !(rsinfo->allowedModes & SFRM_Materialize))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("fractalsql: set-valued function called in context "
+                        "that cannot accept a set")));
+
+    MemoryContext per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+    MemoryContext oldcontext    = MemoryContextSwitchTo(per_query_ctx);
+
+    TupleDesc tupdesc;
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("fractalsql: function returning record called "
+                               "in context that cannot accept type record")));
+    tupdesc = BlessTupleDesc(tupdesc);
+
+    Tuplestorestate *tupstore = tuplestore_begin_heap(false, false, work_mem);
+    rsinfo->returnMode = SFRM_Materialize;
+    rsinfo->setResult  = tupstore;
+    rsinfo->setDesc    = tupdesc;
+
+    MemoryContextSwitchTo(oldcontext);
+
+    Datum *fp_datums;
+    bool  *fp_nulls;
+    int    fp_n;
+    deconstruct_array(fp_arr, BYTEAOID, -1, false, 'i', &fp_datums, &fp_nulls, &fp_n);
+    if (fp_n == 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: fingerprints array must not be empty")));
+
+    bytea *first = DatumGetByteaPP(fp_datums[0]);
+    size_t n_bytes = (size_t) VARSIZE_ANY_EXHDR(first);
+
+    fsql_cycle_state_t cs;
+    int rc = fsql_cycle_detect_init(&cs, n_bytes, (size_t) hamming_threshold);
+    if (rc != FSQL_OK)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: fsql_cycle_detect_init rc=%d", rc)));
+
+    for (int i = 0; i < fp_n; i++)
+    {
+        if (fp_nulls[i])
+            ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                            errmsg("fractalsql: fingerprints array must not contain NULLs")));
+        bytea *fp = DatumGetByteaPP(fp_datums[i]);
+        if ((size_t) VARSIZE_ANY_EXHDR(fp) != n_bytes)
+            ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                            errmsg("fractalsql: every fingerprint must be the same length "
+                                   "(index 0 was %zu bytes, index %d is %d)",
+                                   n_bytes, i, (int) VARSIZE_ANY_EXHDR(fp))));
+
+        int    detected = 0;
+        size_t cycle_len = 0;
+        rc = fsql_cycle_detect_feed(&cs, (const uint8_t *) VARDATA_ANY(fp),
+                                    &detected, &cycle_len);
+        if (rc != FSQL_OK)
+        {
+            fsql_cycle_detect_free(&cs);
+            ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                            errmsg("fractalsql: fsql_cycle_detect_feed rc=%d", rc)));
+        }
+        if (detected)
+        {
+            Datum values[2];
+            bool  nulls[2] = { false, false };
+            values[0] = Int32GetDatum(i);
+            values[1] = Int64GetDatum((int64) cycle_len);
+            tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+        }
+    }
+    fsql_cycle_detect_free(&cs);
+    return (Datum) 0;
+}
+
+/* ----- Topological Data Analysis (v2.0.25) ---------------------------
+ *
+ * SCOPE NOTE, read before using: the 0-dim persistence diagram
+ * (h0_bars, birth/death) is an EXACT, complete computation -- single-
+ * linkage clustering over the point cloud is mathematically equivalent
+ * to 0-dim persistent homology of the Vietoris-Rips filtration. The
+ * betti1 number is NOT full simplicial H1 of that filtration -- it is
+ * the bare 1-skeleton GRAPH's cycle rank (|E| - |V| + components at
+ * max_thresh), which over-counts true H1 whenever a filled triangle
+ * exists in the data. A full simplicial H1 (what Ripser/GUDHI compute
+ * via boundary-matrix reduction) is deliberately out of scope -- no
+ * reference oracle exists in this codebase to validate a from-scratch
+ * implementation of that against, and a subtly-wrong TDA kernel is
+ * worse than an honestly-scoped one. Pass max_dim=0 to skip betti1
+ * entirely (NULL) when only the exact 0-dim bars are wanted.
+ * ---------------------------------------------------------------- */
+
+PG_FUNCTION_INFO_V1(fractal_tda_persistence_diagram);
+Datum
+fractal_tda_persistence_diagram(PG_FUNCTION_ARGS)
+{
+    int     flat_n;
+    double *points = float8_array_to_doubles(PG_GETARG_ARRAYTYPE_P(0), &flat_n);
+    int32   dim         = PG_GETARG_INT32(1);
+    int32   max_dim     = PG_GETARG_INT32(2);
+    float8  max_thresh  = PG_GETARG_FLOAT8(3);
+    int32   max_h0_bars = PG_GETARG_INT32(4);
+    if (dim <= 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: dim must be > 0")));
+    if (flat_n % dim != 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: points length (%d) must be a multiple of dim (%d)",
+                               flat_n, dim)));
+    if (max_h0_bars <= 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: max_h0_bars must be > 0")));
+    size_t n_points = (size_t) (flat_n / dim);
+
+    fsql_tda_bar_t *h0_bars = palloc((Size) max_h0_bars * sizeof(fsql_tda_bar_t));
+    size_t out_n_h0_bars;
+    size_t out_betti1;
+    int rc = fsql_tda_persistence_diagram(points, n_points, (size_t) dim,
+                                          (int) max_dim, max_thresh,
+                                          h0_bars, (size_t) max_h0_bars,
+                                          &out_n_h0_bars,
+                                          max_dim >= 1 ? &out_betti1 : NULL);
+    if (rc != FSQL_OK)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("fractalsql: fractal_tda_persistence_diagram rc=%d "
+                        "(2 <= n_points <= %d, max_dim in {0,1}, max_thresh > 0)",
+                        rc, FSQL_TDA_MAX_POINTS)));
+
+    StringInfoData bars_json;
+    initStringInfo(&bars_json);
+    appendStringInfoChar(&bars_json, '[');
+    for (size_t i = 0; i < out_n_h0_bars; i++)
+        appendStringInfo(&bars_json, "%s{\"birth\":%.10f,\"death\":%.10f}",
+                         i > 0 ? "," : "", h0_bars[i].birth, h0_bars[i].death);
+    appendStringInfoChar(&bars_json, ']');
+
+    TupleDesc tupdesc;
+    get_call_result_type(fcinfo, NULL, &tupdesc);
+    tupdesc = BlessTupleDesc(tupdesc);
+
+    Datum values[2];
+    bool  nulls[2] = { false, max_dim < 1 };
+    values[0] = cstring_json_to_jsonb(bars_json.data);
+    values[1] = max_dim >= 1 ? Int64GetDatum((int64) out_betti1) : (Datum) 0;
+
+    HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+    PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
 /* ----- Portfolio Optimization -------------------------------------- */
 
 /* diffusion_mode text -> the FSQL_SFS_DIFFUSE_* int the core expects
@@ -4617,6 +4962,85 @@ fractal_optimize_portfolio_multimodal_pareto(PG_FUNCTION_ARGS)
     PG_RETURN_DATUM(cstring_json_to_jsonb(out.data));
 }
 
+/* fractal_optimize_subset's SQL-level objective, hardcoded to value-
+ * weighted allocation: maximize sum(weights[i] * item_values[i]).
+ * fsql_optimize_subset's callback contract is "lower is better" (see
+ * include/fractalsql_sql.h), so this returns the NEGATED sum, same
+ * convention as fractal_optimize_portfolio's own internal -(ret/risk)
+ * objective -- the SQL wrapper below negates the reported score back
+ * before returning it to the caller. */
+static double
+subset_value_weighted_objective(const double *weights, size_t n, void *ctx)
+{
+    const double *item_values = (const double *) ctx;
+    double total = 0.0;
+    for (size_t i = 0; i < n; i++)
+        total += weights[i] * item_values[i];
+    return -total;
+}
+
+PG_FUNCTION_INFO_V1(fractal_optimize_subset);
+Datum
+fractal_optimize_subset(PG_FUNCTION_ARGS)
+{
+    /* Not STRICT (prev_weights/turnover_penalty/seed below are legitimately
+     * NULLable -- STRICT would short-circuit to a NULL result without ever
+     * running this code, making those PG_ARGISNULL checks dead), so the
+     * genuinely-required args need their own explicit NULL guards here. */
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("fractalsql: item_values, upper_bounds, and k must not be NULL")));
+
+    int     n_items;
+    double *item_values = float8_array_to_doubles(PG_GETARG_ARRAYTYPE_P(0), &n_items);
+    int     ub_n;
+    double *upper_bounds = float8_array_to_doubles(PG_GETARG_ARRAYTYPE_P(1), &ub_n);
+    int32   k = PG_GETARG_INT32(2);
+    double *prev_weights = NULL;
+    if (!PG_ARGISNULL(3))
+    {
+        int pw_n;
+        prev_weights = float8_array_to_doubles(PG_GETARG_ARRAYTYPE_P(3), &pw_n);
+        if (pw_n != n_items)
+            ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                            errmsg("fractalsql: prev_weights length (%d) must match "
+                                   "item_values length (%d)", pw_n, n_items)));
+    }
+    double  turnover_penalty = PG_ARGISNULL(4) ? 0.0 : PG_GETARG_FLOAT8(4);
+    int64   seed = PG_ARGISNULL(5) ? 0 : PG_GETARG_INT64(5);
+
+    if (ub_n != n_items)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: upper_bounds length (%d) must match "
+                               "item_values length (%d)", ub_n, n_items)));
+    if (k <= 0 || k > n_items)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: k must satisfy 1 <= k <= n_items (%d)", n_items)));
+
+    double *weights = palloc((Size) n_items * sizeof(double));
+    double  score;
+    int rc = fsql_optimize_subset(subset_value_weighted_objective, item_values,
+                                  (size_t) n_items, (size_t) k,
+                                  NULL /* lower_bounds: portfolio default [0,1] */,
+                                  upper_bounds, prev_weights, turnover_penalty,
+                                  (uint64_t) seed, weights, &score);
+    if (rc != FSQL_OK)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("fractalsql: fractal_optimize_subset rc=%d "
+                        "(check upper_bounds in [0,1], sum of k largest "
+                        "upper_bounds >= 1.0)", rc)));
+
+    StringInfoData out;
+    initStringInfo(&out);
+    appendStringInfo(&out, "{\"score\":%.10f,\"weights\":[", -score);
+    for (int i = 0; i < n_items; i++)
+        appendStringInfo(&out, "%s%.10f", i > 0 ? "," : "", weights[i]);
+    appendStringInfoString(&out, "]}");
+    PG_RETURN_DATUM(cstring_json_to_jsonb(out.data));
+}
+
 /* ----- Domain-specific geometric/topological metrics ---------------- */
 
 PG_FUNCTION_INFO_V1(fractal_vascular_network);
@@ -4934,6 +5358,108 @@ fractal_mine_topology_negatives(PG_FUNCTION_ARGS)
 /* their row indices and distances" primitive, which the three        */
 /* compositions below build on.                                       */
 /*                                                                    */
+/* fractal_search_telemetry and fractal_hybrid_clinical_search report */
+/* doc_id as ctid (text), not the 0-indexed scan position their five   */
+/* telemetry_topk_srf siblings below still use -- ctid is a real,      */
+/* stable-for-the-transaction Postgres row locator that survives an    */
+/* UPDATE relocating a tuple between the search and a followup lookup, */
+/* where a scan-position integer silently points at the wrong row.     */
+/* Kept as text (not the native tid type) to match this file's own     */
+/* established ctid convention (see spi_scan_corpus_internal's         */
+/* want_ids path and build_retrieval_context above) rather than        */
+/* introduce a second representation. telemetry_topk_srf_ctid is a     */
+/* separate function, not a doc_id_map-style parameter on the existing */
+/* telemetry_topk_srf, so the other five callers below (which report   */
+/* an int8 scan position deliberately -- e.g. fractal_agent_feedback_  */
+/* audit's use of fractal_search_telemetry to obtain a result_handle   */
+/* for fractal_isolate_background, which is fsql_feedback_report's own */
+/* internal per-call result position, not a database row at all) are   */
+/* untouched by this change. */
+static Datum
+telemetry_topk_srf_ctid(FunctionCallInfo fcinfo,
+                        const double *corpus, size_t n_rows, size_t dim,
+                        const double *query, int32 k,
+                        const char **rowid_map)
+{
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    if (rsinfo == NULL || !(rsinfo->allowedModes & SFRM_Materialize))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("fractalsql: set-valued function called in context "
+                        "that cannot accept a set")));
+
+    MemoryContext per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+    MemoryContext oldcontext    = MemoryContextSwitchTo(per_query_ctx);
+
+    TupleDesc tupdesc;
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("fractalsql: function returning record called "
+                               "in context that cannot accept type record")));
+    tupdesc = BlessTupleDesc(tupdesc);
+
+    Tuplestorestate *tupstore = tuplestore_begin_heap(false, false, work_mem);
+    rsinfo->returnMode = SFRM_Materialize;
+    rsinfo->setResult  = tupstore;
+    rsinfo->setDesc    = tupdesc;
+
+    MemoryContextSwitchTo(oldcontext);
+
+    if (n_rows == 0)
+        ereport(ERROR, (errcode(ERRCODE_NO_DATA_FOUND),
+                        errmsg("fractalsql: no corpus rows to search")));
+
+    ensure_search_ctx();
+    char params[192];
+    snprintf(params, sizeof params,
+        "{\"max_generation\":15,\"population_size\":50,"
+        "\"maximum_diffusion\":2,\"walk\":0.5,\"bound_clipping\":true}");
+
+    const char *result_json = NULL;
+    size_t      result_len  = 0;
+    int rc = fsql_search_ptr(g_ctx, corpus, n_rows, dim, query, dim,
+                             (int) k, params, strlen(params),
+                             &result_json, &result_len);
+    if (rc != 0 || !result_json) {
+        const char *err = fsql_last_error(g_ctx);
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("fractalsql: telemetry search rc=%d: %s",
+                               rc, err && *err ? err : "(no detail)")));
+    }
+
+    int    *idx  = palloc((Size) k * sizeof(int));
+    double *dist = palloc((Size) k * sizeof(double));
+    int n = fsql_extract_topk(result_json, k, idx, dist);
+    if (n < 0)
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("fractalsql: malformed top_k in search result")));
+
+    for (int i = 0; i < n; i++) {
+        /* idx comes out of the core's result JSON, untrusted
+         * (fsql_extract_topk validates only >= 0): skip an index outside
+         * the corpus scan rather than reading rowid_map past its n_rows
+         * entries or reporting a corpus position that was never searched. */
+        if (idx[i] < 0 || (size_t) idx[i] >= n_rows) continue;
+        const char *rid = rowid_map[idx[i]];
+        if (!rid || !rid[0]) continue;   /* row's ctid failed to capture; skip rather than emit a bogus id */
+        Datum values[3];
+        bool  nulls[3] = { false, false, false };
+        values[0] = CStringGetTextDatum(rid);
+        values[1] = Float8GetDatum(dist[i]);
+        /* scan_pos: the raw 0-indexed position within THIS call's corpus,
+         * as opposed to doc_id (ctid, real row identity). Distinct
+         * consumers need distinct things here: e.g.
+         * fractal_agent_feedback_audit passes this on to
+         * fractal_isolate_background/fsql_feedback_report, whose
+         * result_handle is core's own internal per-call result
+         * position, not a database row at all -- ctid would be the
+         * wrong value there. */
+        values[2] = Int64GetDatum((int64) idx[i]);
+        tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+    }
+    return (Datum) 0;
+}
+
 /* fractal_hybrid_clinical_search deliberately does NOT take a raw    */
 /* SQL predicate/filter string -- interpolating caller-supplied SQL   */
 /* text into a dynamic query is exactly the class of risk this        */
@@ -5056,9 +5582,12 @@ fractal_search_telemetry(PG_FUNCTION_ARGS)
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
     MemoryContext  per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
     size_t  n_rows = 0;
-    double *corpus = spi_scan_corpus(table, col, dim, per_query_ctx, &n_rows);
+    char  **rowids = NULL;
+    double *corpus = spi_scan_corpus_internal(table, col, dim, per_query_ctx,
+                                              &n_rows, &rowids);
 
-    return telemetry_topk_srf(fcinfo, corpus, n_rows, (size_t) dim, query, k, NULL);
+    return telemetry_topk_srf_ctid(fcinfo, corpus, n_rows, (size_t) dim, query, k,
+                                   (const char **) rowids);
 }
 
 PG_FUNCTION_INFO_V1(fractal_hybrid_clinical_search);
@@ -5085,7 +5614,7 @@ fractal_hybrid_clinical_search(PG_FUNCTION_ARGS)
 
     if (ARR_NDIM(ids_arr) != 1 || ARR_HASNULL(ids_arr))
         ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-                        errmsg("fractalsql: doc_ids must be a 1-D non-null int8[]")));
+                        errmsg("fractalsql: doc_ids must be a 1-D non-null text[] of ctid strings")));
     if (ArrayGetNItems(ARR_NDIM(ids_arr), ARR_DIMS(ids_arr)) == 0)
         ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
                         errmsg("fractalsql: doc_ids must be non-empty")));
@@ -5103,18 +5632,19 @@ fractal_hybrid_clinical_search(PG_FUNCTION_ARGS)
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("fractalsql: SPI_connect failed")));
 
-    /* row_number()-based ANY-match can't be a direct WHERE predicate
-     * (window functions aren't allowed there) -- number the rows in a
-     * CTE first, then filter. doc_id (rn) is 0-indexed, matching this
-     * extension's existing result_handle/corpus-row-index convention. */
+    /* doc_ids is a caller-supplied ctid text[] (real, stable-for-the-
+     * transaction row locators -- see spi_scan_corpus_internal's want_ids
+     * path), so the cohort filter is a direct ctid predicate: no
+     * row_number()/CTE indirection needed at all (that machinery used to
+     * exist only to fake a stable row identity out of scan position,
+     * which ctid already IS). */
     StringInfoData q;
     initStringInfo(&q);
     appendStringInfo(&q,
-        "WITH numbered AS (SELECT %s AS v, (row_number() OVER () - 1) AS rn FROM %s) "
-        "SELECT v, rn FROM numbered WHERE rn = ANY($1) ORDER BY rn",
+        "SELECT %s AS v, ctid::text AS rid FROM %s WHERE ctid::text = ANY($1) ORDER BY ctid",
         quote_identifier(col), quote_identifier(table));
 
-    Oid   argtypes[1] = { INT8ARRAYOID };
+    Oid   argtypes[1] = { TEXTARRAYOID };
     Datum argvals[1]  = { PointerGetDatum(ids_arr) };
     int rc = SPI_execute_with_args(q.data, 1, argtypes, argvals, NULL,
                                    true, 0);
@@ -5133,19 +5663,19 @@ fractal_hybrid_clinical_search(PG_FUNCTION_ARGS)
                                table, col)));
     }
 
-    /* doc_id_map[i] = the REAL table doc_id (rn) for cohort-scan
-     * position i -- fsql_search_ptr's top_k indices are positions
-     * within this filtered/reordered corpus, not real doc_ids, so
-     * telemetry_topk_srf needs this to translate them back. */
-    double *corpus     = (double *) MemoryContextAllocHuge(
+    /* rowid_map[i] = the row's ctid (as text) for cohort-scan position i
+     * -- fsql_search_ptr's top_k indices are positions within this
+     * filtered corpus, not real row identities, so telemetry_topk_srf_ctid
+     * needs this to translate them back. */
+    double *corpus    = (double *) MemoryContextAllocHuge(
                             per_query_ctx, (Size) n * dim * sizeof(double));
-    int64  *doc_id_map = (int64 *) MemoryContextAlloc(
-                            per_query_ctx, (Size) n * sizeof(int64));
+    char  **rowid_map = (char **) MemoryContextAlloc(
+                            per_query_ctx, (Size) n * sizeof(char *));
     TupleDesc tupdesc = SPI_tuptable->tupdesc;
     /* Type-dispatch, same as spi_scan_corpus -- vector_col may be
      * float8[] or fractal_vector. This scan is custom (cohort-filtered
-     * via row_number()+ANY($1), not a plain "SELECT col FROM table")
-     * so it can't reuse spi_scan_corpus directly, but needs the exact
+     * via ctid = ANY($1), not a plain "SELECT col FROM table") so it
+     * can't reuse spi_scan_corpus_internal directly, but needs the exact
      * same detoast-then-cast + per-row pfree() handling for the
      * fractal_vector branch (see spi_scan_corpus's own comment for why:
      * packed varlenas don't honor ALIGNMENT=double, and unbounded
@@ -5185,19 +5715,25 @@ fractal_hybrid_clinical_search(PG_FUNCTION_ARGS)
             memcpy(corpus + (Size) r * dim, rv, (Size) dim * sizeof(double));
         }
 
-        Datum rn_d = SPI_getbinval(SPI_tuptable->vals[r], tupdesc, 2, &isnull);
+        Datum rid_d = SPI_getbinval(SPI_tuptable->vals[r], tupdesc, 2, &isnull);
         if (isnull) {
             SPI_finish();
             ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-                            errmsg("fractalsql: NULL rn at cohort row %lu",
+                            errmsg("fractalsql: NULL ctid at cohort row %lu",
                                    (unsigned long) r)));
         }
-        doc_id_map[r] = DatumGetInt64(rn_d);
+        /* text_to_cstring allocs in the SPI procedure context (freed by
+         * SPI_finish), so dup into per_query_ctx where rowid_map lives --
+         * same pattern spi_scan_corpus_internal uses for its own rowids. */
+        const char *s = text_to_cstring(DatumGetTextP(rid_d));
+        char *rdst = (char *) MemoryContextAlloc(per_query_ctx, strlen(s) + 1);
+        memcpy(rdst, s, strlen(s) + 1);
+        rowid_map[r] = rdst;
     }
     SPI_finish();
 
-    return telemetry_topk_srf(fcinfo, corpus, (size_t) n, (size_t) dim, query, k,
-                              doc_id_map);
+    return telemetry_topk_srf_ctid(fcinfo, corpus, (size_t) n, (size_t) dim, query, k,
+                                   (const char **) rowid_map);
 }
 
 PG_FUNCTION_INFO_V1(fractal_search_trajectory);

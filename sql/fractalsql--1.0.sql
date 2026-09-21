@@ -241,17 +241,33 @@ LANGUAGE C VOLATILE STRICT;
 COMMENT ON FUNCTION fractal_agent_trajectory_predict(table_name text, vector_col text, baseline_id int8, forecast_steps int4) IS
 'Forecast a future state vector by extrapolating the real delta (current - baseline, both read from table_name.vector_col via SPI, keyed by baseline_id and the max primary key) and searching the corpus for the nearest predicted state. Returns (predicted_state_vector, projected_drift_delta, risk_threshold_exceeded), all real computed values.';
 
--- fractal_agent_detect_loop: DFA-based safety monitor. Analyzes the
--- scaling exponent (alpha) of an agent state-hash sequence (int8[]) to
--- detect infinite loops (alpha > 0.9).
+-- fractal_agent_detect_loop (rewritten for v2.0.25): loop-detection safety
+-- monitor over real state vectors, not exact state hashes. state_log is
+-- flattened row-major (n_states * dim doubles, matching this extension's
+-- existing corpus-flattening convention -- see fractal_search_telemetry).
+-- Fingerprints each state via SimHash (n_bits, seed) and streams the
+-- fingerprints through Brent's streaming cycle detector
+-- (hamming_threshold; 0 = exact-match only, tolerant above that), which
+-- catches loops of any length including near-identical (not just
+-- byte-identical) repeats -- the old version's brute-force exact-hash
+-- period scan could not. dfa_exponent is still computed (now over each
+-- state's L2 norm across the trajectory, a real continuous signal, unlike
+-- the old DFA-over-hash-values) and alpha > 0.9 still additionally flags
+-- a random-walk-like wander the fingerprint-cycle check can miss if it
+-- never closes within hamming_threshold.
 CREATE FUNCTION fractal_agent_detect_loop(
-    log_arr int8[]
+    agent_id          text,
+    state_log         float8[],
+    dim               int4,
+    n_bits            int4    DEFAULT 64,
+    seed              float8  DEFAULT 42.0,
+    hamming_threshold int4    DEFAULT 0
 ) RETURNS fractal_loop_detect_result
 AS 'MODULE_PATHNAME', 'fractal_agent_detect_loop'
 LANGUAGE C VOLATILE STRICT;
 
-COMMENT ON FUNCTION fractal_agent_detect_loop(log_arr int8[]) IS
-'DFA-based safety monitor: analyzes the scaling exponent of an agent state-hash sequence (int8[]) to detect infinite loops (alpha > 0.9).';
+COMMENT ON FUNCTION fractal_agent_detect_loop(agent_id text, state_log float8[], dim int4, n_bits int4, seed float8, hamming_threshold int4) IS
+'Loop-detection safety monitor: fingerprints each state in state_log (n_states = length(state_log)/dim, flattened row-major) via SimHash (n_bits, seed) and streams them through Brent''s streaming cycle detector (hamming_threshold; 0 = exact-match only), flagging is_loop_detected when a cycle closes -- tolerates near-identical states, unlike the old exact-hash period scan. Also computes dfa_exponent, the DFA scaling exponent of each state''s L2 norm across the trajectory; alpha > 0.9 additionally flags a random-walk-like wander the fingerprint-cycle check can miss if it never closes within hamming_threshold. Echoes agent_id back in the result.';
 
 -- fractal_rag_agent: hybrid retrieve -> reason agent. Embeds the query,
 -- Scout-searches table_name.vector_col (meta_filter reserved for a future
@@ -933,6 +949,109 @@ COMMENT ON FUNCTION fractal_dimension_boxcount(float8[], int4) IS
   'flat, row-major array of n_points * dim doubles. Requires >= 8 '
   'points and a non-degenerate bounding box.';
 
+-- ----- Change-Point Detection / Periodogram (v2.0.25) --------------------
+
+CREATE FUNCTION fractal_change_point_detect(
+    series      float8[],
+    win         int4,
+    threshold   float8 DEFAULT 2.0,
+    max_points  int4   DEFAULT 16
+) RETURNS int8[]
+AS 'MODULE_PATHNAME', 'fractal_change_point_detect'
+LANGUAGE C IMMUTABLE STRICT;
+
+COMMENT ON FUNCTION fractal_change_point_detect(float8[], int4, float8, int4) IS
+  'DFA''s complement: localizes WHERE a series'' mean and/or variance '
+  'shifted, instead of only characterizing its overall scaling '
+  'behavior. Sliding two-sample test over adjacent windows of win '
+  'samples; flags a boundary when the mean differs by more than '
+  'threshold pooled-stddev units or the variance ratio exceeds '
+  'threshold^2. Returns ascending boundary indices, up to max_points. '
+  'Requires n >= 2*win.';
+
+CREATE FUNCTION fractal_periodogram(
+    series     float8[],
+    max_peaks  int4 DEFAULT 8
+) RETURNS TABLE(freq float8, power float8)
+AS 'MODULE_PATHNAME', 'fractal_periodogram'
+LANGUAGE C IMMUTABLE STRICT;
+
+COMMENT ON FUNCTION fractal_periodogram(float8[], int4) IS
+  'Classical periodogram (direct O(n^2) DFT, exact -- not an FFT '
+  'approximation): power at each positive Fourier frequency k/n, '
+  'returning only the max_peaks bins with highest power, sorted '
+  'descending. freq is cycles per sample in (0, 0.5]; 1.0/freq is '
+  'samples per cycle. Useful for network-beaconing/retry-loop cadence '
+  'detection that DFA alone is blind to. Requires n >= 4.';
+
+-- ----- State Fingerprinting / Cycle Detection (v2.0.25) -------------------
+
+CREATE FUNCTION fractal_state_fingerprint(
+    v      float8[],
+    n_bits int4   DEFAULT 128,
+    seed   float8 DEFAULT 42.0
+) RETURNS bytea
+AS 'MODULE_PATHNAME', 'fractal_state_fingerprint'
+LANGUAGE C IMMUTABLE STRICT;
+
+COMMENT ON FUNCTION fractal_state_fingerprint(float8[], int4, float8) IS
+  'Random-hyperplane SimHash (Charikar 2002): projects a state vector '
+  'onto n_bits random hyperplanes (deterministic from seed) and packs '
+  'the sign of each projection MSB-first into (n_bits + 7) / 8 bytes. '
+  'Two nearly-identical states collapse to the same or a very low '
+  'Hamming-distance fingerprint, unlike an exact hash''s all-or-'
+  'nothing sensitivity to floating-point noise -- pairs with '
+  'fractal_cycle_detect for tolerant "have I basically been in this '
+  'state before" loop detection.';
+
+CREATE FUNCTION fractal_cycle_detect(
+    fingerprints        bytea[],
+    hamming_threshold   int4 DEFAULT 0
+) RETURNS TABLE(at_index int4, cycle_len int8)
+AS 'MODULE_PATHNAME', 'fractal_cycle_detect'
+LANGUAGE C IMMUTABLE STRICT;
+
+COMMENT ON FUNCTION fractal_cycle_detect(bytea[], int4) IS
+  'Streaming Brent''s-algorithm cycle detection (Brent 1980) over an '
+  'array of fractal_state_fingerprint outputs, fed through one '
+  'detector in order. Every fingerprint must be the same length. One '
+  'output row per cycle closure (at_index is the position in '
+  'fingerprints where the cycle closed, cycle_len its length) -- the '
+  'detector re-arms after each closure, so multiple independent '
+  'cycles in the same stream are all caught. hamming_threshold=0 '
+  'requires byte-exact fingerprint matches; > 0 tolerates near-'
+  'identical states.';
+
+-- ----- Topological Data Analysis (v2.0.25) --------------------------------
+-- SCOPE NOTE: the 0-dim persistence diagram (h0_bars) is an EXACT,
+-- complete computation. betti1 is NOT full simplicial H1 -- it is the
+-- Vietoris-Rips graph's cycle rank, which over-counts true H1 when a
+-- filled triangle exists in the data. See fractal_tda_persistence_diagram's
+-- own comment in src/fractalsql.c for the full rationale.
+
+CREATE FUNCTION fractal_tda_persistence_diagram(
+    points       float8[],
+    dim          int4,
+    max_dim      int4   DEFAULT 1,
+    max_thresh   float8 DEFAULT 1.0,
+    max_h0_bars  int4   DEFAULT 64,
+    OUT h0_bars  jsonb,
+    OUT betti1   int8
+) RETURNS record
+AS 'MODULE_PATHNAME', 'fractal_tda_persistence_diagram'
+LANGUAGE C IMMUTABLE STRICT;
+
+COMMENT ON FUNCTION fractal_tda_persistence_diagram(float8[], int4, int4, float8, int4) IS
+  'Size-capped (<= 512 points) topological analysis over a point '
+  'cloud''s Vietoris-Rips filtration. h0_bars (birth/death pairs) is '
+  'an EXACT 0-dim persistence computation. betti1 (only computed when '
+  'max_dim=1) is the underlying graph''s cycle rank, NOT full '
+  'simplicial H1 -- it over-counts true H1 whenever a filled triangle '
+  'exists in the data; a full simplicial computation (what Ripser/'
+  'GUDHI compute via boundary-matrix reduction) is out of scope. '
+  'Citation: Edelsbrunner, Letscher & Zomorodian (2002), "Topological '
+  'persistence and simplification," Discrete & Computational Geometry.';
+
 CREATE FUNCTION fractal_dimension_drift(series float8[], win int4) RETURNS jsonb
 AS 'MODULE_PATHNAME', 'fractal_dimension_drift'
 LANGUAGE C IMMUTABLE STRICT;
@@ -1023,6 +1142,29 @@ COMMENT ON FUNCTION fractal_optimize_portfolio_multimodal_pareto(float8[], float
   '{candidates: [{return, risk, sharpe, weights}, ...], n_found} where '
   'sharpe = return/risk is informational, not the selection criterion. Errors '
   'with ''enterprise tier not loaded'' until fractalsql.enterprise_lib is set.';
+
+CREATE FUNCTION fractal_optimize_subset(
+    item_values       float8[],
+    upper_bounds      float8[],
+    k                 int4,
+    prev_weights      float8[] DEFAULT NULL,
+    turnover_penalty  float8   DEFAULT 0.0,
+    seed              int8     DEFAULT NULL
+) RETURNS jsonb
+AS 'MODULE_PATHNAME', 'fractal_optimize_subset'
+LANGUAGE C VOLATILE;
+
+COMMENT ON FUNCTION fractal_optimize_subset(float8[], float8[], int4, float8[], float8, int8) IS
+  'Generalizes fractal_optimize_portfolio''s cardinality-constrained '
+  'search into a pluggable-objective optimizer -- this SQL entry point '
+  'hardcodes value-weighted allocation: maximize '
+  'sum(weight[i] * item_values[i]) subject to at most k of n_items '
+  'nonzero, each weight <= upper_bounds[i], summing to 1.0. '
+  'prev_weights + turnover_penalty (both optional) steer the search '
+  'away from reallocating when set, for rebalancing use cases. Returns '
+  '{score, weights} where score is the achieved total value (higher is '
+  'better). The sum of the k largest upper_bounds must reach 1.0 or no '
+  'feasible k-subset exists.';
 
 -- ----- Domain-specific geometric/topological metrics ---------------------
 -- Scope boundary: all four take PRE-EXTRACTED geometry (vessel graphs,
@@ -1147,7 +1289,7 @@ CREATE FUNCTION fractal_search_telemetry(
     vector_col  text,
     query       float8[],
     k           int4
-) RETURNS TABLE(doc_id int8, distance float8)
+) RETURNS TABLE(doc_id text, distance float8, scan_pos int8)
 AS 'MODULE_PATHNAME', 'fractal_search_telemetry'
 LANGUAGE C VOLATILE STRICT;
 
@@ -1155,28 +1297,38 @@ COMMENT ON FUNCTION fractal_search_telemetry(text, text, float8[], int4) IS
   'k nearest rows in table_name.vector_col to query, via the v2.x brute-'
   'force cosine-distance search engine (exact, not approximate; '
   'Diversify/Repulsion applies if enabled on this session). Returns '
-  '(doc_id, distance) ascending by distance, where doc_id is the '
-  '0-indexed row position in the scan (matches fractal_feedback_report''s '
-  'result_handle convention).';
+  '(doc_id, distance, scan_pos) ascending by distance. doc_id is the '
+  'row''s ctid (as text) -- a real Postgres row locator, stable for the '
+  'lifetime of the current transaction, that still resolves to the '
+  'correct row even if an UPDATE relocates a tuple between this search '
+  'and a followup lookup (unlike a 0-indexed scan position); resolve '
+  'back to the row with `WHERE ctid::text = doc_id`. scan_pos is the '
+  'raw 0-indexed position within this call''s corpus scan -- distinct '
+  'from doc_id, needed by callers that want core''s own internal '
+  'result-handle concept (e.g. fractal_isolate_background''s '
+  'result_handle argument), not a database row.';
 
 CREATE FUNCTION fractal_hybrid_clinical_search(
     table_name  text,
     vector_col  text,
     query       float8[],
-    doc_ids     int8[],
+    doc_ids     text[],
     k           int4
-) RETURNS TABLE(doc_id int8, distance float8)
+) RETURNS TABLE(doc_id text, distance float8, scan_pos int8)
 AS 'MODULE_PATHNAME', 'fractal_hybrid_clinical_search'
 LANGUAGE C VOLATILE STRICT;
 
-COMMENT ON FUNCTION fractal_hybrid_clinical_search(text, text, float8[], int8[], int4) IS
+COMMENT ON FUNCTION fractal_hybrid_clinical_search(text, text, float8[], text[], int4) IS
   'fractal_search_telemetry restricted to a caller-supplied cohort '
-  '(doc_ids). doc_ids is computed by the caller with ordinary SQL (e.g. '
-  '"SELECT array_agg((row_number() OVER () - 1)) FROM patients WHERE '
-  'age > 65 AND condition = ''sepsis''") -- deliberately NOT a raw SQL '
-  'filter/predicate string, to avoid the dynamic-SQL injection class this '
-  'extension''s text-to-sql pipeline otherwise guards against carefully. '
-  'Errors if doc_ids matches zero rows.';
+  '(doc_ids, a text[] of ctid strings). doc_ids is computed by the '
+  'caller with ordinary SQL (e.g. "SELECT array_agg(ctid::text) FROM '
+  'patients WHERE age > 65 AND condition = ''sepsis''") -- deliberately '
+  'NOT a raw SQL filter/predicate string, to avoid the dynamic-SQL '
+  'injection class this extension''s text-to-sql pipeline otherwise '
+  'guards against carefully. doc_id/scan_pos have the same semantics '
+  'as fractal_search_telemetry -- see its own doc comment (scan_pos '
+  'here is the position within this call''s cohort-filtered corpus, '
+  'not the unfiltered table). Errors if doc_ids matches zero rows.';
 
 CREATE FUNCTION fractal_search_trajectory(
     table_name       text,
@@ -1361,6 +1513,39 @@ COMMENT ON FUNCTION fractal_vector_normalize(fractal_vector) IS 'Unit-length cop
 COMMENT ON FUNCTION fractal_vector_add(fractal_vector, fractal_vector) IS 'Elementwise sum.';
 COMMENT ON FUNCTION fractal_vector_sub(fractal_vector, fractal_vector) IS 'Elementwise difference.';
 COMMENT ON FUNCTION fractal_vector_scale(fractal_vector, float8) IS 'Elementwise scalar multiply.';
+
+-- v2.0.25: Lp distance, quantization, Hamming distance.
+CREATE FUNCTION fractal_vector_lp_distance(fractal_vector, fractal_vector, p float8) RETURNS float8
+  AS 'MODULE_PATHNAME', 'fractal_vector_lp_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION fractal_vector_quantize_int8(fractal_vector, OUT codes bytea, OUT scale float4) RETURNS record
+  AS 'MODULE_PATHNAME', 'fractal_vector_quantize_int8' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION fractal_vector_quantize_binary(fractal_vector) RETURNS bytea
+  AS 'MODULE_PATHNAME', 'fractal_vector_quantize_binary' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION fractal_vector_hamming_distance(bytea, bytea) RETURNS int8
+  AS 'MODULE_PATHNAME', 'fractal_vector_hamming_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+COMMENT ON FUNCTION fractal_vector_lp_distance(fractal_vector, fractal_vector, float8) IS
+  '(sum(|a[i]-b[i]|^p))^(1/p), p > 0. p=2 matches <-> mathematically '
+  'but not bit-for-bit (different code path). For 0 < p < 1 this is '
+  'NOT a proper metric -- the triangle inequality does not hold -- so '
+  'never substitute it silently for <-> as a default distance; use it '
+  'explicitly where fractional-p contrast at high dimensionality is '
+  'wanted (e.g. high-d genomic/embedding similarity).';
+COMMENT ON FUNCTION fractal_vector_quantize_int8(fractal_vector) IS
+  'Per-vector symmetric int8 quantization (4x compression): codes is '
+  'dim raw signed bytes (int8_t, NOT this extension''s int8/bigint '
+  'type -- one byte per dimension, decode client-side as signed), '
+  'scale lets the caller dequantize v[i] ~= codes[i] * scale. Zero '
+  'vector gets scale=0 and all-zero codes.';
+COMMENT ON FUNCTION fractal_vector_quantize_binary(fractal_vector) IS
+  'Binary (1-bit) quantization (32x compression): bit i is 1 if '
+  'v[i] >= 0, packed MSB-first into (dim + 7) / 8 bytes. Pairs with '
+  'fractal_vector_hamming_distance for cheap candidate filtering ahead '
+  'of a full-precision <-> / <=> re-rank.';
+COMMENT ON FUNCTION fractal_vector_hamming_distance(bytea, bytea) IS
+  'Hamming distance (popcount of XOR) between two equal-length byte '
+  'strings, typically two fractal_vector_quantize_binary outputs. '
+  'Errors if the two arguments differ in length.';
 
 -- fractal_search_trajectory / fractal_cross_modal_search overloads
 -- taking fractal_vector directly -- additive, the float8[] signatures

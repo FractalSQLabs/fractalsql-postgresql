@@ -35,6 +35,8 @@ extern int no_such_variable
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "catalog/pg_type.h"
+#include "access/heapam.h"      /* heap_form_tuple -- fractal_vector_quantize_int8's (codes, scale) record */
+#include "funcapi.h"            /* get_call_result_type / BlessTupleDesc */
 
 #include <ctype.h>
 #include <math.h>
@@ -63,6 +65,10 @@ PG_FUNCTION_INFO_V1(fractal_vector_normalize);
 PG_FUNCTION_INFO_V1(fractal_vector_add);
 PG_FUNCTION_INFO_V1(fractal_vector_sub);
 PG_FUNCTION_INFO_V1(fractal_vector_scale);
+PG_FUNCTION_INFO_V1(fractal_vector_lp_distance);
+PG_FUNCTION_INFO_V1(fractal_vector_quantize_int8);
+PG_FUNCTION_INFO_V1(fractal_vector_quantize_binary);
+PG_FUNCTION_INFO_V1(fractal_vector_hamming_distance);
 
 /* Postgres typmod max for a 2-byte dim field; also fsql_vector_*'s
  * practical ceiling (embedding dimensions in practice are a few
@@ -454,4 +460,97 @@ fractal_vector_scale(PG_FUNCTION_ARGS)
     FractalVector *out    = fractalvec_new(v->dim);
     fsql_vector_scale(v->x, (size_t) v->dim, scalar, out->x);
     PG_RETURN_FRACTALVEC_P(out);
+}
+
+/* ------------------------------------------------------------------ */
+/* v2.0.25 vector primitives -- Lp distance, quantization, Hamming.   */
+/* ------------------------------------------------------------------ */
+
+Datum
+fractal_vector_lp_distance(PG_FUNCTION_ARGS)
+{
+    FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
+    FractalVector *b = PG_GETARG_FRACTALVEC_P(1);
+    float4         p = (float4) PG_GETARG_FLOAT8(2);
+    check_same_dim(a->dim, b->dim);
+    if (p <= 0.0f)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractal_vector_lp_distance: p must be > 0")));
+    float4 dist;
+    int rc = fsql_vector_lp_distance(a->x, b->x, (size_t) a->dim, p, &dist);
+    if (rc != FSQL_OK)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractal_vector_lp_distance rc=%d", rc)));
+    PG_RETURN_FLOAT8((double) dist);
+}
+
+/* Returns (codes bytea, scale float4): codes is dim signed bytes
+ * (int8_t, NOT this repo's int8/bigint type -- one raw byte per
+ * dimension), scale lets the caller dequantize v[i] ~= codes[i] *
+ * scale. */
+Datum
+fractal_vector_quantize_int8(PG_FUNCTION_ARGS)
+{
+    FractalVector *v = PG_GETARG_FRACTALVEC_P(0);
+    size_t dim = (size_t) v->dim;
+
+    bytea *codes = (bytea *) palloc(dim + VARHDRSZ);
+    SET_VARSIZE(codes, dim + VARHDRSZ);
+    float4 scale;
+    int rc = fsql_vector_quantize_int8(v->x, dim, (int8_t *) VARDATA(codes), &scale);
+    if (rc != FSQL_OK)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractal_vector_quantize_int8 rc=%d", rc)));
+
+    TupleDesc tupdesc;
+    get_call_result_type(fcinfo, NULL, &tupdesc);
+    tupdesc = BlessTupleDesc(tupdesc);
+
+    Datum values[2];
+    bool  nulls[2] = { false, false };
+    values[0] = PointerGetDatum(codes);
+    values[1] = Float4GetDatum(scale);
+
+    HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+    PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/* Returns (dim + 7) / 8 packed bytes, sign of v[i] MSB-first. Pairs
+ * with fractal_vector_hamming_distance for cheap candidate filtering
+ * ahead of a full-precision re-rank. */
+Datum
+fractal_vector_quantize_binary(PG_FUNCTION_ARGS)
+{
+    FractalVector *v = PG_GETARG_FRACTALVEC_P(0);
+    size_t dim     = (size_t) v->dim;
+    size_t n_bytes = (dim + 7) / 8;
+
+    bytea *out = (bytea *) palloc(n_bytes + VARHDRSZ);
+    SET_VARSIZE(out, n_bytes + VARHDRSZ);
+    int rc = fsql_vector_quantize_binary(v->x, dim, (uint8_t *) VARDATA(out));
+    if (rc != FSQL_OK)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractal_vector_quantize_binary rc=%d", rc)));
+    PG_RETURN_BYTEA_P(out);
+}
+
+Datum
+fractal_vector_hamming_distance(PG_FUNCTION_ARGS)
+{
+    bytea *a = PG_GETARG_BYTEA_PP(0);
+    bytea *b = PG_GETARG_BYTEA_PP(1);
+    size_t n_bytes = (size_t) VARSIZE_ANY_EXHDR(a);
+    if (n_bytes != (size_t) VARSIZE_ANY_EXHDR(b))
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractal_vector_hamming_distance: length mismatch "
+                               "(%zu vs %zu bytes)",
+                               n_bytes, (size_t) VARSIZE_ANY_EXHDR(b))));
+    size_t dist;
+    int rc = fsql_vector_hamming_distance((const uint8_t *) VARDATA_ANY(a),
+                                          (const uint8_t *) VARDATA_ANY(b),
+                                          n_bytes, &dist);
+    if (rc != FSQL_OK)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractal_vector_hamming_distance rc=%d", rc)));
+    PG_RETURN_INT64((int64) dist);
 }

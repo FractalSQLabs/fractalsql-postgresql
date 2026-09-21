@@ -106,6 +106,10 @@ query can stay entirely in `fractal_vector` without round-tripping through
 | `fractal_vector_cosine_similarity(a, b)` | Cosine *similarity* (1 − `<=>`) |
 | `fractal_vector_norm(a)` / `fractal_vector_normalize(a)` | L2 norm / unit vector |
 | `a + b`, `a - b`, `a * s` | Element-wise add / subtract / scalar-multiply |
+| `fractal_vector_lp_distance(a, b, p)` | Generalized $L_p$ distance, any $p > 0$ (for $0 < p < 1$ this is not a proper metric; use explicitly, never as a silent `<->` substitute) |
+| `fractal_vector_quantize_int8(a)` | Symmetric int8 quantization, 4x compression, returns `(codes bytea, scale float4)` |
+| `fractal_vector_quantize_binary(a)` | 1-bit quantization, 32x compression, MSB-first sign bits |
+| `fractal_vector_hamming_distance(a, b)` | Hamming distance between two quantized `bytea` values (cheap candidate filtering ahead of a full-precision `<->` / `<=>` re-rank) |
 
 ### Casts
 The bidirectional cast lets you move between the two representations when you
@@ -113,7 +117,10 @@ need array-only tooling (e.g. `unnest`, PL/pgSQL array aggregates):
 
 ```sql
 -- float8[] -> fractal_vector (also implicit on insert into a fractal_vector col)
-SELECT '[1,0,0]'::float8[]::fractal_vector;
+SELECT ARRAY[1,0,0]::float8[]::fractal_vector;
+-- (the bracket-style string literal casts directly to fractal_vector:
+--  '[1,0,0]'::fractal_vector -- but is NOT valid as an intermediate
+--  ::float8[] cast; float8[] array literals use {1,0,0} braces)
 -- fractal_vector -> float8[] (via fractal_vector_to_float8_array)
 SELECT embedding::float8[] FROM docs LIMIT 1;
 -- dimension of a stored vector

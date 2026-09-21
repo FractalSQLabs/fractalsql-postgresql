@@ -682,7 +682,7 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$("${PSQL[@]}" -c "SELECT fractal_version();" 2>&1)
-  [[ "$ver" = "2.0.11" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.11)"
+  [[ "$ver" = "2.0.17" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.17)"
   # fractal_search convergence: cosine similarity to query ~1
   local r; r=$("${PSQL[@]}" -c "
      WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
@@ -1824,25 +1824,38 @@ gate_22_v2_functions() {
        (ARRAY[0.5,0.5,0.0]::float8[]);
   " >/dev/null 2>&1
 
+  # telemetry/hybrid report doc_id as a ctid (text), not a 0-indexed scan
+  # position. Each assertion joins t.doc_id back to the real row via
+  # d.ctid::text = t.doc_id and checks the table's own id. This verifies
+  # the ctid mapping and stays independent of the physical page layout.
   local r12; r12=$("${PSQL[@]}" -c "
-     SELECT doc_id, distance FROM fractal_search_telemetry(
-       'bt_telemetry_docs', 'emb', ARRAY[1.0,0.0,0.0]::float8[], 2);" 2>&1)
-  grep <<< "$r12" -q "^0|0$" \
-    && pass "22 v2_functions: fractal_search_telemetry finds the exact match at distance 0" \
-    || fail "22 v2_functions: expected doc_id=0 dist=0 first, got: $r12"
+     SELECT d.id, t.distance
+       FROM fractal_search_telemetry('bt_telemetry_docs', 'emb',
+            ARRAY[1.0,0.0,0.0]::float8[], 2) t
+       JOIN bt_telemetry_docs d ON d.ctid::text = t.doc_id
+      ORDER BY t.distance LIMIT 1;" 2>&1)
+  [[ "$r12" = "1|0" ]] \
+    && pass "22 v2_functions: fractal_search_telemetry finds the exact match at distance 0 (ctid doc_id resolves to id 1)" \
+    || fail "22 v2_functions: expected id=1 dist=0 first via the ctid doc_id, got: $r12"
 
+  # The old 0-indexed cohort doc_ids [1,3,4] were scan positions of
+  # physical rows 2,4,5. In the ctid world the cohort is built with
+  # ordinary SQL (array_agg of ctid::text) and the expected id order is
+  # the same three rows in the same distance order: 2,5,4.
   local r13; r13=$("${PSQL[@]}" -c "
-     SELECT doc_id FROM fractal_hybrid_clinical_search(
+     SELECT d.id FROM fractal_hybrid_clinical_search(
        'bt_telemetry_docs', 'emb', ARRAY[0.0,1.0,0.0]::float8[],
-       ARRAY[1,3,4]::int8[], 3) ORDER BY distance;" 2>&1)
-  [[ "$r13" = "$(printf '1\n4\n3')" ]] \
-    && pass "22 v2_functions: fractal_hybrid_clinical_search restricts to the cohort and returns real doc_ids" \
-    || fail "22 v2_functions: expected doc_ids 1,4,3 in that order, got: $r13"
+       (SELECT array_agg(ctid::text) FROM bt_telemetry_docs WHERE id IN (2,4,5)), 3) t
+       JOIN bt_telemetry_docs d ON d.ctid::text = t.doc_id
+      ORDER BY t.distance;" 2>&1)
+  [[ "$r13" = "$(printf '2\n5\n4')" ]] \
+    && pass "22 v2_functions: fractal_hybrid_clinical_search restricts to the ctid cohort and returns real row ids" \
+    || fail "22 v2_functions: expected doc_ids 2,5,4 in that order, got: $r13"
 
   local r14; r14=$("${PSQL[@]}" -c "
      SELECT fractal_hybrid_clinical_search(
        'bt_telemetry_docs', 'emb', ARRAY[0.0,1.0,0.0]::float8[],
-       ARRAY[999]::int8[], 1);" 2>&1)
+       ARRAY['(999,1)']::text[], 1);" 2>&1)
   grep <<< "$r14" -q "cohort matched no rows" \
     && pass "22 v2_functions: fractal_hybrid_clinical_search rejects a cohort matching zero rows" \
     || fail "22 v2_functions: expected a no-rows-matched rejection, got: $r14"
@@ -2037,6 +2050,27 @@ gate_23_agents() {
     && pass "23 agents: outlier_intercept reason is the real reason step output (canary)" \
     || fail "23 agents: expected the reasoning canary in reason, got: $r7c"
 
+  # The explicit metric argument: a threshold is calibrated against one
+  # metric, so the metric is caller-chosen, and the same probe can get
+  # opposite decisions under different metrics. [0.05,0,0] is
+  # cosine-parallel to the bad x-axis states (cosine distance ~0, so
+  # intercepted, as r7 showed for [1,0,0]) but L2-far: the nearest bad
+  # state is [0.9,0.1,0.0] at sqrt(0.7225+0.01) = 0.856 > 0.5, so
+  # allowed. An unknown metric must be a hard error, never a fallback.
+  local r7d; r7d=$("${PSQL[@]}" -c "
+     SELECT intercepted FROM fractal_agent_outlier_intercept(
+       ARRAY[0.05,0,0]::float8[], 'bt_agents_badstates','emb', 0.5, 'l2');" 2>&1)
+  grep <<< "$r7d" -q '^f$' \
+    && pass "23 agents: outlier_intercept metric=l2 allows the parallel state cosine intercepts (real L2 distance 0.856 > 0.5)" \
+    || fail "23 agents: expected intercepted=f for metric=l2 (L2 distance 0.856 > 0.5), got: $r7d"
+
+  local r7e; r7e=$("${PSQL[@]}" -c "
+     SELECT * FROM fractal_agent_outlier_intercept(
+       ARRAY[1,0,0]::float8[], 'bt_agents_badstates','emb', 0.5, 'euclid');" 2>&1)
+  grep <<< "$r7e" -q "metric must be 'cosine' or 'l2'" \
+    && pass "23 agents: outlier_intercept rejects an unknown metric (no silent fallback)" \
+    || fail "23 agents: expected a metric rejection, got: $r7e"
+
   # --- 8: fractal_agent_recall_hybrid happy path + guard --------------
   # Real session_ids + real content from the fixture (NOT the stub's
   # generate_series 1-5 / 'recalled memory snippet N'); the cohort
@@ -2150,9 +2184,8 @@ gate_23_agents() {
      SELECT nearest_cohort_id FROM fractal_agent_patient_deterioration_triage(
        'bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[],
        ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[],
-       (SELECT array_agg(doc_id ORDER BY doc_id) FROM
-          (SELECT row_number() OVER (ORDER BY ctid)-1 AS doc_id
-             FROM bt_agents_patients WHERE age>65 AND condition='sepsis') x),
+       (SELECT array_agg(ctid::text) FROM bt_agents_patients
+          WHERE age>65 AND condition='sepsis'),
        5, 'id');" 2>&1)
   grep <<< "$r11" -Eq '^[0-9]+$' \
     && pass "23 agents: patient_deterioration_triage returns the real nearest cohort id (hybrid search + ctid resolution)" \
@@ -2161,9 +2194,8 @@ gate_23_agents() {
      SELECT jsonb_array_length(cohort_matches) FROM fractal_agent_patient_deterioration_triage(
        'bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[],
        ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[],
-       (SELECT array_agg(doc_id ORDER BY doc_id) FROM
-          (SELECT row_number() OVER (ORDER BY ctid)-1 AS doc_id
-             FROM bt_agents_patients WHERE age>65 AND condition='sepsis') x),
+       (SELECT array_agg(ctid::text) FROM bt_agents_patients
+          WHERE age>65 AND condition='sepsis'),
        5, 'id');" 2>&1)
   [[ "$r11m" = "2" ]] \
     && pass "23 agents: patient_deterioration_triage cohort_matches now honors k (got 2 of 2 qualifying rows)" \
@@ -2172,9 +2204,8 @@ gate_23_agents() {
      SELECT rationale FROM fractal_agent_patient_deterioration_triage(
        'bt_agents_patients','vitals', ARRAY[0.9,-0.8,0.7,0.6]::float8[],
        ARRAY[0.1,0.1,0.1,0.1]::float8[], ARRAY[0.95,-0.85,0.75,0.65]::float8[],
-       (SELECT array_agg(doc_id ORDER BY doc_id) FROM
-          (SELECT row_number() OVER (ORDER BY ctid)-1 AS doc_id
-             FROM bt_agents_patients WHERE age>65 AND condition='sepsis') x),
+       (SELECT array_agg(ctid::text) FROM bt_agents_patients
+          WHERE age>65 AND condition='sepsis'),
        5, 'id');" 2>&1)
   grep <<< "$r11b" -q 'gap-analysis-canary' \
     && pass "23 agents: patient_deterioration_triage composes hybrid+trajectory -> reason (canary)" \

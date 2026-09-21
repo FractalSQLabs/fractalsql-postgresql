@@ -108,9 +108,8 @@ UPDATE vmd_vessels
 -- lookup (who's near a contact-of-interest position) and diverse-track
 -- clustering (representative traffic patterns across the whole fleet).
 --
--- Same doc_id-vs-id caveat as section 2 -- vessel 7's relocated tuple
--- means the plain table (not a cohort filter that excludes it) still
--- needs the ctid mapping.
+-- v2.0.25: doc_id is a real ctid, so this join is exact regardless of
+-- vessel 7's relocated tuple -- no row_number() mapping needed.
 -- ------------------------------------------------------------------
 \echo ''
 \echo '=== 3. Nearest vessels to a contact position, and diverse fleet traffic patterns ==='
@@ -119,8 +118,7 @@ UPDATE vmd_vessels
 SELECT v.mmsi, t.distance
 FROM fractal_search_telemetry('vmd_vessels', 'current',
                               ARRAY[0.2, 0.2, 0.5, 0.0]::float8[], 5) t
-JOIN (SELECT *, row_number() OVER (ORDER BY ctid) - 1 AS doc_id
-        FROM vmd_vessels) v ON v.doc_id = t.doc_id
+JOIN vmd_vessels v ON v.ctid::text = t.doc_id
 ORDER BY t.distance;
 
 \echo ''
