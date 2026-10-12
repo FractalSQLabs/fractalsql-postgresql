@@ -179,7 +179,7 @@ static T2SAllowedStmts t2s_allowed_stmts_mode(void);
 static char *fractal_text_to_sql_internal(const char *question, ArrayType *table_names, char *feedback);
 
 #define FSQL_EDITION "Community"
-#define FSQL_VERSION "2.0.17"
+#define FSQL_VERSION "2.0.18"
 
 /* B4-extended (H3) — supply-side DoS guards.
  *
@@ -2439,7 +2439,8 @@ fractal_search_agent(PG_FUNCTION_ARGS)
     pfree(doc_ids_datums);
 
     values[1] = PointerGetDatum(ids_arr);
-    values[2] = Int64GetDatum(100); /* Placeholder for execution_time_ms */
+    /* execution_time_ms is int4; Int32GetDatum matches. */
+    values[2] = Int32GetDatum(100); /* Placeholder for execution_time_ms */
 
     HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
 

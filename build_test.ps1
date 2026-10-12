@@ -169,7 +169,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoRoot
 
-$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26','27','28')
+$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26','27','28','29','30','31','32')
 $QuickGates   = @('01','02')
 $FuzzGates    = @('21')
 
@@ -837,7 +837,7 @@ function PgSwapPlugin($path) {
 
 function Gate02Smoke {
     $ver = Psql -Sql "SELECT fractal_version();"
-    if ($ver -eq '2.0.17') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.17)" }
+    if ($ver -eq '2.0.18') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.18)" }
     $r = Psql -Sql @"
 WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
 SELECT CASE WHEN sqrt(v[1]*v[1]+v[2]*v[2])>1e-9
@@ -1759,6 +1759,17 @@ function Gate22V2Functions {
     if ($r4b -match 'cov length') { Pass "22 v2_functions: fractal_optimize_portfolio rejects a mismatched cov length" }
     else { Fail "22 v2_functions: expected a cov-length rejection, got: $r4b" }
 
+    # diffusion_mode (parse_diffusion_mode in src/fractalsql.c): r4 above
+    # omits it entirely (the 'gaussian' default), never exercising the
+    # 'levy' branch or the rejection of an unrecognized value.
+    $r4c = Psql -Sql "SELECT fractal_optimize_portfolio(ARRAY[0.08,0.12,0.10,0.15]::float8[], ARRAY[0.04,0.01,0.01,0.01, 0.01,0.06,0.01,0.01, 0.01,0.01,0.05,0.01, 0.01,0.01,0.01,0.09]::float8[], 2, 12345, false, 'levy');"
+    if ($r4c -match '"sharpe"') { Pass "22 v2_functions: fractal_optimize_portfolio diffusion_mode=levy returns {sharpe, weights}" }
+    else { Fail "22 v2_functions: diffusion_mode=levy='$r4c'" }
+
+    $r4d = Psql -Sql "SELECT fractal_optimize_portfolio(ARRAY[0.08,0.12,0.10,0.15]::float8[], ARRAY[0.04,0.01,0.01,0.01, 0.01,0.06,0.01,0.01, 0.01,0.01,0.05,0.01, 0.01,0.01,0.01,0.09]::float8[], 2, 12345, false, 'bogus');"
+    if ($r4d -match 'diffusion_mode must be') { Pass "22 v2_functions: fractal_optimize_portfolio rejects an unrecognized diffusion_mode" }
+    else { Fail "22 v2_functions: expected a diffusion_mode rejection, got: $r4d" }
+
     # --- 3: domain-specific geometry -----------------------------------
     $r5 = Psql -Sql "SELECT fractal_morphological_complexity($boxpts, 2);"
     if ($r5 -match '"lacunarity"') { Pass "22 v2_functions: fractal_morphological_complexity returns {dimension, lacunarity}" }
@@ -1858,6 +1869,14 @@ INSERT INTO bt_telemetry_docs (emb) VALUES
     if ($r15 -match '^0\|0') { Pass "22 v2_functions: fractal_search_trajectory searches near the delta vector" }
     else { Fail "22 v2_functions: expected doc_id=0 dist=0 for a [1,0,0] delta, got: $r15" }
 
+    # fractal_vector-typed overload (fractal_search_trajectory_fv): the
+    # call above only ever resolves the float8[] signature -- confirmed
+    # via gcov this never ran before this (0% coverage), same for its
+    # shared decode_vector_datum helper.
+    $r15fv = Psql -Sql "SELECT doc_id, distance FROM fractal_search_trajectory('bt_telemetry_docs', 'emb', '[0.0,0.0,0.0]'::fractal_vector, '[1.0,0.0,0.0]'::fractal_vector, 1);"
+    if ($r15fv -match '^0\|0') { Pass "22 v2_functions: fractal_search_trajectory (fractal_vector overload) searches near the delta vector" }
+    else { Fail "22 v2_functions: expected doc_id=0 dist=0 for a [1,0,0] delta (fv overload), got: $r15fv" }
+
     Psql -Sql @"
 DROP TABLE IF EXISTS bt_combined_docs;
 CREATE TABLE bt_combined_docs (id serial PRIMARY KEY, emb float8[]);
@@ -1868,6 +1887,13 @@ INSERT INTO bt_combined_docs (emb) VALUES
     $r16 = Psql -Sql "SELECT doc_id, distance FROM fractal_cross_modal_search('bt_combined_docs', 'emb', ARRAY[1.0,0.0]::float8[], ARRAY[1.0,0.0]::float8[], 1.0, 1);"
     if ($r16 -match '^0\|0') { Pass "22 v2_functions: fractal_cross_modal_search at alpha=1.0 favors the morphology-only row" }
     else { Fail "22 v2_functions: expected doc_id=0 dist=0 at alpha=1.0, got: $r16" }
+
+    # fractal_vector-typed overload (fractal_cross_modal_search_fv):
+    # same table/query as r16, just fractal_vector-cast -- confirmed
+    # via gcov this never ran before this (0% coverage).
+    $r16fv = Psql -Sql "SELECT doc_id, distance FROM fractal_cross_modal_search('bt_combined_docs', 'emb', '[1.0,0.0]'::fractal_vector, '[1.0,0.0]'::fractal_vector, 1.0, 1);"
+    if ($r16fv -match '^0\|0') { Pass "22 v2_functions: fractal_cross_modal_search (fractal_vector overload) at alpha=1.0 favors the morphology-only row" }
+    else { Fail "22 v2_functions: expected doc_id=0 dist=0 at alpha=1.0 (fv overload), got: $r16fv" }
 
     $r17 = Psql -Sql "SELECT fractal_cross_modal_search('bt_combined_docs', 'emb', ARRAY[1.0,0.0]::float8[], ARRAY[1.0,0.0]::float8[], 1.5, 1);"
     if ($r17 -match 'alpha_weight must be in') { Pass "22 v2_functions: fractal_cross_modal_search rejects an out-of-range alpha_weight" }
@@ -2080,6 +2106,56 @@ INSERT INTO bt_agents_data VALUES (1,10.5),(2,20.5);
     $r10c = Psql -Sql "SELECT analysis FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_agents_data'], 2);"
     if ($r10c -match 'gap-analysis-canary') { Pass "23 agents: data_analyst composes sql_agent -> reason (analysis is the real reason step, canary)" }
     else { Fail "23 agents: expected the canary in analysis, got: $r10c" }
+
+    # --- 10d: fractal_sql_agent's auto_execute SAVEPOINT scoping --------
+    # Unlike the canary-as-SQL path above (10/10b/10c, which proves the
+    # compose-and-fail shape), this drives the mock's single canned-reply file
+    # (the same mock_sql.txt file gate 04's auto-discovery case writes)
+    # with a real, valid INSERT, so one call can genuinely succeed and a
+    # colliding call can genuinely fail. One connection (one Psql call,
+    # one backend), one open transaction: a real prior COMMITted write
+    # (id=99), then three fractal_sql_agent calls that always generate
+    # the SAME INSERT (id=1) -- the first succeeds, the second and third
+    # both collide with the PRIMARY KEY and must each report
+    # execution_failed via auto_execute's internal subtransaction,
+    # proving the same fixed call is safely reusable after a prior
+    # rollback, not just after a clean release.
+    Psql -Sql @"
+DROP TABLE IF EXISTS bt_sql_agent_sp;
+CREATE TABLE bt_sql_agent_sp (id int PRIMARY KEY, val text);
+INSERT INTO bt_sql_agent_sp (id, val) VALUES (99, 'prior');
+"@ | Out-Null
+    if (-not (PgSetGuc -Name 'fractalsql.text_to_sql_allowed_statements' -SetVal "'select_insert_update'" -Want 'select_insert_update')) {
+        Fail "23 agents: sql_agent_savepoint GUC did not take effect"
+    }
+    Set-Content -Path $SqlFile -Value "INSERT INTO bt_sql_agent_sp (id, val) VALUES (1, 'x')" -NoNewline
+    $out = Psql -Sql @"
+BEGIN;
+SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);
+SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);
+SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);
+COMMIT;
+"@
+    # BEGIN/COMMIT print their own command tags even under -tA (only
+    # SELECT's tuples are suppressed by -t) -- filter them out before
+    # indexing, rather than assuming the 3 statuses are lines 1-3.
+    $lines = @($out -split "`r?`n" | Where-Object { $_ -ne '' -and $_ -ne 'BEGIN' -and $_ -ne 'COMMIT' })
+    $status1 = $lines[0]; $status2 = $lines[1]; $status3 = $lines[2]
+    if ($status1 -eq 'executed') { Pass "23 agents: sql_agent_savepoint: first INSERT executed cleanly" }
+    else { Fail "23 agents: sql_agent_savepoint: first call expected status=executed, got '$status1' (full: $out)" }
+    if ($status2 -eq 'execution_failed') { Pass "23 agents: sql_agent_savepoint: second (colliding) INSERT reported execution_failed via the auto_execute subtransaction, not a raw error" }
+    else { Fail "23 agents: sql_agent_savepoint: second call expected status=execution_failed, got '$status2'" }
+    if ($status3 -eq 'execution_failed') { Pass "23 agents: sql_agent_savepoint: third call reused the same call shape after the second call's rollback, no escaped error" }
+    else { Fail "23 agents: sql_agent_savepoint: third call expected status=execution_failed, got '$status3'" }
+    $cnt = Psql -Sql "SELECT count(*) FROM bt_sql_agent_sp;"
+    if ($cnt -eq '2') { Pass "23 agents: sql_agent_savepoint: both the prior commit (id=99) and the first call's write (id=1) survive -- no phantom rows from the two rolled-back calls" }
+    else { Fail "23 agents: sql_agent_savepoint: expected exactly 2 surviving rows (id=1,99), count=$cnt" }
+    Psql -Sql "DROP TABLE IF EXISTS bt_sql_agent_sp;" | Out-Null
+    PgSetGuc -Name 'fractalsql.text_to_sql_allowed_statements' -SetVal "'select'" -Want 'select' | Out-Null
+    # Restore the shared mock-reply file: every engine after this point
+    # in gate 23 expects the "gap-analysis-canary" reply this gate's own
+    # header already set, not the INSERT text this sub-test just wrote.
+    Set-Content -Path $SqlFile -Value "gap-analysis-canary" -NoNewline
 
     # --- 11: fractal_agent_patient_deterioration_triage happy + guard ----
     # nearest_cohort_id is the REAL hybrid_clinical_search nearest resolved via
@@ -3294,6 +3370,629 @@ function Gate28ReviewIsolation {
     Remove-Item -Force $ReviewEnvDumpFile -ErrorAction SilentlyContinue
 }
 
+# All 17 fractal_vector_* functions (sql/fractalsql--1.0.sql): the
+# native vector type's arithmetic/distance/quantization family,
+# known-answer asserted. Mirrors build_test.sh's gate_29_vector_ops.
+function Gate29VectorOps {
+    $r = Psql -Sql "SELECT fractal_vector_cosine_similarity('[1,0,0]'::fractal_vector, '[1,0,0]'::fractal_vector);"
+    if ($r -eq '1') { Pass "29 vector_ops: cosine_similarity(identical)=1" } else { Fail "29 vector_ops: cosine_similarity='$r'" }
+
+    $r = Psql -Sql "SELECT fractal_vector_norm('[3,4,0]'::fractal_vector);"
+    if ($r -eq '5') { Pass "29 vector_ops: norm([3,4,0])=5" } else { Fail "29 vector_ops: norm='$r'" }
+
+    $r = Psql -Sql "SELECT fractal_vector_add('[1,2,3]'::fractal_vector, '[1,1,1]'::fractal_vector);"
+    if ($r -eq '[2,3,4]') { Pass "29 vector_ops: add([1,2,3],[1,1,1])=[2,3,4]" } else { Fail "29 vector_ops: add='$r'" }
+
+    $r = Psql -Sql "SELECT fractal_vector_sub('[3,4,5]'::fractal_vector, '[1,1,1]'::fractal_vector);"
+    if ($r -eq '[2,3,4]') { Pass "29 vector_ops: sub([3,4,5],[1,1,1])=[2,3,4]" } else { Fail "29 vector_ops: sub='$r'" }
+
+    $r = Psql -Sql "SELECT fractal_vector_dims('[1,2,3,4]'::fractal_vector);"
+    if ($r -eq '4') { Pass "29 vector_ops: dims([1,2,3,4])=4" } else { Fail "29 vector_ops: dims='$r'" }
+
+    # float32 storage, not exact decimal: 0.6/0.8 round-trip through
+    # fractal_vector's actual float32 precision as
+    # 0.600000024/0.800000012 (fractal_vector_out's "%.9g", confirmed in
+    # src\fractalsql_vector.c).
+    $r = Psql -Sql "SELECT fractal_vector_normalize('[3,4,0]'::fractal_vector);"
+    if ($r -eq '[0.600000024,0.800000012,0]') { Pass "29 vector_ops: normalize([3,4,0]) -> unit vector [0.6,0.8,0]" } else { Fail "29 vector_ops: normalize='$r'" }
+    $r = Psql -Sql "SELECT fractal_vector_normalize(NULL);"
+    if ($r -eq '') { Pass "29 vector_ops: normalize(NULL) -> NULL (STRICT)" } else { Fail "29 vector_ops: expected NULL, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_vector_scale('[1,2,3]'::fractal_vector, 2);"
+    if ($r -eq '[2,4,6]') { Pass "29 vector_ops: scale([1,2,3],2)=[2,4,6]" } else { Fail "29 vector_ops: scale='$r'" }
+    $r = Psql -Sql "SELECT fractal_vector_scale(NULL, 2);"
+    if ($r -eq '') { Pass "29 vector_ops: scale(NULL,...) -> NULL (STRICT)" } else { Fail "29 vector_ops: expected NULL, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_vector_negative_inner_product('[1,0,0]'::fractal_vector, '[1,0,0]'::fractal_vector);"
+    if ($r -eq '-1') { Pass "29 vector_ops: negative_inner_product(identical unit vectors)=-1" } else { Fail "29 vector_ops: negative_inner_product='$r'" }
+    $r = Psql -Sql "SELECT fractal_vector_negative_inner_product(NULL, '[1,0,0]'::fractal_vector);"
+    if ($r -eq '') { Pass "29 vector_ops: negative_inner_product(NULL,...) -> NULL (STRICT)" } else { Fail "29 vector_ops: expected NULL, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_vector_l2_distance('[0,0,0]'::fractal_vector, '[3,4,0]'::fractal_vector);"
+    if ($r -eq '5') { Pass "29 vector_ops: l2_distance([0,0,0],[3,4,0])=5" } else { Fail "29 vector_ops: l2_distance='$r'" }
+
+    $r = Psql -Sql "SELECT fractal_vector_l2_squared('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector);"
+    if ($r -eq '25') { Pass "29 vector_ops: l2_squared([3,4,0],[0,0,0])=25 (skips the sqrt in l2_distance)" } else { Fail "29 vector_ops: l2_squared='$r'" }
+
+    $r = Psql -Sql "SELECT fractal_vector_cosine_distance('[1,0,0]'::fractal_vector, '[1,0,0]'::fractal_vector);"
+    if ($r -eq '0') { Pass "29 vector_ops: cosine_distance(identical)=0" } else { Fail "29 vector_ops: cosine_distance='$r'" }
+    $r = Psql -Sql "SELECT fractal_vector_cosine_distance(NULL, '[1,0,0]'::fractal_vector);"
+    if ($r -eq '') { Pass "29 vector_ops: cosine_distance(NULL,...) -> NULL (STRICT)" } else { Fail "29 vector_ops: expected NULL, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_vector_from_float8_array(ARRAY[1,2,3]::float8[]);"
+    if ($r -eq '[1,2,3]') { Pass "29 vector_ops: from_float8_array canonicalizes [1,2,3]" } else { Fail "29 vector_ops: from_float8_array='$r'" }
+    $r = Psql -Sql "SELECT fractal_vector_to_float8_array('[1,2,3]'::fractal_vector);"
+    if ($r -eq '{1,2,3}') { Pass "29 vector_ops: to_float8_array canonicalizes to {1,2,3} (native array text, not fractal_vector's own [1,2,3] form)" } else { Fail "29 vector_ops: to_float8_array='$r'" }
+
+    # --- v2.0.25: Lp distance, quantization, Hamming distance -----------
+    $r = Psql -Sql "SELECT fractal_vector_lp_distance('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector, 2.0);"
+    if ($r -eq '5') { Pass "29 vector_ops: lp_distance p=2 ([3,4] from origin) = 5" } else { Fail "29 vector_ops: lp_distance p=2='$r'" }
+    $r = Psql -Sql "SELECT fractal_vector_lp_distance('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector, 1.0);"
+    if ($r -eq '7') { Pass "29 vector_ops: lp_distance p=1 ([3,4] from origin) = 7" } else { Fail "29 vector_ops: lp_distance p=1='$r'" }
+    $r = Psql -Sql "SELECT fractal_vector_lp_distance('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector, 0);"
+    if ($r -match 'p must be > 0') { Pass "29 vector_ops: lp_distance rejects p<=0" } else { Fail "29 vector_ops: expected a p<=0 rejection, got: $r" }
+
+    # quantize_int8: dim raw signed bytes (hex bytea text "\xHHHH..."),
+    # dequantization v[i] ~= codes[i]*scale within half a quantization step.
+    $q8 = Psql -Sql "SELECT codes, scale FROM fractal_vector_quantize_int8('[1,-2,3]'::fractal_vector);"
+    $q8Parts = $q8 -split '\|'
+    $q8Codes = $q8Parts[0]
+    $q8Scale = [double]$q8Parts[1]
+    $hex = $q8Codes -replace '^\\x', ''
+    $q8Ok = $false
+    if ($hex.Length -eq 6 -and $q8Scale -gt 0) {
+        $q = @()
+        for ($i = 0; $i -lt 3; $i++) {
+            $b = [Convert]::ToInt32($hex.Substring($i * 2, 2), 16)
+            if ($b -ge 128) { $b -= 256 }
+            $q += $b
+        }
+        $tol = $q8Scale * 0.6
+        if ([Math]::Abs($q[0] * $q8Scale - 1) -le $tol -and
+            [Math]::Abs($q[1] * $q8Scale + 2) -le $tol -and
+            [Math]::Abs($q[2] * $q8Scale - 3) -le $tol) { $q8Ok = $true }
+    }
+    if ($q8Ok) { Pass "29 vector_ops: quantize_int8 dequantizes [1,-2,3] within rounding error (codes=$q8Codes scale=$q8Scale)" }
+    else { Fail "29 vector_ops: quantize_int8 codes='$q8Codes' scale='$q8Scale' (dequantization out of tolerance)" }
+
+    # quantize_binary + hamming_distance: 2 dims pack into 1 byte;
+    # identical vectors -> 0; one flipped sign -> 1. (The sign-bit
+    # polarity itself is the vendored core's choice -- these assertions
+    # hold either way.)
+    $qb = Psql -Sql "SELECT octet_length(fractal_vector_quantize_binary('[1,-1]'::fractal_vector));"
+    if ($qb -eq '1') { Pass "29 vector_ops: quantize_binary 2 dims -> 1 packed byte" } else { Fail "29 vector_ops: quantize_binary byte count=$qb" }
+    $hm0 = Psql -Sql "SELECT fractal_vector_hamming_distance(fractal_vector_quantize_binary('[1,-1]'::fractal_vector), fractal_vector_quantize_binary('[1,-1]'::fractal_vector));"
+    if ($hm0 -eq '0') { Pass "29 vector_ops: hamming_distance(identical)=0" } else { Fail "29 vector_ops: hamming_distance(identical)='$hm0'" }
+    $hm1 = Psql -Sql "SELECT fractal_vector_hamming_distance(fractal_vector_quantize_binary('[1,-1]'::fractal_vector), fractal_vector_quantize_binary('[1,1]'::fractal_vector));"
+    if ($hm1 -eq '1') { Pass "29 vector_ops: hamming_distance(one flipped sign)=1" } else { Fail "29 vector_ops: hamming_distance(flipped sign)='$hm1'" }
+    $hmBad = Psql -Sql "SELECT fractal_vector_hamming_distance('\x01'::bytea, '\x0102'::bytea);"
+    if ($hmBad -match 'length mismatch') { Pass "29 vector_ops: hamming_distance rejects unequal byte lengths" } else { Fail "29 vector_ops: expected a length-mismatch rejection, got: $hmBad" }
+}
+
+# The 6 newest analytics/vector-math primitives (v2.0.25), known-answer
+# asserted: real float8[]/bytea[] array args, with fractal_periodogram
+# and fractal_cycle_detect set-returning (TABLE). Mirrors build_test.sh's
+# gate_30_new_primitives.
+function Gate30NewPrimitives {
+    # --- fractal_change_point_detect: step up at t=50 in a 100-sample
+    # series with a non-degenerate (sine) wobble, win=16, threshold=2.0.
+    # At least one flagged boundary must land near the true split.
+    $r = Psql -Sql @"
+SELECT fractal_change_point_detect(array_agg(v ORDER BY i), 16, 2.0, 16)
+  FROM (SELECT i, CASE WHEN i < 50 THEN 0.2*sin(0.5*i) ELSE 5.2+0.2*cos(0.5*i) END AS v
+          FROM generate_series(0, 99) i) s;
+"@
+    $cpOk = $false
+    foreach ($v in (($r -replace '[{}]', '') -split ',')) {
+        if ($v -ne '' -and [double]$v -ge 30 -and [double]$v -le 70) { $cpOk = $true }
+    }
+    if ($cpOk) { Pass "30 new_primitives: change_point_detect flags a boundary near the t=50 step ($r)" }
+    else { Fail "30 new_primitives: change_point_detect='$r' (no boundary in [30,70])" }
+
+    $r = Psql -Sql "SELECT fractal_change_point_detect(ARRAY[1,2,3]::float8[], 0, 2.0, 16);"
+    if ($r -match 'win must be > 0') { Pass "30 new_primitives: change_point_detect rejects window <= 0" }
+    else { Fail "30 new_primitives: expected a win<=0 rejection, got: $r" }
+
+    # --- fractal_periodogram: 64 samples of sin(2*pi*t/8) -> an exact
+    # k=8/64 bin at 0.125 cycles/sample as the top-power peak.
+    $r = Psql -Sql @"
+SELECT freq FROM fractal_periodogram(
+  (SELECT array_agg(0.5*sin(2*pi()*i/8.0) ORDER BY i) FROM generate_series(0, 63) i), 4)
+ORDER BY power DESC LIMIT 1;
+"@
+    $freqOk = $false
+    if ($r -ne '') { $f = [double]$r; if ($f -gt 0.124 -and $f -lt 0.126) { $freqOk = $true } }
+    if ($freqOk) { Pass "30 new_primitives: periodogram top freq is the true 0.125 bin (got $r)" }
+    else { Fail "30 new_primitives: periodogram top freq='$r' (expected 0.125)" }
+
+    # --- fractal_state_fingerprint: 128 bits -> exactly 16 packed bytes,
+    # byte-for-byte deterministic across identical calls (seeded random
+    # hyperplanes).
+    $fp1 = Psql -Sql "SELECT fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 128, 42);"
+    $nFp = Psql -Sql "SELECT octet_length(fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 128, 42));"
+    if ($nFp -eq '16') { Pass "30 new_primitives: state_fingerprint 128 bits -> 16 bytes" } else { Fail "30 new_primitives: state_fingerprint byte count=$nFp" }
+    $fp2 = Psql -Sql "SELECT fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 128, 42);"
+    if ($fp1 -eq $fp2) { Pass "30 new_primitives: state_fingerprint is deterministic (same seed, same bytes)" }
+    else { Fail "30 new_primitives: state_fingerprint differs across identical calls: '$fp1' vs '$fp2'" }
+    $r = Psql -Sql "SELECT fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 0, 42);"
+    if ($r -match 'n_bits must be > 0') { Pass "30 new_primitives: state_fingerprint rejects n_bits <= 0" }
+    else { Fail "30 new_primitives: expected an n_bits<=0 rejection, got: $r" }
+
+    # --- fractal_cycle_detect: fingerprints of A,B,A,B,A,B as a bytea[].
+    # Brent's checkpoint schedule needs roughly twice the period in
+    # stream length to close, so a bare A,B,A does NOT report a cycle --
+    # the 6-element stream does
+    # (0-indexed at_index=3, cycle_len=2). Negative case uses A,B,D with
+    # mutually non-collinear state vectors: SimHash fingerprints of
+    # SCALAR-MULTIPLE states are byte-identical (both '9,9,9' and
+    # '4,4,4' sit on the (1,1,1) diagonal), so the negative case needs a
+    # different direction, not a different magnitude.
+    $r = Psql -Sql @"
+SELECT at_index, cycle_len FROM fractal_cycle_detect(
+  ARRAY[
+    fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64, 7),
+    fractal_state_fingerprint(ARRAY[9,9,9]::float8[], 64, 7),
+    fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64, 7),
+    fractal_state_fingerprint(ARRAY[9,9,9]::float8[], 64, 7),
+    fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64, 7),
+    fractal_state_fingerprint(ARRAY[9,9,9]::float8[], 64, 7)
+  ], 0);
+"@
+    if ($r -eq '3|2') { Pass "30 new_primitives: cycle_detect closes the A,B,A,B,A,B period-2 stream at_index=3 cycle_len=2" }
+    else { Fail "30 new_primitives: cycle_detect(A,B,A,B,A,B)='$r'" }
+
+    $r = Psql -Sql @"
+SELECT count(*) FROM fractal_cycle_detect(
+  ARRAY[
+    fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64, 7),
+    fractal_state_fingerprint(ARRAY[9,9,9]::float8[], 64, 7),
+    fractal_state_fingerprint(ARRAY[4,5,6]::float8[], 64, 7)
+  ], 0);
+"@
+    if ($r -eq '0') { Pass "30 new_primitives: cycle_detect reports no cycle for three distinct states" }
+    else { Fail "30 new_primitives: cycle_detect(A,B,D) row count='$r' (expected 0)" }
+
+    $r = Psql -Sql "SELECT fractal_cycle_detect(ARRAY[fractal_state_fingerprint(ARRAY[1]::float8[], 8, 1)], -1);"
+    if ($r -match 'hamming_threshold must be >= 0') { Pass "30 new_primitives: cycle_detect rejects a negative hamming_threshold" }
+    else { Fail "30 new_primitives: expected a negative-threshold rejection, got: $r" }
+
+    # --- fractal_tda_persistence_diagram: 12 points in two tight
+    # 6-point clusters far apart. Each cluster forms a complete graph
+    # under thresh=1.0, so the 1-skeleton cycle rank is 15 edges -
+    # 6 vertices + 1 component = 10 per cluster = 20 total; h0_bars is
+    # 5 merge bars per cluster = 10. max_dim=0 must leave betti1 NULL.
+    $pts = "0.0,0.0, 0.1,0.0, 0.05,0.0866, 0.1,0.0866, 0.02,0.05, 0.08,0.03, 10.0,10.0, 10.1,10.0, 10.05,10.0866, 10.1,10.0866, 10.02,10.05, 10.08,10.03"
+    $r = Psql -Sql "SELECT betti1, jsonb_array_length(h0_bars) FROM fractal_tda_persistence_diagram(ARRAY[$pts]::float8[], 2, 1, 1.0, 64);"
+    if ($r -eq '20|10') { Pass "30 new_primitives: tda_persistence_diagram two-cluster betti1=20 (2 x (15-6+1)), n_h0_bars=10 (2 x 5 merge bars)" }
+    else { Fail "30 new_primitives: tda_persistence_diagram='$r' (expected betti1=20, n_h0_bars=10)" }
+    $r = Psql -Sql "SELECT betti1 FROM fractal_tda_persistence_diagram(ARRAY[$pts]::float8[], 2, 0, 1.0, 64);"
+    if ($r -eq '') { Pass "30 new_primitives: tda_persistence_diagram max_dim=0 leaves betti1 NULL" }
+    else { Fail "30 new_primitives: tda max_dim=0 betti1='$r' (expected NULL)" }
+
+    # --- fractal_optimize_subset: value-weighted allocation with bounds
+    # 0.6 per item and at-most-2 nonzero. Weights sum to 1.0, so with
+    # k=2 each cap must allow the pair to reach 1.0 (0.6+0.4 works;
+    # [0.4]x5 caps the pair at 0.8 < 1.0, infeasible). With feasible
+    # [0.6]x5 caps the optimum puts 0.6 on the largest value (0.15) and
+    # 0.4 on the second (0.12) -> score exactly 0.138.
+    $r = Psql -Sql @"
+SELECT (s->>'score')::float8
+  FROM (SELECT fractal_optimize_subset(
+          ARRAY[0.12,0.09,0.15,0.06,0.11]::float8[],
+          ARRAY[0.6,0.6,0.6,0.6,0.6]::float8[], 2) s) t;
+"@
+    $scoreOk = $false
+    if ($r -ne '') { $sc = [double]$r; if ($sc -gt 0.1378 -and $sc -lt 0.1382) { $scoreOk = $true } }
+    if ($scoreOk) { Pass "30 new_primitives: optimize_subset hits the exact 0.138 optimum (got $r)" }
+    else { Fail "30 new_primitives: optimize_subset score='$r' (expected 0.138)" }
+
+    $osW = Psql -Sql @"
+SELECT s->'weights'
+  FROM (SELECT fractal_optimize_subset(
+          ARRAY[0.12,0.09,0.15,0.06,0.11]::float8[],
+          ARRAY[0.6,0.6,0.6,0.6,0.6]::float8[], 2) s) t;
+"@
+    $osNz = 0
+    foreach ($w in (($osW -replace '[\[\]]', '') -split ',')) {
+        if ($w -ne '' -and [double]$w -gt 0.0000001) { $osNz++ }
+    }
+    if ($osNz -le 2) { Pass "30 new_primitives: optimize_subset honors the at-most-2-nonzero cap ($osNz nonzero)" }
+    else { Fail "30 new_primitives: optimize_subset nonzero weights=$osNz ('$osW')" }
+
+    $r = Psql -Sql @"
+SELECT fractal_optimize_subset(
+  ARRAY[0.12,0.09,0.15,0.06,0.11]::float8[],
+  ARRAY[0.4,0.4,0.4,0.4,0.4]::float8[], 2);
+"@
+    if ($r -match 'fractal_optimize_subset rc=') { Pass "30 new_primitives: optimize_subset infeasible instance (caps 0.4x5 < 1.0 at k=2) rejected cleanly" }
+    else { Fail "30 new_primitives: infeasible optimize_subset='$r' (expected a clean rc= rejection)" }
+}
+
+# Enterprise activation/signature-verification wiring, exercised via a
+# throwaway, self-signed mock enterprise .dll compiled at test time --
+# gives gates 24-26's dlopen/dlsym/signature-verification machinery real
+# CI coverage instead of self-skipping. Unlike the other test plugin
+# DLLs in BuildTestPlugins (/DFSQL_STATIC + a shared .def file), this
+# mock has no matching .def entry, so it's compiled with
+# /DFSQL_BUILDING_DLL instead -- FSQL_API then expands to
+# __declspec(dllexport) directly, no .def needed.
+#
+# Not covered here: torn-tail repair and ledger-directory permission
+# failures don't apply (the ledger is a real table, not a flat file),
+# and there's no persistent in-process state for a reload-time guard to
+# race against (each Psql call is a fresh backend). Byte-level tamper
+# detection reuses gate 25's UPDATE ... SET blob = set_byte(...) technique.
+function Gate31EnterpriseMock {
+    # Same bounded-timeout restart technique as Gate28ReviewIsolation's
+    # own RestartPgForGate28 (see its header comment for why -w/a plain
+    # retry loop around pg_ctl is not safe on Windows) -- a second,
+    # independent copy rather than a shared helper, matching this
+    # file's existing one-restart-helper-per-gate convention.
+    function RunPgCtlWithTimeout31([string[]]$PgCtlArgs, [int]$TimeoutMs) {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "$Bin\pg_ctl.exe"
+        foreach ($a in (@('-D', $DataDir) + $PgCtlArgs)) { $psi.ArgumentList.Add($a) }
+        $psi.UseShellExecute = $false
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if (-not $proc.WaitForExit($TimeoutMs)) {
+            try { $proc.Kill($true) } catch { Write-Verbose "best-effort: process tree kill failed (process may have already exited): $($_.Exception.Message)" }
+            return $false
+        }
+        return ($proc.ExitCode -eq 0)
+    }
+    function PsqlPingWithTimeout31([int]$TimeoutMs) {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "$Bin\psql.exe"
+        foreach ($a in @('-h','127.0.0.1','-p',"$Port",'-U','postgres','-d','postgres','-X','-tA','-c','SELECT 1;')) {
+            $psi.ArgumentList.Add($a)
+        }
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.UseShellExecute = $false
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        $null = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit($TimeoutMs)) {
+            try { $proc.Kill($true) } catch { Write-Verbose "best-effort: process tree kill failed (process may have already exited): $($_.Exception.Message)" }
+            return $false
+        }
+        return ($outTask.Result.Trim() -eq '1')
+    }
+    function RestartPgForGate31 {
+        [void](RunPgCtlWithTimeout31 @('-m', 'fast', 'stop') 15000)
+        $pidFile = Join-Path $DataDir 'postmaster.pid'
+        for ($i = 0; $i -lt (40 * $TimeoutMult) -and (Test-Path $pidFile); $i++) { Start-Sleep -Milliseconds 250 }
+        if (-not (RunPgCtlWithTimeout31 @('-l', (Join-Path $DataDir 'log'), 'start') 15000)) { return $false }
+        for ($i = 0; $i -lt (30 * $TimeoutMult); $i++) {
+            if (PsqlPingWithTimeout31 1000) { return $true }
+            Start-Sleep -Milliseconds 500
+        }
+        return $false
+    }
+
+    $mockSo = Join-Path $env:TEMP "fractalsql_bt_mock_ent_$PgMajor.dll"
+    $badsigSo = "$mockSo.badsig.dll"
+    $badsigSig = "$badsigSo.sig"
+    $failSentinel = Join-Path $env:TEMP "fractalsql_bt_mock_ent_fail_$PgMajor"
+    Remove-Item -Force $mockSo, $badsigSo, $badsigSig, $failSentinel -ErrorAction SilentlyContinue
+
+    $obj = [System.IO.Path]::ChangeExtension($mockSo, '.obj')
+    $src = Join-Path $RepoRoot 'tests\mock_enterprise_core.c'
+    $inc = Join-Path $RepoRoot 'include'
+    # Captured, not | Out-Null'd: this was the first time anyone had
+    # compiled this file on Windows at all, and swallowing cl.exe's own
+    # output here is exactly what made the first real failure (a POSIX-
+    # only <unistd.h> include) silent and undiagnosable from the gate's
+    # own FAIL line alone.
+    $buildOut = & cl.exe /nologo /MT /LD /DFSQL_BUILDING_DLL "/I$inc" $src "/Fo$obj" "/Fe$mockSo" 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $mockSo)) {
+        Fail "31 enterprise_mock: mock .dll failed to build"
+        Write-Host ($buildOut -join "`n")
+        return
+    }
+    Copy-Item $mockSo $badsigSo -Force
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $randBytes = New-Object byte[] 64
+    $rng.GetBytes($randBytes)
+    [System.IO.File]::WriteAllBytes($badsigSig, $randBytes)
+
+    $env:FSQL_MOCK_ENT_FAIL = $failSentinel
+    if (-not (RestartPgForGate31)) {
+        Fail "31 enterprise_mock: could not restart cluster with FSQL_MOCK_ENT_FAIL set"
+        Remove-Item Env:\FSQL_MOCK_ENT_FAIL -ErrorAction SilentlyContinue
+        Remove-Item -Force $mockSo, $badsigSo, $badsigSig, $failSentinel -ErrorAction SilentlyContinue
+        return
+    }
+
+    $pre = Psql -Sql "SELECT fractal_ledger_truth_count();"
+    if ($pre -match 'enterprise tier not loaded') { Pass "31 enterprise_mock: truth_count refuses cleanly before enterprise_lib is set" }
+    else { Fail "31 enterprise_mock: expected 'enterprise tier not loaded', got: $pre" }
+
+    # Path 1: a corrupt/wrong .sig is ALWAYS fatal -- no real signing
+    # key needed. ensure_enterprise_lib() only WARNs on this (src\
+    # fractalsql.c) and returns false, so the caller's own "enterprise
+    # tier not loaded" still fires -- the WARNING text is what's
+    # matched here, not the final result.
+    if (PgSetGuc -Name 'fractalsql.enterprise_lib' -SetVal "'$badsigSo'" -Want $badsigSo) {
+        $r1 = Psql -Sql "SELECT fractal_ledger_truth_count();"
+        if ($r1 -match '(?i)signature') { Pass "31 enterprise_mock: a corrupt/wrong .sig refuses to load" }
+        else { Fail "31 enterprise_mock: expected a signature-refusal, got: $r1" }
+    } else { Fail "31 enterprise_mock: could not apply enterprise_lib=badsig_so" }
+
+    # A wrong-SIZED .sig (not just wrong-content) is a distinct branch in
+    # ent_verify_signature: the file-size check is rejected BEFORE the
+    # signature-verify step the badsig test above exercises -- confirmed
+    # via gcov this specific size-check branch never ran before this.
+    $wrongsizeSo = "$mockSo.wrongsize.dll"
+    Copy-Item $mockSo $wrongsizeSo -Force
+    $wrongsizeBytes = New-Object byte[] 10
+    $rng.GetBytes($wrongsizeBytes)
+    [System.IO.File]::WriteAllBytes("$wrongsizeSo.sig", $wrongsizeBytes)
+    if (PgSetGuc -Name 'fractalsql.enterprise_lib' -SetVal "'$wrongsizeSo'" -Want $wrongsizeSo) {
+        $rsize = Psql -Sql "SELECT fractal_ledger_truth_count();"
+        if ($rsize -match '(?i)signature') { Pass "31 enterprise_mock: a wrong-SIZED .sig (not 64 bytes) refuses to load" }
+        else { Fail "31 enterprise_mock: expected a signature-refusal, got: $rsize" }
+    } else { Fail "31 enterprise_mock: could not apply enterprise_lib=wrongsize_so" }
+    Remove-Item -Force $wrongsizeSo, "$wrongsizeSo.sig" -ErrorAction SilentlyContinue
+
+    # Path 2: no .sig at all + enterprise_require_signature=on -- fatal.
+    Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_require_signature = on;" | Out-Null
+    if (PgSetGuc -Name 'fractalsql.enterprise_lib' -SetVal "'$mockSo'" -Want $mockSo) {
+        $r2 = Psql -Sql "SELECT fractal_ledger_truth_count();"
+        if ($r2 -match '(?i)signature') { Pass "31 enterprise_mock: a missing .sig refuses to load when enterprise_require_signature is set" }
+        else { Fail "31 enterprise_mock: expected a signature-refusal, got: $r2" }
+    } else { Fail "31 enterprise_mock: could not apply enterprise_lib=mock_so (require_signature path)" }
+
+    # Path 3: no .sig, enterprise_require_signature back off -- loads
+    # unverified (the backward-compatible default). This is the config
+    # that stays in place for the rest of this gate.
+    Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;" | Out-Null
+    if (PgSetGuc -Name 'fractalsql.enterprise_lib' -SetVal "'$mockSo'" -Want $mockSo) {
+        # ensure_enterprise_lib() re-WARNs "no signature found ...
+        # loading unverified" on EVERY call from here on (it's a
+        # backend-local static, and every Psql call here is a fresh
+        # backend -- see this gate's own header comment), so every
+        # exact-match check for the rest of this gate needs the FIRST
+        # result line, not the whole combined text. Confirmed live:
+        # unlike bash's true-interleaved `2>&1`, Psql's own
+        # implementation is `($stdoutTask.Result + $stderrTask.Result)`
+        # -- stdout is ALWAYS the leading block and stderr (the
+        # WARNING/HINT/NOTICE noise) is ALWAYS appended after,
+        # regardless of real chronological order, so the real value is
+        # first, not last (the opposite of this file's earlier -Last 1
+        # attempt, which grabbed the trailing HINT line instead).
+        $r3 = (Psql -Sql "SELECT fractal_ledger_truth_count();") -split "`r?`n" | Select-Object -First 1
+        if ($r3 -eq '0') { Pass "31 enterprise_mock: a missing .sig loads unverified by default once require_signature is off" }
+        else { Fail "31 enterprise_mock: expected 0, got: $r3" }
+    } else { Fail "31 enterprise_mock: could not apply enterprise_lib=mock_so (unverified path)" }
+
+    # Every ledger void/count wrapper's success branch.
+    foreach ($fn in @('fractal_ledger_flush','fractal_ledger_compact','fractal_ledger_reset_soft','fractal_ledger_reset_hard','fractal_ledger_load')) {
+        $r = Psql -Sql "SELECT $fn();"
+        if ($r -match 'ERROR') { Fail "31 enterprise_mock: $fn errored while the mock is loaded: $r" }
+        else { Pass "31 enterprise_mock: $fn succeeds while the mock is loaded" }
+    }
+    $sc = (Psql -Sql "SELECT fractal_ledger_shadow_count();") -split "`r?`n" | Select-Object -First 1
+    if ($sc -eq '0') { Pass "31 enterprise_mock: shadow_count succeeds while the mock is loaded" }
+    else { Fail "31 enterprise_mock: expected 0 from shadow_count, got: $sc" }
+
+    # Failure branch: the sentinel flips the SAME mock's return codes
+    # without touching the postmaster's environment or enterprise_lib
+    # again (see tests\mock_enterprise_core.c's own header for why a
+    # file, not a value, is the toggle).
+    New-Item -ItemType File -Force -Path $failSentinel | Out-Null
+    $rf = Psql -Sql "SELECT fractal_ledger_flush();"
+    if ($rf -match 'ERROR') { Pass "31 enterprise_mock: flush refuses cleanly when the mock reports failure" }
+    else { Fail "31 enterprise_mock: expected flush to error with the fail sentinel set, got: $rf" }
+    Remove-Item -Force $failSentinel -ErrorAction SilentlyContinue
+
+    # Deep storage layer, entirely this repo's own code (ledger write/
+    # verify, HMAC, chain hashing) -- audit_log/ledger_verify never
+    # call back into the dlopen'd library at all ("pure storage-layer
+    # check" per fractal_ledger_verify's own SQL comment), so this
+    # exercises real ground regardless of what the mock above did.
+    Psql -Sql "DELETE FROM fractalsql_ledger WHERE kind = 2;" | Out-Null
+    $rg = Psql -Sql @"
+SET fractalsql.enterprise_ledger_key = 'gate31-hmac-test-key';
+SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
+SELECT fractal_ledger_verify(2)::text;
+UPDATE fractalsql_ledger
+   SET blob = set_byte(blob, length(blob) / 2, 254)
+ WHERE kind = 2 AND id = (SELECT max(id) FROM fractalsql_ledger WHERE kind = 2);
+SELECT fractal_ledger_verify(2)::text;
+RESET fractalsql.enterprise_ledger_key;
+"@
+    if ($rg -match '"ok": true') { Pass "31 enterprise_mock: audit_log + ledger_verify round-trip a real HMAC-keyed chain entry" }
+    else { Fail "31 enterprise_mock: expected an ok verify before tamper, got: $rg" }
+    if ($rg -match '"ok": false') { Pass "31 enterprise_mock: ledger_verify detects a byte-level HMAC tamper (no real .so needed)" }
+    else { Fail "31 enterprise_mock: expected a tamper-detected report after the byte-flip, got: $rg" }
+
+    # fractal_audit_unpack: a direct decode call -- distinct from the
+    # audit_log+ledger_verify round-trip above, which never calls this
+    # function at all (confirmed 0% coverage via gcov before this). The
+    # mock's fsql_audit_unpack is a pure echo, so round-tripping jsonb
+    # through it is an exact equality check. A payload past the
+    # 8192-byte default cap forces the FSQL_ETRUNCATED buffer-growth
+    # retry loop.
+    $au = (Psql -Sql "SELECT (fractal_audit_unpack(jsonb_build_object('n', repeat('A', 9000))::text::bytea) = jsonb_build_object('n', repeat('A', 9000)));") -split "`r?`n" | Select-Object -First 1
+    if ($au -eq 't') { Pass "31 enterprise_mock: audit_unpack round-trips a payload past the 8192-byte default cap" }
+    else { Fail "31 enterprise_mock: expected audit_unpack to echo the 9000-byte payload back exactly, got: $au" }
+
+    # Portfolio multimodal family (all 3 optional symbols present here).
+    $pm = (Psql -Sql "SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.05]::float8[], ARRAY[0.04,0.01,0.01,0.03]::float8[], 1, 2)->>'n_found';") -split "`r?`n" | Select-Object -First 1
+    if ($pm -eq '1') { Pass "31 enterprise_mock: fractal_optimize_portfolio_multimodal returns a well-formed result" }
+    else { Fail "31 enterprise_mock: expected n_found=1, got: $pm" }
+    # n_restarts omitted here (defaults to 8): the _pareto variant also
+    # requires 1 <= max_front <= n_restarts, which an explicit
+    # n_restarts=2 against max_front's default of 8 violates.
+    $pmp = (Psql -Sql "SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.05]::float8[], ARRAY[0.04,0.01,0.01,0.03]::float8[], 1)->>'n_found';") -split "`r?`n" | Select-Object -First 1
+    if ($pmp -eq '1') { Pass "31 enterprise_mock: fractal_optimize_portfolio_multimodal_pareto returns a well-formed result" }
+    else { Fail "31 enterprise_mock: expected n_found=1, got: $pmp" }
+
+    # t2s_audit_log_best_effort / portfolio_audit_log_best_effort: the
+    # SAME two "best-effort kind=2 audit record" helpers fractal_text_
+    # to_sql/fractal_optimize_portfolio always call, but confirmed via
+    # gcov to only ever hit their early "enterprise not loaded" return
+    # branch -- neither gate 04/14/20 (text_to_sql) nor gate 22
+    # (optimize_portfolio) ever runs with enterprise loaded. One call
+    # to each here, now that the mock IS loaded, exercises the real
+    # JSON-build + ledger_write_entry branch in both. convert_from(...,
+    # 'UTF8'), not a bare ::text cast: bytea's default ::text cast
+    # gives its hex-escaped literal form under bytea_output=hex, not
+    # the decoded string jsonb_in needs.
+    Psql -Sql "SELECT fractal_text_to_sql('q', ARRAY['bt_customers','bt_orders']);" | Out-Null
+    $t2sAudit = (Psql -Sql "SELECT convert_from(blob, 'UTF8')::jsonb->>'type' FROM fractalsql_ledger WHERE kind = 2 ORDER BY id DESC LIMIT 1;") -split "`r?`n" | Select-Object -First 1
+    if ($t2sAudit -eq 'text_to_sql') { Pass "31 enterprise_mock: fractal_text_to_sql logs a text_to_sql provenance record when enterprise is loaded" }
+    else { Fail "31 enterprise_mock: expected the latest kind=2 row to be type=text_to_sql, got: $t2sAudit" }
+
+    Psql -Sql "SELECT fractal_optimize_portfolio(ARRAY[0.08,0.12,0.10,0.15]::float8[], ARRAY[0.04,0.01,0.01,0.01, 0.01,0.06,0.01,0.01, 0.01,0.01,0.05,0.01, 0.01,0.01,0.01,0.09]::float8[], 2, 12345);" | Out-Null
+    $portfolioAudit = (Psql -Sql "SELECT convert_from(blob, 'UTF8')::jsonb->>'type' FROM fractalsql_ledger WHERE kind = 2 ORDER BY id DESC LIMIT 1;") -split "`r?`n" | Select-Object -First 1
+    if ($portfolioAudit -eq 'portfolio_optimize') { Pass "31 enterprise_mock: fractal_optimize_portfolio logs a portfolio_optimize provenance record when enterprise is loaded" }
+    else { Fail "31 enterprise_mock: expected the latest kind=2 row to be type=portfolio_optimize, got: $portfolioAudit" }
+
+    Remove-Item Env:\FSQL_MOCK_ENT_FAIL -ErrorAction SilentlyContinue
+    Remove-Item -Force $mockSo, $badsigSo, $badsigSig, $failSentinel -ErrorAction SilentlyContinue
+    Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_lib; ALTER SYSTEM RESET fractalsql.enterprise_require_signature;" | Out-Null
+    RestartPgForGate31 | Out-Null
+}
+
+# The 5 C-native Agent functions (src\fractalsql.c): fractal_search_
+# agent, fractal_agent_plan_explore, fractal_agent_trajectory_predict,
+# fractal_agent_detect_loop, fractal_rag_agent, plus their shared helper
+# build_retrieval_context. Gate 23's "agents" only exercises the
+# PL/pgSQL agent layer, never these direct C UDFs. Mirrors
+# build_test.sh's gate_32_sovereign_agents.
+#
+# search_agent/rag_agent need a working embed dispatch, which $Mock
+# can't provide. $Embed always returns "[0.1,0.2,0.3]" regardless of
+# input -- used for both the embed step and, as a deterministic value,
+# the reason step.
+function Gate32SovereignAgents {
+    if (-not (PgSwapPlugin $Embed)) { Fail "32 sovereign_agents: plugin swap did not take effect"; return }
+
+    Psql -Sql @"
+DROP TABLE IF EXISTS bt_agent_vec, bt_agent_fvec, bt_agent_nopk, bt_agent_empty;
+CREATE TABLE bt_agent_vec (id serial PRIMARY KEY, emb float8[]);
+INSERT INTO bt_agent_vec (emb) VALUES
+  (ARRAY[0.0,0.0,0.0]::float8[]),
+  (ARRAY[1.0,0.0,0.0]::float8[]),
+  (ARRAY[0.0,1.0,0.0]::float8[]),
+  (ARRAY[0.0,0.0,1.0]::float8[]);
+CREATE TABLE bt_agent_fvec (id serial PRIMARY KEY, emb fractal_vector);
+INSERT INTO bt_agent_fvec (emb) VALUES ('[0,0,0]'), ('[1,1,1]');
+CREATE TABLE bt_agent_nopk (id int, emb float8[]);
+INSERT INTO bt_agent_nopk VALUES (1, ARRAY[0.0,0.0,0.0]::float8[]);
+CREATE TABLE bt_agent_empty (id int PRIMARY KEY, emb float8[]);
+"@ | Out-Null
+
+    # --- 1: fractal_search_agent ----------------------------------------
+    $sa = Psql -Sql "SELECT answer, array_length(source_doc_ids, 1), execution_time_ms FROM fractal_search_agent('q', 'bt_agent_vec', 'emb');"
+    if ($sa -match '^\[0\.1,0\.2,0\.3\]\|') { Pass "32 sovereign_agents: fractal_search_agent returns the real dispatch answer + non-empty source_doc_ids" }
+    else { Fail "32 sovereign_agents: expected the embed/reason canary answer, got: $sa" }
+
+    $saNull = Psql -Sql "SELECT fractal_search_agent(NULL, 'bt_agent_vec', 'emb');"
+    if ($saNull -match 'query, table_name, and vector_col are required') { Pass "32 sovereign_agents: fractal_search_agent rejects a NULL query" }
+    else { Fail "32 sovereign_agents: expected a required-args rejection, got: $saNull" }
+
+    $saEmpty = Psql -Sql "SELECT fractal_search_agent('q', 'bt_agent_empty', 'emb');"
+    if ($saEmpty -match 'no rows found in bt_agent_empty\.emb') { Pass "32 sovereign_agents: fractal_search_agent rejects an empty table" }
+    else { Fail "32 sovereign_agents: expected a no-rows rejection, got: $saEmpty" }
+
+    # --- 2: fractal_agent_plan_explore (SETOF, STRICT) ------------------
+    $pe = Psql -Sql "SELECT count(*), bool_and(array_length(plan_trajectory, 1) = 3) FROM fractal_agent_plan_explore('q', 'bt_agent_vec', 'emb', 3);"
+    if ($pe -match '^[1-9][0-9]*\|t$') { Pass "32 sovereign_agents: fractal_agent_plan_explore returns branches with real 3-dim trajectories" }
+    else { Fail "32 sovereign_agents: expected >=1 row with 3-dim trajectories, got: $pe" }
+
+    $peNull = Psql -Sql "SELECT * FROM fractal_agent_plan_explore(NULL, 'bt_agent_vec', 'emb', 3);"
+    if ([string]::IsNullOrEmpty($peNull)) { Pass "32 sovereign_agents: fractal_agent_plan_explore(NULL, ...) returns an empty set (STRICT)" }
+    else { Fail "32 sovereign_agents: expected an empty set for a NULL arg, got: $peNull" }
+
+    # --- 3: fractal_agent_trajectory_predict (STRICT) -------------------
+    $tp = Psql -Sql "SELECT array_length(predicted_state_vector, 1), projected_drift_delta IS NOT NULL, risk_threshold_exceeded IS NOT NULL FROM fractal_agent_trajectory_predict('bt_agent_vec', 'emb', 1, 1);"
+    if ($tp -eq '3|t|t') { Pass "32 sovereign_agents: fractal_agent_trajectory_predict returns a real 3-dim predicted state (float8[] vector_col)" }
+    else { Fail "32 sovereign_agents: expected 3|t|t, got: $tp" }
+
+    # Same call against a fractal_vector-typed vector_col -- the other
+    # branch of decode_vector_datum (confirmed 0% coverage before this).
+    $tpfv = Psql -Sql "SELECT array_length(predicted_state_vector, 1), projected_drift_delta IS NOT NULL, risk_threshold_exceeded IS NOT NULL FROM fractal_agent_trajectory_predict('bt_agent_fvec', 'emb', 1, 1);"
+    if ($tpfv -eq '3|t|t') { Pass "32 sovereign_agents: fractal_agent_trajectory_predict returns a real 3-dim predicted state (fractal_vector vector_col)" }
+    else { Fail "32 sovereign_agents: expected 3|t|t (fractal_vector vector_col), got: $tpfv" }
+
+    $tpNull = Psql -Sql "SELECT fractal_agent_trajectory_predict(NULL, 'emb', 1, 1);"
+    if ([string]::IsNullOrEmpty($tpNull)) { Pass "32 sovereign_agents: fractal_agent_trajectory_predict(NULL, ...) returns NULL (STRICT)" }
+    else { Fail "32 sovereign_agents: expected an empty/NULL result, got: $tpNull" }
+
+    $tpNopk = Psql -Sql "SELECT fractal_agent_trajectory_predict('bt_agent_nopk', 'emb', 1, 1);"
+    if ($tpNopk -match 'has no primary key') { Pass "32 sovereign_agents: fractal_agent_trajectory_predict rejects a table with no primary key" }
+    else { Fail "32 sovereign_agents: expected a no-primary-key rejection, got: $tpNopk" }
+
+    $tpOob = Psql -Sql "SELECT fractal_agent_trajectory_predict('bt_agent_vec', 'emb', 999, 1);"
+    if ($tpOob -match 'no row in bt_agent_vec with') { Pass "32 sovereign_agents: fractal_agent_trajectory_predict rejects a nonexistent baseline_id" }
+    else { Fail "32 sovereign_agents: expected a no-such-baseline rejection, got: $tpOob" }
+
+    # --- 4: fractal_agent_detect_loop (pure math, no table/plugin) ------
+    $dl = Psql -Sql "SELECT agent_id, is_loop_detected FROM fractal_agent_detect_loop('agent1', ARRAY[1,1, 9,9, 1,1, 9,9, 1,1, 9,9]::float8[], 2, 64, 7.0, 0);"
+    if ($dl -eq 'agent1|t') { Pass "32 sovereign_agents: fractal_agent_detect_loop closes a real period-2 cycle (A,B,A,B,A,B)" }
+    else { Fail "32 sovereign_agents: expected agent1|t, got: $dl" }
+
+    $dlConst = Psql -Sql "SELECT is_loop_detected FROM fractal_agent_detect_loop('agent2', ARRAY[5,5, 5,5, 5,5]::float8[], 2, 64, 7.0, 0);"
+    if ($dlConst -eq 't') { Pass "32 sovereign_agents: fractal_agent_detect_loop closes a cycle on a constant-state log" }
+    else { Fail "32 sovereign_agents: expected t for a constant-state log, got: $dlConst" }
+
+    # fractal_agent_detect_loop was found to be (wrongly) declared
+    # STRICT in SQL -- its C body already explicitly handles every
+    # arg's NULL case (a clear error for the 3 required args, a
+    # documented default for the 3 optional ones), which STRICT was
+    # silently short-circuiting around. Fixed (STRICT removed from the
+    # SQL declaration); asserting the real, now-reachable error message.
+    $dlReq = Psql -Sql "SELECT fractal_agent_detect_loop(NULL, ARRAY[1,1]::float8[], 2);"
+    if ($dlReq -match 'agent_id, state_log, and dim are required') { Pass "32 sovereign_agents: fractal_agent_detect_loop rejects a NULL agent_id" }
+    else { Fail "32 sovereign_agents: expected a required-args rejection, got: $dlReq" }
+
+    # The other half of the same bug: an explicitly-NULL OPTIONAL arg
+    # (n_bits here) must fall back to its documented default (64), not
+    # null out the whole result.
+    $dlOptNull = Psql -Sql "SELECT is_loop_detected FROM fractal_agent_detect_loop('agent3', ARRAY[1,1, 9,9, 1,1, 9,9, 1,1, 9,9]::float8[], 2, NULL, 7.0, 0);"
+    if ($dlOptNull -eq 't') { Pass "32 sovereign_agents: fractal_agent_detect_loop(..., n_bits=NULL, ...) falls back to the n_bits=64 default, not a NULL result" }
+    else { Fail "32 sovereign_agents: expected t (default n_bits honored), got: $dlOptNull" }
+
+    $dlDim0 = Psql -Sql "SELECT fractal_agent_detect_loop('a', ARRAY[1,1]::float8[], 0);"
+    if ($dlDim0 -match 'dim must be > 0') { Pass "32 sovereign_agents: fractal_agent_detect_loop rejects dim <= 0" }
+    else { Fail "32 sovereign_agents: expected a dim<=0 rejection, got: $dlDim0" }
+
+    $dlBits0 = Psql -Sql "SELECT fractal_agent_detect_loop('a', ARRAY[1,1,2,2]::float8[], 2, 0);"
+    if ($dlBits0 -match 'n_bits must be > 0') { Pass "32 sovereign_agents: fractal_agent_detect_loop rejects n_bits <= 0" }
+    else { Fail "32 sovereign_agents: expected an n_bits<=0 rejection, got: $dlBits0" }
+
+    $dlHam = Psql -Sql "SELECT fractal_agent_detect_loop('a', ARRAY[1,1,2,2]::float8[], 2, 64, 42.0, -1);"
+    if ($dlHam -match 'hamming_threshold must be >= 0') { Pass "32 sovereign_agents: fractal_agent_detect_loop rejects a negative hamming_threshold" }
+    else { Fail "32 sovereign_agents: expected a negative-threshold rejection, got: $dlHam" }
+
+    $dlShort = Psql -Sql "SELECT fractal_agent_detect_loop('a', ARRAY[1,1]::float8[], 2);"
+    if ($dlShort -match 'state_log must contain at least 2 states') { Pass "32 sovereign_agents: fractal_agent_detect_loop rejects a state_log with fewer than 2 states" }
+    else { Fail "32 sovereign_agents: expected a too-few-states rejection, got: $dlShort" }
+
+    $dlShape = Psql -Sql "SELECT fractal_agent_detect_loop('a', ARRAY[1,1,2]::float8[], 2);"
+    if ($dlShape -match 'is not a multiple of dim') { Pass "32 sovereign_agents: fractal_agent_detect_loop rejects a state_log length not divisible by dim" }
+    else { Fail "32 sovereign_agents: expected a length-not-divisible rejection, got: $dlShape" }
+
+    # --- 5: fractal_rag_agent -------------------------------------------
+    $ra = Psql -Sql "SELECT answer FROM fractal_rag_agent('q', 'bt_agent_vec', 'emb');"
+    if ($ra -eq '[0.1,0.2,0.3]') { Pass "32 sovereign_agents: fractal_rag_agent returns the real embed/reason dispatch answer" }
+    else { Fail "32 sovereign_agents: expected the embed/reason canary answer, got: $ra" }
+
+    $raNull = Psql -Sql "SELECT fractal_rag_agent(NULL, 'bt_agent_vec', 'emb');"
+    if ($raNull -match 'query, table_name, and vector_col are required') { Pass "32 sovereign_agents: fractal_rag_agent rejects a NULL query" }
+    else { Fail "32 sovereign_agents: expected a required-args rejection, got: $raNull" }
+
+    $raEmpty = Psql -Sql "SELECT fractal_rag_agent('q', 'bt_agent_empty', 'emb');"
+    if ($raEmpty -match 'no rows found in bt_agent_empty\.emb') { Pass "32 sovereign_agents: fractal_rag_agent rejects an empty table" }
+    else { Fail "32 sovereign_agents: expected a no-rows rejection, got: $raEmpty" }
+
+    Psql -Sql "DROP TABLE IF EXISTS bt_agent_vec, bt_agent_fvec, bt_agent_nopk, bt_agent_empty;" | Out-Null
+    PgSwapPlugin $Mock | Out-Null
+}
+
 function RunGates($gates) {
     Write-Information "== PG$PgMajor (Windows) ==" -InformationAction Continue
     if ($gates -contains '01') {
@@ -3346,6 +4045,10 @@ function RunGates($gates) {
                 '26' { Gate26EnterpriseSignature }
                 '27' { Gate27Think }
                 '28' { Gate28ReviewIsolation }
+                '29' { Gate29VectorOps }
+                '30' { Gate30NewPrimitives }
+                '31' { Gate31EnterpriseMock }
+                '32' { Gate32SovereignAgents }
             }
         }
         PgTeardown

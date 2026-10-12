@@ -108,10 +108,26 @@
 #                      even under a real postmaster restart with it
 #                      exported (RESPONSE_MODE has no GUC -- it's a
 #                      boot-time env capture, unlike THINK in gate 27)
+#   29  vector_ops      all 17 fractal_vector_* functions (arithmetic/   ~2s
+#                      distance/quantization on the native vector
+#                      type), known-answer asserted
+#   30  new_primitives  the 6 newest analytics/vector-math primitives,    ~2s
+#                      known-answer asserted: change_point_detect,
+#                      periodogram, state_fingerprint, cycle_detect,
+#                      tda_persistence_diagram, optimize_subset
+#   31  enterprise_mock  enterprise activation/signature verification    ~3s
+#                      (gates 24-26's dlopen/dlsym wiring) against a
+#                      throwaway self-signed mock .so compiled at test
+#                      time (tests/mock_enterprise_core.c)
+#   32  sovereign_agents  the 5 C-native Agent functions (fractal_       ~3s
+#                      search_agent, fractal_agent_plan_explore,
+#                      fractal_agent_trajectory_predict, fractal_agent_
+#                      detect_loop, fractal_rag_agent)
 #
 # Gate sets:
 #   QUICK   = 01 02                                   post-edit sanity loop
 #   DEFAULT = 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23  pre-push / CI (one major)
+#             24 25 26 27 28 29 30 31 32
 #   FUZZ    = 21                                       --fuzz, not part of DEFAULT (adds real wall-time)
 #
 # Cross-version: pass --cross to run DEFAULT against every installed
@@ -214,7 +230,7 @@ fsql_pg_dlsuffix() {
   return 0
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21)
 
@@ -682,7 +698,7 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$("${PSQL[@]}" -c "SELECT fractal_version();" 2>&1)
-  [[ "$ver" = "2.0.17" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.17)"
+  [[ "$ver" = "2.0.18" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.18)"
   # fractal_search convergence: cosine similarity to query ~1
   local r; r=$("${PSQL[@]}" -c "
      WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
@@ -1733,6 +1749,27 @@ gate_22_v2_functions() {
     && pass "22 v2_functions: fractal_optimize_portfolio rejects a mismatched cov length" \
     || fail "22 v2_functions: expected a cov-length rejection, got: $r4b"
 
+  # diffusion_mode (parse_diffusion_mode in fractalsql.c): r4 above
+  # omits it entirely (the 'gaussian' default), never exercising the
+  # 'levy' branch or the rejection of an unrecognized value.
+  local r4c; r4c=$("${PSQL[@]}" -c "
+     SELECT fractal_optimize_portfolio(
+       ARRAY[0.08,0.12,0.10,0.15]::float8[],
+       ARRAY[0.04,0.01,0.01,0.01, 0.01,0.06,0.01,0.01, 0.01,0.01,0.05,0.01, 0.01,0.01,0.01,0.09]::float8[],
+       2, 12345, false, 'levy');" 2>&1)
+  grep <<< "$r4c" -q '"sharpe"' \
+    && pass "22 v2_functions: fractal_optimize_portfolio diffusion_mode=levy returns {sharpe, weights}" \
+    || fail "22 v2_functions: diffusion_mode=levy='$r4c'"
+
+  local r4d; r4d=$("${PSQL[@]}" -c "
+     SELECT fractal_optimize_portfolio(
+       ARRAY[0.08,0.12,0.10,0.15]::float8[],
+       ARRAY[0.04,0.01,0.01,0.01, 0.01,0.06,0.01,0.01, 0.01,0.01,0.05,0.01, 0.01,0.01,0.01,0.09]::float8[],
+       2, 12345, false, 'bogus');" 2>&1)
+  grep <<< "$r4d" -q "diffusion_mode must be" \
+    && pass "22 v2_functions: fractal_optimize_portfolio rejects an unrecognized diffusion_mode" \
+    || fail "22 v2_functions: expected a diffusion_mode rejection, got: $r4d"
+
   # --- 3: domain-specific geometry --------------------------------------
   local r5; r5=$("${PSQL[@]}" -c "SELECT fractal_morphological_complexity(ARRAY[$boxpts]::float8[], 2);" 2>&1)
   grep <<< "$r5" -q '"lacunarity"' \
@@ -1868,6 +1905,21 @@ gate_22_v2_functions() {
     && pass "22 v2_functions: fractal_search_trajectory searches near the delta vector" \
     || fail "22 v2_functions: expected doc_id=0 dist=0 for a [1,0,0] delta, got: $r15"
 
+  # fractal_vector-typed overload (fractal_search_trajectory_fv in
+  # src/fractalsql.c): the two calls above only ever resolve the
+  # float8[] signature -- confirmed via gcov these never ran before
+  # this. Same table/query, just cast as fractal_vector so postgres's
+  # own overload resolution picks the C function this exercises
+  # (also the only caller of decode_vector_datum's fractal_vector
+  # branch outside gate 32's trajectory_predict calls).
+  local r15fv; r15fv=$("${PSQL[@]}" -c "
+     SELECT doc_id, distance FROM fractal_search_trajectory(
+       'bt_telemetry_docs', 'emb', '[0.0,0.0,0.0]'::fractal_vector,
+       '[1.0,0.0,0.0]'::fractal_vector, 1);" 2>&1)
+  grep <<< "$r15fv" -q "^0|0$" \
+    && pass "22 v2_functions: fractal_search_trajectory (fractal_vector overload) searches near the delta vector" \
+    || fail "22 v2_functions: expected doc_id=0 dist=0 for a [1,0,0] delta (fv overload), got: $r15fv"
+
   "${PSQL[@]}" -c "
      DROP TABLE IF EXISTS bt_combined_docs;
      CREATE TABLE bt_combined_docs (id serial PRIMARY KEY, emb float8[]);
@@ -1882,6 +1934,17 @@ gate_22_v2_functions() {
   grep <<< "$r16" -q "^0|0$" \
     && pass "22 v2_functions: fractal_cross_modal_search at alpha=1.0 favors the morphology-only row" \
     || fail "22 v2_functions: expected doc_id=0 dist=0 at alpha=1.0, got: $r16"
+
+  # fractal_vector-typed overload (fractal_cross_modal_search_fv):
+  # same table/query as r16, just fractal_vector-cast -- confirmed via
+  # gcov this never ran before this (0% coverage).
+  local r16fv; r16fv=$("${PSQL[@]}" -c "
+     SELECT doc_id, distance FROM fractal_cross_modal_search(
+       'bt_combined_docs', 'emb', '[1.0,0.0]'::fractal_vector,
+       '[1.0,0.0]'::fractal_vector, 1.0, 1);" 2>&1)
+  grep <<< "$r16fv" -q "^0|0$" \
+    && pass "22 v2_functions: fractal_cross_modal_search (fractal_vector overload) at alpha=1.0 favors the morphology-only row" \
+    || fail "22 v2_functions: expected doc_id=0 dist=0 at alpha=1.0 (fv overload), got: $r16fv"
 
   local r17; r17=$("${PSQL[@]}" -c "
      SELECT fractal_cross_modal_search(
@@ -2166,6 +2229,59 @@ gate_23_agents() {
   grep <<< "$r10c" -q 'gap-analysis-canary' \
     && pass "23 agents: data_analyst composes sql_agent -> reason (analysis is the real reason step, canary)" \
     || fail "23 agents: expected the canary in analysis, got: $r10c"
+
+  # --- 10d: fractal_sql_agent's auto_execute SAVEPOINT scoping --------
+  # Unlike the canary-as-SQL path above (10/10b/10c, which proves the compose-
+  # and-fail shape), this drives the mock's single canned-reply file
+  # (/tmp/fractalsql_bt_sql.txt, the same file gate 04's auto-discovery
+  # case writes) with a real, valid INSERT, so one call can genuinely
+  # succeed and a colliding call can genuinely fail. One connection, one
+  # open transaction: a real prior COMMITted write (id=99), then three
+  # fractal_sql_agent calls that always generate the SAME INSERT (id=1)
+  # -- the first succeeds, the second and third both collide with the
+  # PRIMARY KEY and must each report execution_failed via auto_execute's
+  # internal subtransaction, proving the same fixed call is safely
+  # reusable after a prior rollback, not just after a clean release.
+  "${PSQL[@]}" -c "
+     DROP TABLE IF EXISTS bt_sql_agent_sp;
+     CREATE TABLE bt_sql_agent_sp (id int PRIMARY KEY, val text);
+     INSERT INTO bt_sql_agent_sp (id, val) VALUES (99, 'prior');" >/dev/null 2>&1
+  pg_set_guc fractalsql.text_to_sql_allowed_statements "'select_insert_update'" "select_insert_update" \
+    || fail "23 agents: sql_agent_savepoint GUC did not take effect"
+  echo "INSERT INTO bt_sql_agent_sp (id, val) VALUES (1, 'x')" > /tmp/fractalsql_bt_sql.txt
+  local out; out=$("${PSQL[@]}" -c "
+     BEGIN;
+     SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);
+     SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);
+     SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);
+     COMMIT;" 2>&1)
+  # BEGIN/COMMIT print their own command tags even under -tA (only
+  # SELECT's tuples are suppressed by -t) -- filter them out before
+  # indexing, rather than assuming the 3 statuses are lines 1-3.
+  local statuses; statuses=$(grep -vE '^(BEGIN|COMMIT)$' <<< "$out")
+  local status1 status2 status3
+  status1=$(sed -n '1p' <<< "$statuses")
+  status2=$(sed -n '2p' <<< "$statuses")
+  status3=$(sed -n '3p' <<< "$statuses")
+  [[ "$status1" = "executed" ]] \
+    && pass "23 agents: sql_agent_savepoint: first INSERT executed cleanly" \
+    || fail "23 agents: sql_agent_savepoint: first call expected status=executed, got '$status1' (full: $out)"
+  [[ "$status2" = "execution_failed" ]] \
+    && pass "23 agents: sql_agent_savepoint: second (colliding) INSERT reported execution_failed via the auto_execute subtransaction, not a raw error" \
+    || fail "23 agents: sql_agent_savepoint: second call expected status=execution_failed, got '$status2'"
+  [[ "$status3" = "execution_failed" ]] \
+    && pass "23 agents: sql_agent_savepoint: third call reused the same call shape after the second call's rollback, no escaped error" \
+    || fail "23 agents: sql_agent_savepoint: third call expected status=execution_failed, got '$status3'"
+  local cnt; cnt=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_sql_agent_sp;" 2>&1)
+  [[ "$cnt" = "2" ]] \
+    && pass "23 agents: sql_agent_savepoint: both the prior commit (id=99) and the first call's write (id=1) survive -- no phantom rows from the two rolled-back calls" \
+    || fail "23 agents: sql_agent_savepoint: expected exactly 2 surviving rows (id=1,99), count=$cnt"
+  "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_sql_agent_sp;" >/dev/null 2>&1
+  pg_set_guc fractalsql.text_to_sql_allowed_statements "'select'" "select"
+  # Restore the shared mock-reply file: every engine after this point in
+  # gate 23 expects the "gap-analysis-canary" reply this gate's own
+  # header already set, not the INSERT text this sub-test just wrote.
+  echo "gap-analysis-canary" > /tmp/fractalsql_bt_sql.txt
 
   # --- 11: fractal_agent_patient_deterioration_triage happy + guard ----
   # nearest_cohort_id is the REAL hybrid_clinical_search nearest resolved via
@@ -3396,6 +3512,695 @@ gate_28_review_isolation() {
   return 0
 }
 
+# All 17 fractal_vector_* functions (sql/fractalsql--1.0.sql): the
+# native vector type's arithmetic/distance/quantization family,
+# known-answer asserted.
+gate_29_vector_ops() {
+  local r
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_cosine_similarity('[1,0,0]'::fractal_vector, '[1,0,0]'::fractal_vector);" 2>&1)
+  [[ "$r" = "1" ]] && pass "29 vector_ops: cosine_similarity(identical)=1" \
+                    || fail "29 vector_ops: cosine_similarity='$r'"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_norm('[3,4,0]'::fractal_vector);" 2>&1)
+  [[ "$r" = "5" ]] && pass "29 vector_ops: norm([3,4,0])=5" \
+                    || fail "29 vector_ops: norm='$r'"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_add('[1,2,3]'::fractal_vector, '[1,1,1]'::fractal_vector);" 2>&1)
+  [[ "$r" = "[2,3,4]" ]] && pass "29 vector_ops: add([1,2,3],[1,1,1])=[2,3,4]" \
+                          || fail "29 vector_ops: add='$r'"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_sub('[3,4,5]'::fractal_vector, '[1,1,1]'::fractal_vector);" 2>&1)
+  [[ "$r" = "[2,3,4]" ]] && pass "29 vector_ops: sub([3,4,5],[1,1,1])=[2,3,4]" \
+                          || fail "29 vector_ops: sub='$r'"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_dims('[1,2,3,4]'::fractal_vector);" 2>&1)
+  [[ "$r" = "4" ]] && pass "29 vector_ops: dims([1,2,3,4])=4" \
+                    || fail "29 vector_ops: dims='$r'"
+
+  # float32 storage, not exact decimal: 0.6/0.8 round-trip through
+  # fractal_vector's actual float32 precision as
+  # 0.600000024/0.800000012 (fractal_vector_out's "%.9g", confirmed in
+  # src/fractalsql_vector.c).
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_normalize('[3,4,0]'::fractal_vector);" 2>&1)
+  [[ "$r" = "[0.600000024,0.800000012,0]" ]] \
+    && pass "29 vector_ops: normalize([3,4,0]) -> unit vector [0.6,0.8,0]" \
+    || fail "29 vector_ops: normalize='$r'"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_normalize(NULL);" 2>&1)
+  [[ "$r" = "" ]] && pass "29 vector_ops: normalize(NULL) -> NULL (STRICT)" \
+                   || fail "29 vector_ops: expected NULL, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_scale('[1,2,3]'::fractal_vector, 2);" 2>&1)
+  [[ "$r" = "[2,4,6]" ]] && pass "29 vector_ops: scale([1,2,3],2)=[2,4,6]" \
+                          || fail "29 vector_ops: scale='$r'"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_scale(NULL, 2);" 2>&1)
+  [[ "$r" = "" ]] && pass "29 vector_ops: scale(NULL,...) -> NULL (STRICT)" \
+                   || fail "29 vector_ops: expected NULL, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_negative_inner_product('[1,0,0]'::fractal_vector, '[1,0,0]'::fractal_vector);" 2>&1)
+  [[ "$r" = "-1" ]] && pass "29 vector_ops: negative_inner_product(identical unit vectors)=-1" \
+                     || fail "29 vector_ops: negative_inner_product='$r'"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_negative_inner_product(NULL, '[1,0,0]'::fractal_vector);" 2>&1)
+  [[ "$r" = "" ]] && pass "29 vector_ops: negative_inner_product(NULL,...) -> NULL (STRICT)" \
+                   || fail "29 vector_ops: expected NULL, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_l2_distance('[0,0,0]'::fractal_vector, '[3,4,0]'::fractal_vector);" 2>&1)
+  [[ "$r" = "5" ]] && pass "29 vector_ops: l2_distance([0,0,0],[3,4,0])=5" \
+                    || fail "29 vector_ops: l2_distance='$r'"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_l2_squared('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector);" 2>&1)
+  [[ "$r" = "25" ]] && pass "29 vector_ops: l2_squared([3,4,0],[0,0,0])=25 (skips the sqrt in l2_distance)" \
+                     || fail "29 vector_ops: l2_squared='$r'"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_cosine_distance('[1,0,0]'::fractal_vector, '[1,0,0]'::fractal_vector);" 2>&1)
+  [[ "$r" = "0" ]] && pass "29 vector_ops: cosine_distance(identical)=0" \
+                    || fail "29 vector_ops: cosine_distance='$r'"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_cosine_distance(NULL, '[1,0,0]'::fractal_vector);" 2>&1)
+  [[ "$r" = "" ]] && pass "29 vector_ops: cosine_distance(NULL,...) -> NULL (STRICT)" \
+                   || fail "29 vector_ops: expected NULL, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_float8_array(ARRAY[1,2,3]::float8[]);" 2>&1)
+  [[ "$r" = "[1,2,3]" ]] && pass "29 vector_ops: from_float8_array canonicalizes [1,2,3]" \
+                          || fail "29 vector_ops: from_float8_array='$r'"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_to_float8_array('[1,2,3]'::fractal_vector);" 2>&1)
+  [[ "$r" = "{1,2,3}" ]] \
+    && pass "29 vector_ops: to_float8_array canonicalizes to {1,2,3} (native array text, not fractal_vector's own [1,2,3] form)" \
+    || fail "29 vector_ops: to_float8_array='$r'"
+
+  # --- v2.0.25: Lp distance, quantization, Hamming distance -----------
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_lp_distance('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector, 2.0);" 2>&1)
+  [[ "$r" = "5" ]] && pass "29 vector_ops: lp_distance p=2 ([3,4] from origin) = 5" \
+                    || fail "29 vector_ops: lp_distance p=2='$r'"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_lp_distance('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector, 1.0);" 2>&1)
+  [[ "$r" = "7" ]] && pass "29 vector_ops: lp_distance p=1 ([3,4] from origin) = 7" \
+                    || fail "29 vector_ops: lp_distance p=1='$r'"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_lp_distance('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector, 0);" 2>&1)
+  grep <<< "$r" -q "p must be > 0" \
+    && pass "29 vector_ops: lp_distance rejects p<=0" \
+    || fail "29 vector_ops: expected a p<=0 rejection, got: $r"
+
+  # quantize_int8: dim raw signed bytes (hex bytea text "\xHHHH..."),
+  # dequantization v[i] ~= codes[i]*scale within half a quantization step.
+  local q8 q8_codes q8_scale q8_hex
+  q8=$("${PSQL[@]}" -c "SELECT codes, scale FROM fractal_vector_quantize_int8('[1,-2,3]'::fractal_vector);" 2>&1)
+  q8_codes=$(awk -F'|' '{print $1}' <<< "$q8")
+  q8_scale=$(awk -F'|' '{print $2}' <<< "$q8")
+  # Strip the "\x" prefix in bash, not in the awk script below: awk's -v
+  # assignment does its own backslash-escape processing, which corrupts
+  # a raw "\x2a" prefix before any sub()/regex here ever sees it.
+  q8_hex="${q8_codes#\\x}"
+  awk -v hex="$q8_hex" -v s="$q8_scale" '
+    function abs(x) { return x < 0 ? -x : x }
+    BEGIN {
+      h = hex
+      if (length(h) != 6 || (s + 0) <= 0) exit 1
+      for (i = 1; i <= 3; i++) {
+        v = strtonum("0x" substr(h, (i-1)*2+1, 2))
+        if (v >= 128) v -= 256
+        q[i] = v
+      }
+      if (abs(q[1]*s - 1) > s*0.6) exit 1
+      if (abs(q[2]*s + 2) > s*0.6) exit 1
+      if (abs(q[3]*s - 3) > s*0.6) exit 1
+    }' \
+    && pass "29 vector_ops: quantize_int8 dequantizes [1,-2,3] within rounding error (codes=$q8_codes scale=$q8_scale)" \
+    || fail "29 vector_ops: quantize_int8 codes='$q8_codes' scale='$q8_scale' (dequantization out of tolerance)"
+
+  # quantize_binary + hamming_distance: 2 dims pack into 1 byte;
+  # identical vectors -> 0; one flipped sign -> 1. (The sign-bit
+  # polarity itself is the vendored core's choice -- these assertions
+  # hold either way.)
+  local qb hm0 hm1 hm_bad
+  qb=$("${PSQL[@]}" -c "SELECT octet_length(fractal_vector_quantize_binary('[1,-1]'::fractal_vector));" 2>&1)
+  [[ "$qb" = "1" ]] && pass "29 vector_ops: quantize_binary 2 dims -> 1 packed byte" \
+                     || fail "29 vector_ops: quantize_binary byte count=$qb"
+  hm0=$("${PSQL[@]}" -c "
+    SELECT fractal_vector_hamming_distance(
+      fractal_vector_quantize_binary('[1,-1]'::fractal_vector),
+      fractal_vector_quantize_binary('[1,-1]'::fractal_vector));" 2>&1)
+  [[ "$hm0" = "0" ]] && pass "29 vector_ops: hamming_distance(identical)=0" \
+                      || fail "29 vector_ops: hamming_distance(identical)='$hm0'"
+  hm1=$("${PSQL[@]}" -c "
+    SELECT fractal_vector_hamming_distance(
+      fractal_vector_quantize_binary('[1,-1]'::fractal_vector),
+      fractal_vector_quantize_binary('[1,1]'::fractal_vector));" 2>&1)
+  [[ "$hm1" = "1" ]] && pass "29 vector_ops: hamming_distance(one flipped sign)=1" \
+                      || fail "29 vector_ops: hamming_distance(flipped sign)='$hm1'"
+  hm_bad=$("${PSQL[@]}" -c "SELECT fractal_vector_hamming_distance('\x01'::bytea, '\x0102'::bytea);" 2>&1)
+  grep <<< "$hm_bad" -q "length mismatch" \
+    && pass "29 vector_ops: hamming_distance rejects unequal byte lengths" \
+    || fail "29 vector_ops: expected a length-mismatch rejection, got: $hm_bad"
+  return 0
+}
+
+# The 6 newest analytics/vector-math primitives (v2.0.25), known-answer
+# asserted: real float8[]/bytea[] array args, with fractal_periodogram
+# and fractal_cycle_detect set-returning (TABLE).
+gate_30_new_primitives() {
+  local r
+
+  # --- fractal_change_point_detect: step up at t=50 in a 100-sample
+  # series with a non-degenerate (sine) wobble, win=16, threshold=2.0.
+  # At least one flagged boundary must land near the true split.
+  r=$("${PSQL[@]}" -c "
+    SELECT fractal_change_point_detect(array_agg(v ORDER BY i), 16, 2.0, 16)
+      FROM (SELECT i, CASE WHEN i < 50 THEN 0.2*sin(0.5*i) ELSE 5.2+0.2*cos(0.5*i) END AS v
+              FROM generate_series(0, 99) i) s;" 2>&1)
+  local cp_ok=0 cp_v
+  for cp_v in $(tr -d '{}' <<< "$r" | tr ',' ' '); do
+    awk "BEGIN{exit !($cp_v >= 30 && $cp_v <= 70)}" && cp_ok=1
+  done
+  [[ "$cp_ok" = "1" ]] && pass "30 new_primitives: change_point_detect flags a boundary near the t=50 step ($r)" \
+                        || fail "30 new_primitives: change_point_detect='$r' (no boundary in [30,70])"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_change_point_detect(ARRAY[1,2,3]::float8[], 0, 2.0, 16);" 2>&1)
+  grep <<< "$r" -q "win must be > 0" \
+    && pass "30 new_primitives: change_point_detect rejects window <= 0" \
+    || fail "30 new_primitives: expected a win<=0 rejection, got: $r"
+
+  # --- fractal_periodogram: 64 samples of sin(2*pi*t/8) -> an exact
+  # k=8/64 bin at 0.125 cycles/sample as the top-power peak.
+  r=$("${PSQL[@]}" -c "
+    SELECT freq FROM fractal_periodogram(
+      (SELECT array_agg(0.5*sin(2*pi()*i/8.0) ORDER BY i) FROM generate_series(0, 63) i), 4)
+    ORDER BY power DESC LIMIT 1;" 2>&1)
+  awk -v f="$r" 'BEGIN{exit !(f > 0.124 && f < 0.126)}' 2>/dev/null \
+    && pass "30 new_primitives: periodogram top freq is the true 0.125 bin (got $r)" \
+    || fail "30 new_primitives: periodogram top freq='$r' (expected 0.125)"
+
+  # --- fractal_state_fingerprint: 128 bits -> exactly 16 packed bytes,
+  # byte-for-byte deterministic across identical calls (seeded random
+  # hyperplanes).
+  local fp1 fp2 n_fp
+  fp1=$("${PSQL[@]}" -c "SELECT fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 128, 42);" 2>&1)
+  n_fp=$("${PSQL[@]}" -c "SELECT octet_length(fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 128, 42));" 2>&1)
+  [[ "$n_fp" = "16" ]] && pass "30 new_primitives: state_fingerprint 128 bits -> 16 bytes" \
+                        || fail "30 new_primitives: state_fingerprint byte count=$n_fp"
+  fp2=$("${PSQL[@]}" -c "SELECT fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 128, 42);" 2>&1)
+  [[ "$fp1" = "$fp2" ]] && pass "30 new_primitives: state_fingerprint is deterministic (same seed, same bytes)" \
+                         || fail "30 new_primitives: state_fingerprint differs across identical calls: '$fp1' vs '$fp2'"
+  r=$("${PSQL[@]}" -c "SELECT fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 0, 42);" 2>&1)
+  grep <<< "$r" -q "n_bits must be > 0" \
+    && pass "30 new_primitives: state_fingerprint rejects n_bits <= 0" \
+    || fail "30 new_primitives: expected an n_bits<=0 rejection, got: $r"
+
+  # --- fractal_cycle_detect: fingerprints of A,B,A,B,A,B as a bytea[].
+  # Brent's checkpoint schedule needs roughly twice the period in stream
+  # length to close, so a bare A,B,A does NOT report a cycle -- the
+  # 6-element stream does (0-indexed
+  # at_index=3, cycle_len=2). Negative case uses A,B,D with mutually
+  # non-collinear state vectors: SimHash fingerprints of SCALAR-MULTIPLE
+  # states are byte-identical (both '9,9,9' and '4,4,4' sit on the
+  # (1,1,1) diagonal), so the negative case needs a different direction,
+  # not a different magnitude.
+  r=$("${PSQL[@]}" -c "
+    SELECT at_index, cycle_len FROM fractal_cycle_detect(
+      ARRAY[
+        fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64, 7),
+        fractal_state_fingerprint(ARRAY[9,9,9]::float8[], 64, 7),
+        fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64, 7),
+        fractal_state_fingerprint(ARRAY[9,9,9]::float8[], 64, 7),
+        fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64, 7),
+        fractal_state_fingerprint(ARRAY[9,9,9]::float8[], 64, 7)
+      ], 0);" 2>&1)
+  grep <<< "$r" -q "^3|2$" \
+    && pass "30 new_primitives: cycle_detect closes the A,B,A,B,A,B period-2 stream at_index=3 cycle_len=2" \
+    || fail "30 new_primitives: cycle_detect(A,B,A,B,A,B)='$r'"
+
+  r=$("${PSQL[@]}" -c "
+    SELECT count(*) FROM fractal_cycle_detect(
+      ARRAY[
+        fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64, 7),
+        fractal_state_fingerprint(ARRAY[9,9,9]::float8[], 64, 7),
+        fractal_state_fingerprint(ARRAY[4,5,6]::float8[], 64, 7)
+      ], 0);" 2>&1)
+  [[ "$r" = "0" ]] && pass "30 new_primitives: cycle_detect reports no cycle for three distinct states" \
+                    || fail "30 new_primitives: cycle_detect(A,B,D) row count='$r' (expected 0)"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_cycle_detect(ARRAY[fractal_state_fingerprint(ARRAY[1]::float8[], 8, 1)], -1);" 2>&1)
+  grep <<< "$r" -q "hamming_threshold must be >= 0" \
+    && pass "30 new_primitives: cycle_detect rejects a negative hamming_threshold" \
+    || fail "30 new_primitives: expected a negative-threshold rejection, got: $r"
+
+  # --- fractal_tda_persistence_diagram: 12 points in two tight 6-point
+  # clusters far apart. Each cluster forms a complete graph under
+  # thresh=1.0, so the 1-skeleton cycle rank is 15 edges - 6 vertices +
+  # 1 component = 10 per cluster = 20 total; h0_bars is 5 merge bars per
+  # cluster = 10. max_dim=0 must leave betti1 NULL (scope note: the
+  # 1-skeleton cycle rank, not full simplicial H1 -- see the function's
+  # own SQL comment).
+  local pts="0.0,0.0, 0.1,0.0, 0.05,0.0866, 0.1,0.0866, 0.02,0.05, 0.08,0.03, 10.0,10.0, 10.1,10.0, 10.05,10.0866, 10.1,10.0866, 10.02,10.05, 10.08,10.03"
+  r=$("${PSQL[@]}" -c "
+    SELECT betti1, jsonb_array_length(h0_bars)
+      FROM fractal_tda_persistence_diagram(ARRAY[$pts]::float8[], 2, 1, 1.0, 64);" 2>&1)
+  grep <<< "$r" -q "^20|10$" \
+    && pass "30 new_primitives: tda_persistence_diagram two-cluster betti1=20 (2 x (15-6+1)), n_h0_bars=10 (2 x 5 merge bars)" \
+    || fail "30 new_primitives: tda_persistence_diagram='$r' (expected betti1=20, n_h0_bars=10)"
+  r=$("${PSQL[@]}" -c "
+    SELECT betti1 FROM fractal_tda_persistence_diagram(ARRAY[$pts]::float8[], 2, 0, 1.0, 64);" 2>&1)
+  [[ "$r" = "" ]] && pass "30 new_primitives: tda_persistence_diagram max_dim=0 leaves betti1 NULL" \
+                   || fail "30 new_primitives: tda max_dim=0 betti1='$r' (expected NULL)"
+
+  # --- fractal_optimize_subset: value-weighted allocation with bounds
+  # 0.6 per item and at-most-2 nonzero. Weights sum to 1.0, so with k=2
+  # each cap must allow the pair to reach 1.0 (0.6+0.4 works; [0.4]x5
+  # caps the pair at 0.8 < 1.0, infeasible). With feasible [0.6]x5 caps
+  # the optimum puts 0.6 on the largest value (0.15) and 0.4 on the
+  # second (0.12) -> score exactly 0.138.
+  r=$("${PSQL[@]}" -c "
+    SELECT (s->>'score')::float8
+      FROM (SELECT fractal_optimize_subset(
+              ARRAY[0.12,0.09,0.15,0.06,0.11]::float8[],
+              ARRAY[0.6,0.6,0.6,0.6,0.6]::float8[], 2) s) t;" 2>&1)
+  awk -v s="$r" 'BEGIN{exit !(s > 0.1378 && s < 0.1382)}' 2>/dev/null \
+    && pass "30 new_primitives: optimize_subset hits the exact 0.138 optimum (got $r)" \
+    || fail "30 new_primitives: optimize_subset score='$r' (expected 0.138)"
+
+  local os_w os_nz=0 w
+  os_w=$("${PSQL[@]}" -c "
+    SELECT s->'weights'
+      FROM (SELECT fractal_optimize_subset(
+              ARRAY[0.12,0.09,0.15,0.06,0.11]::float8[],
+              ARRAY[0.6,0.6,0.6,0.6,0.6]::float8[], 2) s) t;" 2>&1)
+  for w in $(tr -d '[]' <<< "$os_w" | tr ',' ' '); do
+    awk "BEGIN{exit !($w > 0.0000001)}" && os_nz=$((os_nz + 1))
+  done
+  [[ "$os_nz" -le 2 ]] && pass "30 new_primitives: optimize_subset honors the at-most-2-nonzero cap ($os_nz nonzero)" \
+                        || fail "30 new_primitives: optimize_subset nonzero weights=$os_nz ('$os_w')"
+
+  r=$("${PSQL[@]}" -c "
+    SELECT fractal_optimize_subset(
+      ARRAY[0.12,0.09,0.15,0.06,0.11]::float8[],
+      ARRAY[0.4,0.4,0.4,0.4,0.4]::float8[], 2);" 2>&1)
+  grep <<< "$r" -q "fractal_optimize_subset rc=" \
+    && pass "30 new_primitives: optimize_subset infeasible instance (caps 0.4x5 < 1.0 at k=2) rejected cleanly" \
+    || fail "30 new_primitives: infeasible optimize_subset='$r' (expected a clean rc= rejection)"
+  return 0
+}
+
+# Enterprise activation/signature-verification wiring, exercised via a
+# throwaway, self-signed mock .so compiled at test time -- gives gates
+# 24-26's dlopen/dlsym/signature-verification machinery real CI
+# coverage (they otherwise self-skip when no licensed enterprise
+# library is vendored). Reuses gate 24's fractalsql.enterprise_* GUCs.
+#
+# Not covered here: torn-tail repair and ledger-directory permission
+# failures don't apply (the ledger is a real table, not a flat file),
+# and there's no persistent in-process state for a reload-time guard to
+# race against (each psql call is a fresh backend). Byte-level tamper
+# detection reuses gate 25's UPDATE ... SET blob = set_byte(...) technique.
+gate_31_enterprise_mock() {
+  local mock_so="$TMPROOT/fractalsql_bt_mock_ent_${PG_MAJOR}.so"
+  local badsig_so="$mock_so.badsig.so"
+  local fail_sentinel="$TMPROOT/fractalsql_bt_mock_ent_fail_${PG_MAJOR}"
+
+  rm -f "$mock_so" "$badsig_so" "$badsig_so.sig" "$fail_sentinel"
+  cc -shared -fPIC -std=c99 -Iinclude tests/mock_enterprise_core.c -o "$mock_so" \
+    2>/tmp/fractalsql_bt_gate31_build.log \
+    || { cat /tmp/fractalsql_bt_gate31_build.log >&2; fail "31 enterprise_mock: mock .so failed to build"; return; }
+  cp "$mock_so" "$badsig_so"
+  head -c 64 /dev/urandom > "$badsig_so.sig"
+
+  # FSQL_MOCK_ENT_FAIL must be in the POSTMASTER's own environment
+  # (mock_enterprise_core.c's own header: plain getenv, read fresh per
+  # call but the process's own environ never changes after fork) -- set
+  # it before the restart below so every backend forked from here
+  # inherits it, then drive failures purely via the sentinel FILE.
+  export FSQL_MOCK_ENT_FAIL="$fail_sentinel"
+  "$BIN/pg_ctl" -D "$DATADIR" -m fast stop >/dev/null 2>&1
+  if ! "$BIN/pg_ctl" -D "$DATADIR" -w -l "$DATADIR/log" \
+         -o "-p $PORT -k $SOCKDIR -c listen_addresses='' -c shared_preload_libraries=$SO" \
+         start >/tmp/fractalsql_bt_gate31_restart.log 2>&1; then
+    fail "31 enterprise_mock: could not restart cluster with FSQL_MOCK_ENT_FAIL set"
+    unset FSQL_MOCK_ENT_FAIL
+    rm -f "$mock_so" "$badsig_so" "$badsig_so.sig" "$fail_sentinel"
+    return
+  fi
+
+  local pre; pre=$("${PSQL[@]}" -c "SELECT fractal_ledger_truth_count();" 2>&1)
+  grep <<< "$pre" -q "enterprise tier not loaded" \
+    && pass "31 enterprise_mock: truth_count refuses cleanly before enterprise_lib is set" \
+    || fail "31 enterprise_mock: expected 'enterprise tier not loaded', got: $pre"
+
+  # Path 1: a corrupt/wrong .sig is ALWAYS fatal -- no real signing key
+  # needed (ent_verify_signature rejects on a MISMATCH, which 64 random
+  # bytes reliably is). ensure_enterprise_lib() only WARNs on this (see
+  # fractalsql.c) and returns false, so the caller's own "enterprise
+  # tier not loaded" still fires -- the WARNING text is what's grepped
+  # for here, not the final result.
+  if pg_set_guc fractalsql.enterprise_lib "'$badsig_so'" "$badsig_so"; then
+    local r1; r1=$("${PSQL[@]}" -c "SELECT fractal_ledger_truth_count();" 2>&1)
+    grep <<< "$r1" -qi "signature" \
+      && pass "31 enterprise_mock: a corrupt/wrong .sig refuses to load" \
+      || fail "31 enterprise_mock: expected a signature-refusal, got: $r1"
+  else
+    fail "31 enterprise_mock: could not apply enterprise_lib=badsig_so"
+  fi
+
+  # A wrong-SIZED .sig (not just wrong-content) is a distinct branch in
+  # ent_verify_signature: "n != sizeof(sig_bytes)" is checked and
+  # rejected BEFORE the EVP_PKEY_new_raw_public_key/verify step the
+  # Path 1 badsig test above exercises -- confirmed via gcov this
+  # specific size-check branch never ran before this.
+  local wrongsize_so="$mock_so.wrongsize.so"
+  cp "$mock_so" "$wrongsize_so"
+  head -c 10 /dev/urandom > "$wrongsize_so.sig"
+  if pg_set_guc fractalsql.enterprise_lib "'$wrongsize_so'" "$wrongsize_so"; then
+    local rsize; rsize=$("${PSQL[@]}" -c "SELECT fractal_ledger_truth_count();" 2>&1)
+    grep <<< "$rsize" -qi "signature" \
+      && pass "31 enterprise_mock: a wrong-SIZED .sig (not 64 bytes) refuses to load" \
+      || fail "31 enterprise_mock: expected a signature-refusal, got: $rsize"
+  else
+    fail "31 enterprise_mock: could not apply enterprise_lib=wrongsize_so"
+  fi
+  rm -f "$wrongsize_so" "$wrongsize_so.sig"
+
+  # Path 2: no .sig at all + enterprise_require_signature=on -- fatal.
+  "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_require_signature = on;" >/dev/null 2>&1
+  if pg_set_guc fractalsql.enterprise_lib "'$mock_so'" "$mock_so"; then
+    local r2; r2=$("${PSQL[@]}" -c "SELECT fractal_ledger_truth_count();" 2>&1)
+    grep <<< "$r2" -qi "signature" \
+      && pass "31 enterprise_mock: a missing .sig refuses to load when enterprise_require_signature is set" \
+      || fail "31 enterprise_mock: expected a signature-refusal, got: $r2"
+  else
+    fail "31 enterprise_mock: could not apply enterprise_lib=mock_so (require_signature path)"
+  fi
+
+  # Path 3: no .sig, enterprise_require_signature back off -- loads
+  # unverified (the backward-compatible default). This is the config
+  # that stays in place for the rest of this gate. (No "fresh path"
+  # trick needed: every "${PSQL[@]}" -c call here is already its own
+  # fresh backend.)
+  "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;" >/dev/null 2>&1
+  if pg_set_guc fractalsql.enterprise_lib "'$mock_so'" "$mock_so"; then
+    # ensure_enterprise_lib() re-WARNs "no signature found ... loading
+    # unverified" on EVERY call from here on (it's a backend-local
+    # static, and every "${PSQL[@]}" -c is a fresh backend -- see this
+    # gate's own header comment), so every exact-match check for the
+    # rest of this gate needs the trailing result line, not the whole
+    # 2>&1 blob (which the WARNING now leads).
+    local r3; r3=$("${PSQL[@]}" -c "SELECT fractal_ledger_truth_count();" 2>&1 | tail -n 1)
+    [[ "$r3" = "0" ]] && pass "31 enterprise_mock: a missing .sig loads unverified by default once require_signature is off" \
+                       || fail "31 enterprise_mock: expected 0, got: $r3"
+  else
+    fail "31 enterprise_mock: could not apply enterprise_lib=mock_so (unverified path)"
+  fi
+
+  # Every ledger void/count wrapper's success branch.
+  local fn r
+  for fn in fractal_ledger_flush fractal_ledger_compact fractal_ledger_reset_soft fractal_ledger_reset_hard fractal_ledger_load; do
+    r=$("${PSQL[@]}" -c "SELECT $fn();" 2>&1)
+    grep <<< "$r" -q "ERROR" \
+      && fail "31 enterprise_mock: $fn errored while the mock is loaded: $r" \
+      || pass "31 enterprise_mock: $fn succeeds while the mock is loaded"
+  done
+  local sc; sc=$("${PSQL[@]}" -c "SELECT fractal_ledger_shadow_count();" 2>&1 | tail -n 1)
+  [[ "$sc" = "0" ]] && pass "31 enterprise_mock: shadow_count succeeds while the mock is loaded" \
+                     || fail "31 enterprise_mock: expected 0 from shadow_count, got: $sc"
+
+  # Failure branch: the sentinel flips the SAME mock's return codes
+  # without touching the postmaster's environment or enterprise_lib
+  # again (see tests/mock_enterprise_core.c's own header for why a
+  # file, not a value, is the toggle).
+  touch "$fail_sentinel"
+  local rf; rf=$("${PSQL[@]}" -c "SELECT fractal_ledger_flush();" 2>&1)
+  grep <<< "$rf" -q "ERROR" \
+    && pass "31 enterprise_mock: flush refuses cleanly when the mock reports failure" \
+    || fail "31 enterprise_mock: expected flush to error with the fail sentinel set, got: $rf"
+  rm -f "$fail_sentinel"
+
+  # Deep storage layer, entirely this repo's own code (ledger write/
+  # verify, HMAC, chain hashing) -- audit_log/ledger_verify never call
+  # back into the dlopen'd library at all ("pure storage-layer check"
+  # per fractal_ledger_verify's own SQL comment), so this exercises
+  # real ground regardless of what the mock above did.
+  "${PSQL[@]}" -c "DELETE FROM fractalsql_ledger WHERE kind = 2;" >/dev/null 2>&1
+  local rg; rg=$("${PSQL[@]}" 2>&1 <<'SQL'
+SET fractalsql.enterprise_ledger_key = 'gate31-hmac-test-key';
+SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
+SELECT fractal_ledger_verify(2)::text;
+UPDATE fractalsql_ledger
+   SET blob = set_byte(blob, length(blob) / 2, 254)
+ WHERE kind = 2 AND id = (SELECT max(id) FROM fractalsql_ledger WHERE kind = 2);
+SELECT fractal_ledger_verify(2)::text;
+RESET fractalsql.enterprise_ledger_key;
+SQL
+)
+  grep <<< "$rg" -q '"ok": true' \
+    && pass "31 enterprise_mock: audit_log + ledger_verify round-trip a real HMAC-keyed chain entry" \
+    || fail "31 enterprise_mock: expected an ok verify before tamper, got: $rg"
+  grep <<< "$rg" -q '"ok": false' \
+    && pass "31 enterprise_mock: ledger_verify detects a byte-level HMAC tamper (no real .so needed)" \
+    || fail "31 enterprise_mock: expected a tamper-detected report after the byte-flip, got: $rg"
+
+  # fractal_audit_unpack: a direct decode call -- distinct from the
+  # audit_log+ledger_verify round-trip above, which never calls this
+  # function at all. The mock's fsql_audit_unpack is a pure echo
+  # (tests/mock_enterprise_core.c's own header), so round-tripping jsonb
+  # through it is an exact equality check. A payload past the
+  # 8192-byte default cap forces the FSQL_ETRUNCATED buffer-growth
+  # retry loop, built here with repeat() instead of python3, matching
+  # this file's own no-python3 convention.
+  local au; au=$("${PSQL[@]}" -c "
+    SELECT (fractal_audit_unpack(jsonb_build_object('n', repeat('A', 9000))::text::bytea)
+            = jsonb_build_object('n', repeat('A', 9000)));" 2>&1 | tail -n 1)
+  [[ "$au" = "t" ]] \
+    && pass "31 enterprise_mock: audit_unpack round-trips a payload past the 8192-byte default cap" \
+    || fail "31 enterprise_mock: expected audit_unpack to echo the 9000-byte payload back exactly, got: $au"
+
+  # Portfolio multimodal family (all 3 optional symbols present here).
+  local pm; pm=$("${PSQL[@]}" -c "
+    SELECT fractal_optimize_portfolio_multimodal(
+      ARRAY[0.1,0.05]::float8[], ARRAY[0.04,0.01,0.01,0.03]::float8[], 1, 2)->>'n_found';" 2>&1 | tail -n 1)
+  [[ "$pm" = "1" ]] && pass "31 enterprise_mock: fractal_optimize_portfolio_multimodal returns a well-formed result" \
+                     || fail "31 enterprise_mock: expected n_found=1, got: $pm"
+  # n_restarts omitted here (defaults to 8): the _pareto variant also
+  # requires 1 <= max_front <= n_restarts, which an explicit n_restarts=2
+  # against max_front's default of 8 violates.
+  local pmp; pmp=$("${PSQL[@]}" -c "
+    SELECT fractal_optimize_portfolio_multimodal_pareto(
+      ARRAY[0.1,0.05]::float8[], ARRAY[0.04,0.01,0.01,0.03]::float8[], 1)->>'n_found';" 2>&1 | tail -n 1)
+  [[ "$pmp" = "1" ]] && pass "31 enterprise_mock: fractal_optimize_portfolio_multimodal_pareto returns a well-formed result" \
+                      || fail "31 enterprise_mock: expected n_found=1, got: $pmp"
+
+  # t2s_audit_log_best_effort / portfolio_audit_log_best_effort: the
+  # SAME two "best-effort kind=2 audit record" helpers fractal_text_to_
+  # sql/fractal_optimize_portfolio always call, but confirmed via gcov
+  # to only ever hit their early "enterprise not loaded" return branch
+  # -- neither gate 04/14/20 (text_to_sql) nor gate 22 (optimize_
+  # portfolio) ever runs with enterprise loaded. One call to each here,
+  # now that the mock IS loaded, exercises the real JSON-build +
+  # ledger_write_entry branch in both. convert_from(..., 'UTF8'), not a
+  # bare ::text cast: bytea's default ::text cast gives its hex-escaped
+  # literal form ("\x7b22...") under bytea_output=hex, not the decoded
+  # string jsonb_in needs.
+  "${PSQL[@]}" -c "SELECT fractal_text_to_sql('q', ARRAY['bt_customers','bt_orders']);" >/dev/null 2>&1
+  local t2s_audit; t2s_audit=$("${PSQL[@]}" -c "
+    SELECT convert_from(blob, 'UTF8')::jsonb->>'type' FROM fractalsql_ledger WHERE kind = 2 ORDER BY id DESC LIMIT 1;" 2>&1 | tail -n 1)
+  [[ "$t2s_audit" = "text_to_sql" ]] \
+    && pass "31 enterprise_mock: fractal_text_to_sql logs a text_to_sql provenance record when enterprise is loaded" \
+    || fail "31 enterprise_mock: expected the latest kind=2 row to be type=text_to_sql, got: $t2s_audit"
+
+  "${PSQL[@]}" -c "
+    SELECT fractal_optimize_portfolio(
+      ARRAY[0.08,0.12,0.10,0.15]::float8[],
+      ARRAY[0.04,0.01,0.01,0.01, 0.01,0.06,0.01,0.01, 0.01,0.01,0.05,0.01, 0.01,0.01,0.01,0.09]::float8[],
+      2, 12345);" >/dev/null 2>&1
+  local portfolio_audit; portfolio_audit=$("${PSQL[@]}" -c "
+    SELECT convert_from(blob, 'UTF8')::jsonb->>'type' FROM fractalsql_ledger WHERE kind = 2 ORDER BY id DESC LIMIT 1;" 2>&1 | tail -n 1)
+  [[ "$portfolio_audit" = "portfolio_optimize" ]] \
+    && pass "31 enterprise_mock: fractal_optimize_portfolio logs a portfolio_optimize provenance record when enterprise is loaded" \
+    || fail "31 enterprise_mock: expected the latest kind=2 row to be type=portfolio_optimize, got: $portfolio_audit"
+
+  unset FSQL_MOCK_ENT_FAIL
+  rm -f "$mock_so" "$badsig_so" "$badsig_so.sig" "$fail_sentinel"
+  "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.enterprise_lib; ALTER SYSTEM RESET fractalsql.enterprise_require_signature;" >/dev/null 2>&1
+  "$BIN/pg_ctl" -D "$DATADIR" -m fast stop >/dev/null 2>&1
+  "$BIN/pg_ctl" -D "$DATADIR" -w -l "$DATADIR/log" \
+     -o "-p $PORT -k $SOCKDIR -c listen_addresses='' -c shared_preload_libraries=$SO" \
+     start >/tmp/fractalsql_bt_gate31_restore.log 2>&1
+  return 0
+}
+
+# The 5 C-native Agent functions (src/fractalsql.c): fractal_search_
+# agent, fractal_agent_plan_explore, fractal_agent_trajectory_predict,
+# fractal_agent_detect_loop, fractal_rag_agent, plus their shared helper
+# build_retrieval_context. Gate 23's "agents" only exercises the
+# PL/pgSQL agent layer, never these direct C UDFs.
+#
+# search_agent/rag_agent need a working embed dispatch, which $MOCK
+# (tests/mock_reasoning_plugin.c) can't provide. $EMBED (tests/mock_
+# embed_plugin.c) always returns "[0.1,0.2,0.3]" regardless of input --
+# used for both the embed step and, as a deterministic value, the
+# reason step. Needs a 3-dim corpus to match.
+gate_32_sovereign_agents() {
+  pg_swap_plugin "$EMBED" || { fail "32 sovereign_agents: plugin swap did not take effect"; return; }
+
+  "${PSQL[@]}" -c "
+     DROP TABLE IF EXISTS bt_agent_vec, bt_agent_fvec, bt_agent_nopk, bt_agent_empty;
+     CREATE TABLE bt_agent_vec (id serial PRIMARY KEY, emb float8[]);
+     INSERT INTO bt_agent_vec (emb) VALUES
+       (ARRAY[0.0,0.0,0.0]::float8[]),
+       (ARRAY[1.0,0.0,0.0]::float8[]),
+       (ARRAY[0.0,1.0,0.0]::float8[]),
+       (ARRAY[0.0,0.0,1.0]::float8[]);
+     CREATE TABLE bt_agent_fvec (id serial PRIMARY KEY, emb fractal_vector);
+     INSERT INTO bt_agent_fvec (emb) VALUES ('[0,0,0]'), ('[1,1,1]');
+     CREATE TABLE bt_agent_nopk (id int, emb float8[]);
+     INSERT INTO bt_agent_nopk VALUES (1, ARRAY[0.0,0.0,0.0]::float8[]);
+     CREATE TABLE bt_agent_empty (id int PRIMARY KEY, emb float8[]);
+  " >/dev/null 2>&1
+
+  # --- 1: fractal_search_agent ----------------------------------------
+  local sa; sa=$("${PSQL[@]}" -c "
+     SELECT answer, array_length(source_doc_ids, 1), execution_time_ms
+       FROM fractal_search_agent('q', 'bt_agent_vec', 'emb');" 2>&1)
+  grep <<< "$sa" -q "^\[0.1,0.2,0.3\]|" \
+    && pass "32 sovereign_agents: fractal_search_agent returns the real dispatch answer + non-empty source_doc_ids" \
+    || fail "32 sovereign_agents: expected the embed/reason canary answer, got: $sa"
+
+  local sa_null; sa_null=$("${PSQL[@]}" -c "SELECT fractal_search_agent(NULL, 'bt_agent_vec', 'emb');" 2>&1)
+  grep <<< "$sa_null" -q "query, table_name, and vector_col are required" \
+    && pass "32 sovereign_agents: fractal_search_agent rejects a NULL query" \
+    || fail "32 sovereign_agents: expected a required-args rejection, got: $sa_null"
+
+  local sa_empty; sa_empty=$("${PSQL[@]}" -c "SELECT fractal_search_agent('q', 'bt_agent_empty', 'emb');" 2>&1)
+  grep <<< "$sa_empty" -q "no rows found in bt_agent_empty.emb" \
+    && pass "32 sovereign_agents: fractal_search_agent rejects an empty table" \
+    || fail "32 sovereign_agents: expected a no-rows rejection, got: $sa_empty"
+
+  # --- 2: fractal_agent_plan_explore (SETOF, STRICT) ------------------
+  local pe; pe=$("${PSQL[@]}" -c "
+     SELECT count(*), bool_and(array_length(plan_trajectory, 1) = 3)
+       FROM fractal_agent_plan_explore('q', 'bt_agent_vec', 'emb', 3);" 2>&1)
+  grep <<< "$pe" -Eq "^[1-9][0-9]*\|t$" \
+    && pass "32 sovereign_agents: fractal_agent_plan_explore returns branches with real 3-dim trajectories" \
+    || fail "32 sovereign_agents: expected >=1 row with 3-dim trajectories, got: $pe"
+
+  local pe_null; pe_null=$("${PSQL[@]}" -c "SELECT * FROM fractal_agent_plan_explore(NULL, 'bt_agent_vec', 'emb', 3);" 2>&1)
+  [[ -z "$pe_null" ]] \
+    && pass "32 sovereign_agents: fractal_agent_plan_explore(NULL, ...) returns an empty set (STRICT)" \
+    || fail "32 sovereign_agents: expected an empty set for a NULL arg, got: $pe_null"
+
+  # --- 3: fractal_agent_trajectory_predict (STRICT) -------------------
+  local tp; tp=$("${PSQL[@]}" -c "
+     SELECT array_length(predicted_state_vector, 1), projected_drift_delta IS NOT NULL, risk_threshold_exceeded IS NOT NULL
+       FROM fractal_agent_trajectory_predict('bt_agent_vec', 'emb', 1, 1);" 2>&1)
+  [[ "$tp" = "3|t|t" ]] \
+    && pass "32 sovereign_agents: fractal_agent_trajectory_predict returns a real 3-dim predicted state (float8[] vector_col)" \
+    || fail "32 sovereign_agents: expected 3|t|t, got: $tp"
+
+  # Same call against a fractal_vector-typed vector_col -- the other
+  # branch of decode_vector_datum (confirmed 0% coverage before this).
+  local tpfv; tpfv=$("${PSQL[@]}" -c "
+     SELECT array_length(predicted_state_vector, 1), projected_drift_delta IS NOT NULL, risk_threshold_exceeded IS NOT NULL
+       FROM fractal_agent_trajectory_predict('bt_agent_fvec', 'emb', 1, 1);" 2>&1)
+  [[ "$tpfv" = "3|t|t" ]] \
+    && pass "32 sovereign_agents: fractal_agent_trajectory_predict returns a real 3-dim predicted state (fractal_vector vector_col)" \
+    || fail "32 sovereign_agents: expected 3|t|t (fractal_vector vector_col), got: $tpfv"
+
+  local tp_null; tp_null=$("${PSQL[@]}" -c "SELECT fractal_agent_trajectory_predict(NULL, 'emb', 1, 1);" 2>&1)
+  [[ "$tp_null" = "" ]] \
+    && pass "32 sovereign_agents: fractal_agent_trajectory_predict(NULL, ...) returns NULL (STRICT)" \
+    || fail "32 sovereign_agents: expected an empty/NULL result, got: $tp_null"
+
+  local tp_nopk; tp_nopk=$("${PSQL[@]}" -c "SELECT fractal_agent_trajectory_predict('bt_agent_nopk', 'emb', 1, 1);" 2>&1)
+  grep <<< "$tp_nopk" -q "has no primary key" \
+    && pass "32 sovereign_agents: fractal_agent_trajectory_predict rejects a table with no primary key" \
+    || fail "32 sovereign_agents: expected a no-primary-key rejection, got: $tp_nopk"
+
+  local tp_oob; tp_oob=$("${PSQL[@]}" -c "SELECT fractal_agent_trajectory_predict('bt_agent_vec', 'emb', 999, 1);" 2>&1)
+  grep <<< "$tp_oob" -q "no row in bt_agent_vec with" \
+    && pass "32 sovereign_agents: fractal_agent_trajectory_predict rejects a nonexistent baseline_id" \
+    || fail "32 sovereign_agents: expected a no-such-baseline rejection, got: $tp_oob"
+
+  # --- 4: fractal_agent_detect_loop (pure math, no table/plugin) ------
+  # Period-2 cycle: A,B,A,B,A,B (dim=2, 6 states -> 12 flat doubles).
+  # Brent's checkpoint schedule needs roughly twice the period in
+  # stream length to close.
+  local dl; dl=$("${PSQL[@]}" -c "
+     SELECT agent_id, is_loop_detected FROM fractal_agent_detect_loop(
+       'agent1', ARRAY[1,1, 9,9, 1,1, 9,9, 1,1, 9,9]::float8[], 2, 64, 7.0, 0);" 2>&1)
+  [[ "$dl" = "agent1|t" ]] \
+    && pass "32 sovereign_agents: fractal_agent_detect_loop closes a real period-2 cycle (A,B,A,B,A,B)" \
+    || fail "32 sovereign_agents: expected agent1|t, got: $dl"
+
+  local dl_const; dl_const=$("${PSQL[@]}" -c "
+     SELECT is_loop_detected FROM fractal_agent_detect_loop(
+       'agent2', ARRAY[5,5, 5,5, 5,5]::float8[], 2, 64, 7.0, 0);" 2>&1)
+  [[ "$dl_const" = "t" ]] \
+    && pass "32 sovereign_agents: fractal_agent_detect_loop closes a cycle on a constant-state log" \
+    || fail "32 sovereign_agents: expected t for a constant-state log, got: $dl_const"
+
+  # fractal_agent_detect_loop was found to be (wrongly) declared STRICT
+  # in SQL -- its C body already explicitly handles every arg's NULL
+  # case (a clear error for the 3 required args, a documented default
+  # for the 3 optional ones), which STRICT was silently short-circuiting
+  # around. Fixed (STRICT removed from the SQL declaration); asserting
+  # the real, now-reachable error message.
+  local dl_req; dl_req=$("${PSQL[@]}" -c "SELECT fractal_agent_detect_loop(NULL, ARRAY[1,1]::float8[], 2);" 2>&1)
+  grep <<< "$dl_req" -q "agent_id, state_log, and dim are required" \
+    && pass "32 sovereign_agents: fractal_agent_detect_loop rejects a NULL agent_id" \
+    || fail "32 sovereign_agents: expected a required-args rejection, got: $dl_req"
+
+  # The other half of the same bug: an explicitly-NULL OPTIONAL arg
+  # (n_bits here) must fall back to its documented default (64), not
+  # null out the whole result -- this is the specific behavior STRICT
+  # was silently breaking before the fix above, now proven live rather
+  # than just asserting the error path.
+  local dl_optnull; dl_optnull=$("${PSQL[@]}" -c "
+    SELECT is_loop_detected FROM fractal_agent_detect_loop(
+      'agent3', ARRAY[1,1, 9,9, 1,1, 9,9, 1,1, 9,9]::float8[], 2, NULL, 7.0, 0);" 2>&1)
+  [[ "$dl_optnull" = "t" ]] \
+    && pass "32 sovereign_agents: fractal_agent_detect_loop(..., n_bits=NULL, ...) falls back to the n_bits=64 default, not a NULL result" \
+    || fail "32 sovereign_agents: expected t (default n_bits honored), got: $dl_optnull"
+
+  local dl_dim0; dl_dim0=$("${PSQL[@]}" -c "SELECT fractal_agent_detect_loop('a', ARRAY[1,1]::float8[], 0);" 2>&1)
+  grep <<< "$dl_dim0" -q "dim must be > 0" \
+    && pass "32 sovereign_agents: fractal_agent_detect_loop rejects dim <= 0" \
+    || fail "32 sovereign_agents: expected a dim<=0 rejection, got: $dl_dim0"
+
+  local dl_bits0; dl_bits0=$("${PSQL[@]}" -c "SELECT fractal_agent_detect_loop('a', ARRAY[1,1,2,2]::float8[], 2, 0);" 2>&1)
+  grep <<< "$dl_bits0" -q "n_bits must be > 0" \
+    && pass "32 sovereign_agents: fractal_agent_detect_loop rejects n_bits <= 0" \
+    || fail "32 sovereign_agents: expected an n_bits<=0 rejection, got: $dl_bits0"
+
+  local dl_ham; dl_ham=$("${PSQL[@]}" -c "SELECT fractal_agent_detect_loop('a', ARRAY[1,1,2,2]::float8[], 2, 64, 42.0, -1);" 2>&1)
+  grep <<< "$dl_ham" -q "hamming_threshold must be >= 0" \
+    && pass "32 sovereign_agents: fractal_agent_detect_loop rejects a negative hamming_threshold" \
+    || fail "32 sovereign_agents: expected a negative-threshold rejection, got: $dl_ham"
+
+  local dl_short; dl_short=$("${PSQL[@]}" -c "SELECT fractal_agent_detect_loop('a', ARRAY[1,1]::float8[], 2);" 2>&1)
+  grep <<< "$dl_short" -q "state_log must contain at least 2 states" \
+    && pass "32 sovereign_agents: fractal_agent_detect_loop rejects a state_log with fewer than 2 states" \
+    || fail "32 sovereign_agents: expected a too-few-states rejection, got: $dl_short"
+
+  local dl_shape; dl_shape=$("${PSQL[@]}" -c "SELECT fractal_agent_detect_loop('a', ARRAY[1,1,2]::float8[], 2);" 2>&1)
+  grep <<< "$dl_shape" -q "is not a multiple of dim" \
+    && pass "32 sovereign_agents: fractal_agent_detect_loop rejects a state_log length not divisible by dim" \
+    || fail "32 sovereign_agents: expected a length-not-divisible rejection, got: $dl_shape"
+
+  # --- 5: fractal_rag_agent -------------------------------------------
+  local ra; ra=$("${PSQL[@]}" -c "SELECT answer FROM fractal_rag_agent('q', 'bt_agent_vec', 'emb');" 2>&1)
+  [[ "$ra" = "[0.1,0.2,0.3]" ]] \
+    && pass "32 sovereign_agents: fractal_rag_agent returns the real embed/reason dispatch answer" \
+    || fail "32 sovereign_agents: expected the embed/reason canary answer, got: $ra"
+
+  local ra_null; ra_null=$("${PSQL[@]}" -c "SELECT fractal_rag_agent(NULL, 'bt_agent_vec', 'emb');" 2>&1)
+  grep <<< "$ra_null" -q "query, table_name, and vector_col are required" \
+    && pass "32 sovereign_agents: fractal_rag_agent rejects a NULL query" \
+    || fail "32 sovereign_agents: expected a required-args rejection, got: $ra_null"
+
+  local ra_empty; ra_empty=$("${PSQL[@]}" -c "SELECT fractal_rag_agent('q', 'bt_agent_empty', 'emb');" 2>&1)
+  grep <<< "$ra_empty" -q "no rows found in bt_agent_empty.emb" \
+    && pass "32 sovereign_agents: fractal_rag_agent rejects an empty table" \
+    || fail "32 sovereign_agents: expected a no-rows rejection, got: $ra_empty"
+
+  "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_agent_vec, bt_agent_fvec, bt_agent_nopk, bt_agent_empty;" >/dev/null 2>&1
+  pg_swap_plugin "$MOCK" >/dev/null
+  return 0
+}
+
 run_major() {
   local v="$1"; shift
   local gates=("$@")
@@ -3409,7 +4214,7 @@ run_major() {
   local need_db=0
   for g in "${gates[@]}"; do
     case "$g" in
-      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26|27|28) need_db=1 ;;
+      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26|27|28|29|30|31|32) need_db=1 ;;
       *) ;;   # 01/21 run standalone above, no DB needed -- intentional no-op
     esac
   done
@@ -3452,6 +4257,10 @@ run_major() {
         26) gate_26_enterprise_signature ;;
         27) gate_27_think ;;
         28) gate_28_review_isolation ;;
+        29) gate_29_vector_ops ;;
+        30) gate_30_new_primitives ;;
+        31) gate_31_enterprise_mock ;;
+        32) gate_32_sovereign_agents ;;
         *) ;;   # 01/21 already ran standalone above, no-op here by design
       esac
     done

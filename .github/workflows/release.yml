@@ -29,6 +29,8 @@ jobs:
     # With 5 PG majors × 2 archs = 10 cells, the saved minutes add up.
     # Native arm64 runners (GA mid-2025) run the same Docker + buildx
     # stack at native speed; no QEMU shim needed.
+    permissions:
+      contents: read
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -131,7 +133,7 @@ jobs:
           VERSION=$(docker exec pg psql -U postgres -tAc \
               "SELECT fractal_version();")
           echo "version: ${VERSION}"
-          test "${VERSION}" = "2.0.17"
+          test "${VERSION}" = "2.0.18"
 
           # Convergence sanity check: query = (0.6, 0.8), objective is
           # cosine distance. Cosine distance is magnitude-invariant,

@@ -109,7 +109,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.17"
+          test "\$VERSION" = "2.0.18"
           echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -309,7 +309,14 @@ jobs:
           dnf -qy module reset postgresql 2>/dev/null || true
           dnf -qy module disable postgresql 2>/dev/null || true
 
-          dnf install -qy postgresql\${PG_VER}-server postgresql\${PG_VER}
+          # The PGDG repo RPM registers a separate yum repo per PG major,
+          # all enabled by default. dnf refreshes metadata for every
+          # enabled repo on each install, so one unreachable major's repo
+          # fails every job regardless of which major it targets. Disable
+          # all but the one this job needs.
+          DNF_PG_REPO_FLAGS=(--disablerepo='pgdg1*' --enablerepo="pgdg\${PG_VER}")
+
+          dnf install -qy "\${DNF_PG_REPO_FLAGS[@]}" postgresql\${PG_VER}-server postgresql\${PG_VER}
 
           # Start postgres.
           PGBIN=/usr/pgsql-\${PG_VER}/bin
@@ -325,7 +332,7 @@ jobs:
               sleep 1
           done
 
-          dnf install -qy ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.rpm
+          dnf install -qy "\${DNF_PG_REPO_FLAGS[@]}" ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.rpm
 
           # Verify files landed in the PGDG tree.
           EXT_DIR=/usr/pgsql-\${PG_VER}/share/extension
@@ -338,7 +345,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.17"
+          test "\$VERSION" = "2.0.18"
           echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -447,7 +454,7 @@ jobs:
           VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.17"
+          test "${VERSION}" = "2.0.18"
 
           # Search works with no further config.
           psql -d postgres -Atc \

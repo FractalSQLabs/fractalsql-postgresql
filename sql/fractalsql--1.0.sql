@@ -264,7 +264,10 @@ CREATE FUNCTION fractal_agent_detect_loop(
     hamming_threshold int4    DEFAULT 0
 ) RETURNS fractal_loop_detect_result
 AS 'MODULE_PATHNAME', 'fractal_agent_detect_loop'
-LANGUAGE C VOLATILE STRICT;
+LANGUAGE C VOLATILE;
+-- NOT STRICT: the C body handles NULL per-argument (errors on required
+-- args, falls back to documented defaults on optional ones). STRICT was
+-- short-circuiting that to a silent NULL result.
 
 COMMENT ON FUNCTION fractal_agent_detect_loop(agent_id text, state_log float8[], dim int4, n_bits int4, seed float8, hamming_threshold int4) IS
 'Loop-detection safety monitor: fingerprints each state in state_log (n_states = length(state_log)/dim, flattened row-major) via SimHash (n_bits, seed) and streams them through Brent''s streaming cycle detector (hamming_threshold; 0 = exact-match only), flagging is_loop_detected when a cycle closes -- tolerates near-identical states, unlike the old exact-hash period scan. Also computes dfa_exponent, the DFA scaling exponent of each state''s L2 norm across the trajectory; alpha > 0.9 additionally flags a random-walk-like wander the fingerprint-cycle check can miss if it never closes within hamming_threshold. Echoes agent_id back in the result.';

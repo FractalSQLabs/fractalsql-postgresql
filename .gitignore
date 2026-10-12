@@ -20,6 +20,7 @@ __pycache__/
 # build_test.sh --coverage artifacts
 *.gcno
 *.gcda
+*.gcov
 coverage_html/
 
 # NOTE: include/sfs_core_bc.h is a tracked source file

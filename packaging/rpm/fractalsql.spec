@@ -6,7 +6,7 @@
 # prebuilt .so from dist/${arch}/fractalsql_pg${pg_major}.so.
 
 Name:           postgresql-%{pg_major}-fractalsql
-Version:        2.0.17
+Version:        2.0.18
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search extension for PostgreSQL %{pg_major}
 
@@ -61,6 +61,10 @@ install -Dm0644 fractalsql_agents/sql/fractalsql_agents--1.0.sql \
 /usr/pgsql-%{pg_major}/share/extension/fractalsql_agents--1.0.sql
 
 %changelog
+* Mon Oct 12 2026 FractalSQLabs - 2.0.18-1
+- CI gates for vector ops, new analytics primitives, activation, 
+  and sovereign-tier agent functions; fractal_agent_detect_loop
+  STRICT fix; fractal_search_agent execution_time_ms Datum fix.
 * Sun Sep 21 2026 FractalSQLabs - 2.0.17-1
 - Description updated for the full Discovery/Cognition/Text-to-SQL/
   Agency/Analytics/Enterprise tier surface; Version was stale at 1.0.0.
