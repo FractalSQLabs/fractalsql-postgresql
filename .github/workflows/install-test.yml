@@ -109,7 +109,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.18"
+          test "\$VERSION" = "2.0.19"
           echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -304,6 +304,12 @@ jobs:
           # PGDG yum repo for RHEL 9 — the .rpm depends on
           # postgresql\${PG_VER}-server which only PGDG ships.
           dnf install -qy https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+          # The shipped baseurl templates rhel-\$releasever_major.\$releasever_minor-\$basearch,
+          # but dnf never populates releasever_major/releasever_minor (only
+          # releasever) and PGDG only hosts the plain rhel-9-x86_64 path --
+          # the templated URL 404s. Rewrite it to the variable that's
+          # actually set and matches what's hosted.
+          sed -i -E 's/rhel-\\\$releasever_major\\.\\\$releasever_minor-/rhel-\\\$releasever-/' /etc/yum.repos.d/pgdg-redhat-all.repo
           # Disable the el9 default postgresql module so it doesn't
           # shadow PGDG's per-major package.
           dnf -qy module reset postgresql 2>/dev/null || true
@@ -345,7 +351,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.18"
+          test "\$VERSION" = "2.0.19"
           echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -454,7 +460,7 @@ jobs:
           VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.18"
+          test "${VERSION}" = "2.0.19"
 
           # Search works with no further config.
           psql -d postgres -Atc \

@@ -698,7 +698,7 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$("${PSQL[@]}" -c "SELECT fractal_version();" 2>&1)
-  [[ "$ver" = "2.0.18" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.18)"
+  [[ "$ver" = "2.0.19" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.19)"
   # fractal_search convergence: cosine similarity to query ~1
   local r; r=$("${PSQL[@]}" -c "
      WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
@@ -2249,12 +2249,20 @@ gate_23_agents() {
   pg_set_guc fractalsql.text_to_sql_allowed_statements "'select_insert_update'" "select_insert_update" \
     || fail "23 agents: sql_agent_savepoint GUC did not take effect"
   echo "INSERT INTO bt_sql_agent_sp (id, val) VALUES (1, 'x')" > /tmp/fractalsql_bt_sql.txt
-  local out; out=$("${PSQL[@]}" -c "
-     BEGIN;
-     SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);
-     SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);
-     SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);
-     COMMIT;" 2>&1)
+  # Separate -c flags, not one multi-statement -c string: on PG14, a
+  # single simple-query message containing multiple statements silently
+  # drops every statement's output but the last once one of them calls
+  # a function that uses BeginInternalSubTransaction (confirmed live --
+  # the combined form returns only the COMMIT tag, no BEGIN, no SELECT
+  # results, on PG14; PG16 is unaffected). Separate -c flags still share
+  # one connection, so the explicit BEGIN/COMMIT still scope one real
+  # transaction across all three calls.
+  local out; out=$("${PSQL[@]}" \
+     -c "BEGIN;" \
+     -c "SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);" \
+     -c "SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);" \
+     -c "SELECT execution_status FROM fractal_sql_agent('insert canary row', ARRAY['bt_sql_agent_sp'], 1, true);" \
+     -c "COMMIT;" 2>&1)
   # BEGIN/COMMIT print their own command tags even under -tA (only
   # SELECT's tuples are suppressed by -t) -- filter them out before
   # indexing, rather than assuming the 3 statuses are lines 1-3.
@@ -3611,11 +3619,19 @@ gate_29_vector_ops() {
   q8_hex="${q8_codes#\\x}"
   awk -v hex="$q8_hex" -v s="$q8_scale" '
     function abs(x) { return x < 0 ? -x : x }
+    function hexbyte(h2,    i, c, v) {
+      v = 0
+      for (i = 1; i <= 2; i++) {
+        c = index("0123456789abcdef", tolower(substr(h2, i, 1))) - 1
+        v = v * 16 + c
+      }
+      return v
+    }
     BEGIN {
       h = hex
       if (length(h) != 6 || (s + 0) <= 0) exit 1
       for (i = 1; i <= 3; i++) {
-        v = strtonum("0x" substr(h, (i-1)*2+1, 2))
+        v = hexbyte(substr(h, (i-1)*2+1, 2))
         if (v >= 128) v -= 256
         q[i] = v
       }

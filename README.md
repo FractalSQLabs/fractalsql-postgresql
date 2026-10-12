@@ -3,7 +3,7 @@
 </p>
 
 # FractalSQL: Sovereign Data Intelligence
-### Sovereign, Agentic PostgreSQL
+### AI Database Extension for PostgreSQL
 
 **Vector Search. In-Database Reasoning. Production-Safe Agency. All beside your data.**
 
