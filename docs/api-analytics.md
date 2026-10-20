@@ -17,6 +17,21 @@ Calculates the scaling exponent ($\alpha$) of a time-ordered series to distingui
 **Signature**: `fractal_dimension_dfa(series float8[]) RETURNS float8`
 **Requirement**: $\ge 16$ points.
 
+
+#### Using the DFA exponent as a Hurst exponent
+
+There is deliberately no separate Hurst function: the DFA exponent *is* the Hurst exponent for noise-like input.
+
+- For a series of **increments** (returns, differences): $H = \alpha$. $\alpha < 0.5$ is mean-reverting (anti-persistent), $\alpha \approx 0.5$ a random walk, $\alpha > 0.5$ trending (persistent).
+- For a series of **levels** (prices, a cumulative sum): $H = \alpha - 1$.
+
+On synthetic fractional Gaussian noise with known $H$ from 0.3 to 0.9, DFA had an overall RMSE of 0.036 at $n = 1024$ (0.068 at $n = 256$), against 0.070 (0.094 at $n = 256$) for classic and bias-corrected rescaled-range (R/S) estimators. On random-walk returns with heavy tails or volatility clustering, DFA called 0-2% of series trending or mean-reverting at a $\pm 0.1$ band, against 7-11% for raw R/S. (Synthetic tests, not market data.)
+
+Caveats:
+
+- **Sampling noise.** The estimate has a standard deviation of about 0.03 at $n = 1024$ and 0.05-0.07 at $n = 256$. Do not classify a regime from one value near 0.5 on a short series.
+- **Short-memory autocorrelation inflates $\alpha$.** DFA's smallest box is 4 samples, so a series with only lag-1 momentum (AR(1), $\varphi = 0.3$) reads about 0.61 although its long-run $H$ is 0.5. In testing, raising the smallest box to 32 brought that to 0.52 while genuinely persistent (0.7) and anti-persistent (0.3) series stayed put, at the price of a larger standard deviation. This function does not expose the box size yet.
+
 ### `fractal_dimension_boxcount`
 **Minkowski-Bouligand Dimension**
 Measures the spatial complexity of a point cloud using box-counting.
@@ -29,7 +44,7 @@ Measures the spatial complexity of a point cloud using box-counting.
 Detects changes in the DFA exponent between a recent window and the baseline.
 
 **Signature**: `fractal_dimension_drift(series float8[], win int4) RETURNS jsonb`
-**Return**: `{drift, recent_alpha, baseline_alpha}`.
+**Return**: `{drift, recent_alpha, baseline_alpha}`. `drift` is a **signed** number — `recent_alpha - baseline_alpha` — so positive means the recent window is more complex/irregular than the baseline and negative means it is approaching a more ordered state. Requires $n \ge win + 16$ and $win \ge 16$.
 
 ---
 
@@ -42,12 +57,37 @@ DFA's complement: localizes *where* a series' mean and/or variance shifted, inst
 **Signature**: `fractal_change_point_detect(series float8[], win int4, threshold float8 DEFAULT 2.0, max_points int4 DEFAULT 16) RETURNS int8[]`
 Sliding two-sample test over adjacent windows of `win` samples; flags a boundary when the mean differs by more than `threshold` pooled-standard-deviation units or the variance ratio exceeds `threshold` squared. Returns ascending boundary indices, up to `max_points`. Requires at least `2 * win` points.
 
+> **Engine note (`max_points` default).** The default is `16` here, and `16` in both MCP layers. The SQLite edition's *SQL-level* default is `64`, so a call that relies on the default can return up to four times as many boundary indices there. Pass `max_points` explicitly when the two engines must agree exactly.
+
 ### `fractal_periodogram`
 **Classical Periodogram**
 Power at each positive Fourier frequency, computed by direct $O(n^2)$ DFT (exact, not an FFT approximation).
 
 **Signature**: `fractal_periodogram(series float8[], max_peaks int4 DEFAULT 8) RETURNS TABLE(freq float8, power float8)`
 **Return**: only the `max_peaks` bins with highest power, sorted descending. `freq` is cycles per sample in $(0, 0.5]$; `1.0/freq` is samples per cycle. Useful for network-beaconing and retry-loop cadence detection that DFA alone is blind to. Requires at least 4 points.
+
+### `fractal_spectrogram_entropy`
+**Short-Time Spectral Entropy**
+`fractal_periodogram` says which frequencies dominate a whole series; this says *how ordered* the frequency content is, window by window, and so *when* it changes. A window slides over the series; each frame has its mean removed, is tapered with a periodic Hann window, and is transformed by a direct DFT. The Shannon entropy of the frame's normalized power spectrum is divided by $\ln(\text{win}/2)$, so every value lies in $[0, 1]$.
+
+**Signature**: `fractal_spectrogram_entropy(series float8[], win int4 DEFAULT 64, hop int4 DEFAULT 32, max_frames int4 DEFAULT 4096) RETURNS float8[]`
+**Return**: one entropy value per frame. Frame `f` covers `series[f*hop + 1 .. f*hop + win]` (1-based SQL indexing); there are `floor((n - win)/hop) + 1` frames, the first `max_frames` of them returned.
+
+| Value | Meaning |
+|---|---|
+| near 0 | energy concentrated in a few frequencies: a beacon, a retry loop, a locked carrier |
+| near 1 | energy spread across the band: noise-like, jammed, or a signal that has lost its structure |
+
+Calibration: a pure tone reads about 0.2 (the Hann taper spreads it over a few bins), white noise about 0.9, not 1.0 (a noise periodogram is itself randomly distributed). A constant frame has no spectral energy and reports exactly `0.0`, never NaN, so the result can be passed straight to `fractal_change_point_detect` or `fractal_dimension_dfa`.
+
+Limits: `win` in $[8, 512]$, `hop >= 1`, `max_frames` in $[1, 4096]$, `n >= win`, all samples finite. Cost is $O(\text{frames} \times \text{win}^2 / 2)$, at most about $5 \times 10^8$ multiply-adds.
+
+```sql
+-- where does a signal's spectral order change?
+SELECT fractal_change_point_detect(
+         fractal_spectrogram_entropy(samples, 64, 32), 4, 2.0, 8)
+  FROM rf_capture WHERE capture_id = 7;   -- boundary indices are FRAME indices
+```
 
 ### `fractal_tda_persistence_diagram`
 **Topological Persistence**
@@ -60,7 +100,9 @@ Topological analysis over a point cloud's Vietoris-Rips filtration, capped at 51
 **SimHash State Fingerprint**
 Random-hyperplane SimHash (Charikar 2002): projects a state vector onto `n_bits` random hyperplanes (deterministic from `seed`) and packs the sign of each projection MSB-first into bytes.
 
-**Signature**: `fractal_state_fingerprint(v float8[], n_bits int4 DEFAULT 128, seed float8 DEFAULT 42.0) RETURNS bytea`
+**Signature**: `fractal_state_fingerprint(v float8[], n_bits int4 DEFAULT 128, seed float8 DEFAULT 0.0) RETURNS bytea`
+The fingerprint is `(n_bits + 7) / 8` bytes: the sign of each projection packed MSB-first.
+The `seed` default is `0.0` — the same default the SQLite edition uses, so a fingerprint computed here is comparable with one computed there. The seed selects the random hyperplanes: a different seed means a different (and therefore not comparable) fingerprint.
 Two nearly-identical states collapse to the same or a very low Hamming-distance fingerprint, unlike an exact hash's all-or-nothing sensitivity to floating-point noise.
 
 ### `fractal_cycle_detect`
@@ -146,11 +188,22 @@ Generalizes `fractal_optimize_portfolio`'s cardinality-constrained search into a
 ## Named Feature Store
 
 A generic per-item vector store for custom metadata or flagged examples.
+The backing table (`fractalsql_feature_store`) ships with the extension (it
+is created by `CREATE EXTENSION`), so there is nothing to migrate or set
+up beforehand.
 
 ### `fractal_store_morphology`
-Upserts a vector against a `doc_id`.
+Upserts a vector against a `doc_id` (last-writer-wins: writing an existing
+`doc_id` again overwrites the stored vector). Returns `void`.
+
 **Signature**: `fractal_store_morphology(doc_id int8, feature_array float8[]) RETURNS void`
 
 ### `fractal_mine_topology_negatives`
-Brute-force k-NN scan over the feature store.
+Brute-force k-NN (true Euclidean distance, ascending order) scan over the
+feature store. A stored row whose dimension doesn't match
+`surrogate_vector`'s is skipped, not an error — the scan doesn't abort.
+No index: intended for a curated store (per-item features, flagged
+negative examples), not a full corpus.
+
 **Signature**: `fractal_mine_topology_negatives(surrogate_vector float8[], k int4) RETURNS TABLE(doc_id int8, distance float8)`
+**Return**: one row per neighbor, nearest first.

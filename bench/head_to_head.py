@@ -52,6 +52,30 @@ def nearest_cluster(points: np.ndarray, centers: np.ndarray) -> np.ndarray:
     return np.argmin(d2, axis=1)
 
 
+def validate_dsn(raw: str) -> str:
+    """Portability hardening (sibling v2.0.8's bench-arg guard class, PG half):
+    the --dsn CLI value is connection INPUT, not trusted config. Reject
+    control characters (a newline inside a conninfo keyword/value line
+    smuggles a second keyword past operators reading logs), and reject
+    keywords that make the connection a side channel rather than a bench
+    target (options= -c injection, passfile=, service=, hostfile=). The
+    containment the sqlite column gives its --db file path is impossible
+    here (a DSN has no filesystem path); this is the equivalent input pin.
+    Returns the validated string unchanged."""
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+        raise SystemExit("bench: --dsn contains control characters; refusing")
+    try:
+        from psycopg import conninfo as _ci
+        kv = _ci.conninfo_to_dict(raw)
+    except Exception as exc:              # unparseable conninfo
+        raise SystemExit(f"bench: --dsn is not a valid conninfo: {exc}")
+    bad = {"options", "passfile", "service", "hostfile"}
+    found = bad & ({k.lower() for k in kv} if kv else set())
+    if found:
+        raise SystemExit("bench: --dsn refuses control-surface keyword(s) "
+                         + ",".join(sorted(found)))
+    return raw
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -80,7 +104,19 @@ def main() -> int:
                     help="print only the final averages line (for sweep drivers)")
     args = ap.parse_args()
 
-    with psycopg.connect(args.dsn, autocommit=True) as conn:
+    # Explicit membership check at the point of use: vector_col is
+    # CLI-supplied text that reaches SQL (the fractal_search_explore call
+    # below parameter-binds it today, but it is pinned right here so any
+    # future f-string refactor of that SQL cannot turn it into an
+    # injection point). argparse's choices= already enforces this; this
+    # use-site check is the guard the SQL call actually relies on.
+    if args.vector_col not in ("emb_arr", "emb_fv"):
+        print(f"head_to_head.py: unsupported vector column "
+              f"{args.vector_col!r}", file=sys.stderr)
+        return 2
+    vector_col = args.vector_col
+
+    with psycopg.connect(validate_dsn(args.dsn), autocommit=True) as conn:
         register_vector(conn)
         conn.execute(f"SET hnsw.ef_search = {int(args.hnsw_ef_search)}")
 
@@ -97,7 +133,7 @@ def main() -> int:
             print(f"  HNSW: ef_search={args.hnsw_ef_search}, LIMIT {args.top_k}")
             print(f"  Scout: population={args.top_k}, iterations={args.sfs_iter}, "
                   f"mdn={args.sfs_mdn}, walk=0.0 (brute-force relevance scan + MMR), "
-                  f"col={args.vector_col}")
+                  f"col={vector_col}")
             print()
 
         # ----- pick queries: one per randomly chosen cluster, slightly noised -----
@@ -147,7 +183,7 @@ def main() -> int:
                     "SELECT p FROM fractal_search_explore("
                     "    'bench_vectors', %s, %s, %s::jsonb"
                     ") AS p",
-                    (args.vector_col, q_fl8, opts)
+                    (vector_col, q_fl8, opts)
                 ).fetchall()
             sfs_ms = clk()
             sfs_pts = np.array([r[0] for r in rows], dtype=np.float64)
@@ -173,7 +209,7 @@ def main() -> int:
             print(f"  Scout is {lat_ratio:.1f}x slower and discovers "
                   f"{rec_ratio:.1f}x more distinct clusters")
         else:
-            print(f"n={n_total:<7d} col={args.vector_col:<8s} "
+            print(f"n={n_total:<7d} col={vector_col:<8s} "
                   f"HNSW={np.mean(hnsw_ms_list):7.2f}ms/{np.mean(hnsw_recall_list):4.1f}  "
                   f"Scout={np.mean(sfs_ms_list):7.2f}ms/{np.mean(sfs_recall_list):4.1f}  "
                   f"({lat_ratio:.1f}x slower, {rec_ratio:.1f}x recall)")

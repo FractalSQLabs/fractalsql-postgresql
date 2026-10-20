@@ -72,6 +72,13 @@ warn() { local msg="$1"; printf "  ${Y}!${Z} %s\n" "$msg" >&2; }
 err()  { local msg="$1"; printf "  ${R}✗${Z} %s\n" "$msg" >&2; }
 die()  { local msg="$1"; err "$msg"; exit 1; }
 
+# Every package download below is a release asset fetched over the
+# network, so all of them go through this wrapper, which pins curl to
+# https via --proto (same pin the release workflow's own downloads use).
+fetch() {
+    curl -fsSL --proto '=https' "$@"
+}
+
 # --- /dev/tty-aware prompting --------------------------------------------
 # `curl ... | bash` makes stdin the pipe, not the terminal. Reading a
 # prompt from stdin in that mode either blocks forever or silently
@@ -363,14 +370,14 @@ phase_b_install() {
         debian)
             local asset="postgresql-${TARGET_MAJOR}-fractalsql-${ARCH_DEB}.deb"
             log "Downloading ${asset}..."
-            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            fetch "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             log "sudo apt-get install -y ${TMP_DIR}/${asset}"
             [[ "${DRY_RUN}" -eq 1 ]] || sudo apt-get install -y "${TMP_DIR}/${asset}"
             ;;
         rhel)
             local asset="postgresql-${TARGET_MAJOR}-fractalsql-${ARCH_DEB}.rpm"
             log "Downloading ${asset}..."
-            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            fetch "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             if [[ "${PKG_MGR}" == "zypper" ]]; then
                 # zypper enforces signature checks by default, even for a
                 # locally-supplied file; dnf/yum don't. --no-gpg-checks is
@@ -386,7 +393,7 @@ phase_b_install() {
         darwin)
             local asset="fractalsql-postgresql-${INSTALL_VERSION}-pg${TARGET_MAJOR}-darwin-${ARCH_DARWIN}.tar.gz"
             log "Downloading ${asset}..."
-            curl -fsSL --proto '=https' "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
+            fetch "${asset_base}/${asset}" -o "${TMP_DIR}/${asset}"
             tar xzf "${TMP_DIR}/${asset}" -C "${TMP_DIR}"
             local dir="${TMP_DIR}/${asset%.tar.gz}"
             log "Running the bundled scripts/macos/install.sh (reused, not reimplemented)..."

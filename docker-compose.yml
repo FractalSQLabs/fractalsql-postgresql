@@ -63,5 +63,64 @@ services:
         psql -h postgres -U postgres -d fractalsql_bench -v ON_ERROR_STOP=0 -c 'CREATE EXTENSION IF NOT EXISTS vector' -c 'CREATE EXTENSION IF NOT EXISTS fractalsql';
         psql -h postgres -U postgres -d fractalsql_demo -v ON_ERROR_STOP=0 -c 'CREATE EXTENSION IF NOT EXISTS vector'
 
+  # MCP server (docs/mcp-plugin.md): the macro-orchestration
+  # bridge -- one tool per FractalSQL SQL function, spoken over MCP.
+  # Demo scope (spec 9.1/14.7): reuses the SAME database + credentials the
+  # postgres service already has (no second DB, no new credential --
+  # a deliberate, narrow exception to the plugin's least-privilege
+  # recommendation, scoped to this compose project only and called out
+  # in docs/docker-demo.md + docs/mcp-plugin.md); the SAME
+  # mcp/ binary as production, filtered to the demo's four pinned tools
+  # via demo/mcp/call-tool.sh's --tool (15.1's whitelist knob).
+  # The service itself is the long-running streamable-HTTP server shape
+  # (spec 1.1/9.1: port 18765->8765, Bearer-token gated per 10.3 -- point
+  # an MCP client at http://localhost:18765/mcp with FSQL_MCP_AUTH_TOKEN
+  # as its bearer token; TLS terminates in front of the container if you
+  # expose it beyond localhost, keep it local otherwise). The stdio shape
+  # (the desktop-client form) is what any `docker compose exec mcp ...`
+  # one-liner gets: exec'd processes inherit the environment, and the
+  # container env deliberately does NOT set FSQL_MCP_TRANSPORT -- stdio is
+  # the server's default -- so both shapes work from one container.
+  mcp:
+    image: gcc:13-bookworm
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /work/mcp
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: fractalsql_demo
+      PGUSER: postgres
+      PGPASSWORD: fractalsql
+      # Auth for the exposed HTTP transport (docs/docker-demo.md's
+      # connect-an-MCP-client path). Change it for anything beyond a
+      # toy; rotation is a restart (env-var form, per spec 10.3).
+      FSQL_MCP_AUTH_TOKEN: fractalsql-demo-token
+      # The server's own bind default is 127.0.0.1 (loopback only). Inside a
+      # container the listener must reach the container's network namespace
+      # for the published port to work, so the all-interfaces bind is
+      # requested EXPLICITLY here -- and the published port below is bound to
+      # the host's LOOPBACK, so the demo's MCP endpoint stays off the host's
+      # network (the demo token is a toy either way).
+      FSQL_MCP_HTTP_HOST: "0.0.0.0"
+    ports:
+      # spec 9.1: 18765:8765 on the new mcp service (the optional
+      # SSE/HTTP transport's demo exposure; stdio needs none). Published on
+      # 127.0.0.1 only -- see the FSQL_MCP_HTTP_HOST note above.
+      - "127.0.0.1:18765:8765"
+    volumes:
+      # built in-container on first start (apt + make); the mcp tree is
+      # NOT read-only so the binary/obj land there like a local build
+      - ./mcp:/work/mcp
+      # /demo (read-only): the demo corpus mounted at the SAME absolute
+      # path the postgres demo image COPYs demo/ to (/demo/*.sql,
+      # /demo/run_demo.sh, /demo/mcp/call-tool.*) -- this service's own
+      # entrypoint and run_demo.sh (docs/docker-demo.md step 1's
+      # one-pass runner) both resolve under /demo.
+      - ./demo:/demo:ro
+    entrypoint: ["/bin/sh", "-c",
+      "ldd /work/mcp/fractalsql-postgresql-mcp 2>/dev/null | grep -qs 'not found' && rm -f /work/mcp/fractalsql-postgresql-mcp; test -x /work/mcp/fractalsql-postgresql-mcp || (find /work/mcp -path '*/src/*.o' -delete && apt-get update -qq && apt-get install -y -qq libpq-dev libssl-dev pkg-config && make -C /work/mcp -j2); exec /demo/mcp/call-tool.sh serve"]
+
 volumes:
   ollama_data:

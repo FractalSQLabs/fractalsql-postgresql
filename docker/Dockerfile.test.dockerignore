@@ -4,6 +4,18 @@ tmp_check/
 results/
 *.deb
 *.rpm
+# Host build artifacts: git-ignored but present in the working tree, and
+# Docker's COPY carries them anyway unless ignored here. A host-built
+# mcp/src/*.o (or the committed Linux mcp binary) makes the gate's make
+# LINK a foreign-GLIBC binary instead of compiling fresh (docker-caught:
+# "__isoc23_strtoll" / "GLIBC_2.38 not found" in the bookworm image).
+mcp/obj/
+mcp/*.exe
+mcp/fractalsql-postgresql-mcp
+mcp/*.o
+mcp/src/*.o
+mcp/src/*.d
+mcp/src/**/*.o
 packaging/debian/.debhelper/
 packaging/rpm/BUILD/
 packaging/rpm/BUILDROOT/

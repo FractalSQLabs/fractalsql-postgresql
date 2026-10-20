@@ -463,7 +463,7 @@ fractal_vector_scale(PG_FUNCTION_ARGS)
 }
 
 /* ------------------------------------------------------------------ */
-/* v2.0.25 vector primitives -- Lp distance, quantization, Hamming.   */
+/* v2.0.20 vector primitives -- Lp distance, quantization, Hamming.   */
 /* ------------------------------------------------------------------ */
 
 Datum

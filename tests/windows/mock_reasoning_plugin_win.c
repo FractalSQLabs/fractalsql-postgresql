@@ -115,6 +115,32 @@ mock_generate(void *u, const char *p, size_t pl,
         fclose(f);
     }
 
+    /* Gate 33's MCP smoke writes this sentinel into the file to force a
+     * deterministic REASONING failure (agent_partial_reasoning_fail's
+     * MCP-level case): nonzero rc, no response body -- the shape a real
+     * provider outage surfaces through. Matching Linux-side sentinel in
+     * tests/mock_reasoning_plugin.c. */
+    if (strcmp(sql, "FSQL_BT_FORCE_FAIL") == 0)
+        return 1;
+
+    /* Gate 04's empty-candidate case (matching Linux-side sentinel in
+     * tests/mock_reasoning_plugin.c): rc==0 with an intentionally EMPTY
+     * response body -- "the model said something, but contained no SQL".
+     * The T2S pipeline must reject it as a validation failure ("expected
+     * exactly one SQL statement, found 0") and feed the reason back into
+     * the retry loop, not pass an empty statement anywhere. */
+    if (strcmp(sql, "FSQL_BT_EMPTY_RESPONSE") == 0)
+    {
+        char *resp = (char *) malloc(1);
+        if (resp == NULL)
+            return -1;
+        resp[0] = '\0';
+        *response_out         = resp;
+        *response_len_out     = 0;
+        *response_free_fn_out = mock_free;
+        return 0;
+    }
+
     /* fractal_text_to_sql()'s GENERATE step loads its own reasoning
      * context with FSQL_REASONING_HTTP_RESPONSE_MODE=code (see
      * ensure_text_to_sql_ctx() in src/fractalsql.c) -- under that mode

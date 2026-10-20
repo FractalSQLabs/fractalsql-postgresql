@@ -108,7 +108,7 @@ UPDATE vmd_vessels
 -- lookup (who's near a contact-of-interest position) and diverse-track
 -- clustering (representative traffic patterns across the whole fleet).
 --
--- v2.0.25: doc_id is a real ctid, so this join is exact regardless of
+-- v2.0.20: doc_id is a real ctid, so this join is exact regardless of
 -- vessel 7's relocated tuple -- no row_number() mapping needed.
 -- ------------------------------------------------------------------
 \echo ''

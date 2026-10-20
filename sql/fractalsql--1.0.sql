@@ -241,7 +241,7 @@ LANGUAGE C VOLATILE STRICT;
 COMMENT ON FUNCTION fractal_agent_trajectory_predict(table_name text, vector_col text, baseline_id int8, forecast_steps int4) IS
 'Forecast a future state vector by extrapolating the real delta (current - baseline, both read from table_name.vector_col via SPI, keyed by baseline_id and the max primary key) and searching the corpus for the nearest predicted state. Returns (predicted_state_vector, projected_drift_delta, risk_threshold_exceeded), all real computed values.';
 
--- fractal_agent_detect_loop (rewritten for v2.0.25): loop-detection safety
+-- fractal_agent_detect_loop (rewritten for v2.0.20): loop-detection safety
 -- monitor over real state vectors, not exact state hashes. state_log is
 -- flattened row-major (n_states * dim doubles, matching this extension's
 -- existing corpus-flattening convention -- see fractal_search_telemetry).
@@ -314,6 +314,14 @@ CREATE TABLE fractal_vectorizers (
     -- every existing vectorizer keeps v1.0 behavior unchanged.
     enabled        boolean NOT NULL DEFAULT true,
     created_at     timestamptz NOT NULL DEFAULT now(),
+    -- The role that created the vectorizer -- the one who legitimately
+    -- asked for this table's content to be embedded. Recorded for
+    -- observability and for the authorization story below; NOT a
+    -- security gate on its own (any role can INSERT into this table,
+    -- so it can be forged). The gate is the enqueue-trigger check in
+    -- fractal_vectorizer_process_queue() plus the identity-immutability
+    -- trigger below, which together make a row's target unforgeable.
+    created_by     name    NOT NULL DEFAULT current_user,
     UNIQUE (source_table, text_col, embedding_col)
 );
 
@@ -321,6 +329,98 @@ COMMENT ON TABLE fractal_vectorizers IS
   'One row per fractal_vectorizer_create() call -- which table/columns '
   'are being kept embedded, and how. See fractal_vectorizer_queue for '
   'the actual work queue and fractal_vectorizer_status for observability.';
+
+-- Identity immutability: the four columns that say WHICH content gets
+-- embedded (source_table, source_pk_col, text_col, embedding_col) are
+-- frozen at creation time. Everything else about a vectorizer (enabled,
+-- options) stays mutable -- that is what pause/resume and the rate cap
+-- need.
+--
+-- Why this exists: fractal_vectorizers is a PERMANENT table with
+-- GRANT SELECT, INSERT, UPDATE TO PUBLIC (see the grant below), so
+-- before this trigger ANY role could UPDATE a registry row's
+-- source_table to name a DIFFERENT, real relation -- and the
+-- processing role (which in the default deployment is a SUPERUSER: the
+-- MCP server connects as PGUSER: postgres) would then read that
+-- relation's text column and ship it to the embedding provider, on
+-- behalf of a caller who has no right to it. That is the confused
+-- deputy: the read happens with the PROCESSOR's privileges, not the
+-- INSERTING role's.
+--
+-- The trigger closes the retargeting half of that hole for EVERY role,
+-- including the DBA: a vectorizer's target is decided once, by the
+-- role that owns the source table (fractal_vectorizer_create()'s
+-- CREATE TRIGGER is the ownership check), and cannot be moved
+-- afterwards. Retargeting means dropping the vectorizer and creating
+-- a new one -- which re-runs the ownership check.
+--
+-- SECURITY INVOKER (default): this reads only OLD/NEW, so it needs no
+-- elevation, and keeping it INVOKER means it cannot itself be used to
+-- widen anyone's access.
+CREATE FUNCTION fractal_vectorizer_guard_identity() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    IF NEW.source_table  IS DISTINCT FROM OLD.source_table
+       OR NEW.source_pk_col IS DISTINCT FROM OLD.source_pk_col
+       OR NEW.text_col     IS DISTINCT FROM OLD.text_col
+       OR NEW.embedding_col IS DISTINCT FROM OLD.embedding_col
+       OR NEW.created_by   IS DISTINCT FROM OLD.created_by THEN
+        RAISE EXCEPTION
+            'fractal_vectorizer_guard_identity: a vectorizer''s target (source_table/source_pk_col/text_col/embedding_col) and its creator are immutable -- '
+            'drop the vectorizer and create a new one to retarget it (vectorizer id=%)',
+            OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER fractal_vectorizer_guard_identity_trg
+    BEFORE UPDATE ON fractal_vectorizers
+    FOR EACH ROW EXECUTE FUNCTION fractal_vectorizer_guard_identity();
+
+COMMENT ON FUNCTION fractal_vectorizer_guard_identity() IS
+  'Freezes a vectorizer''s target columns (source_table, source_pk_col, '
+  'text_col, embedding_col) and its creator (created_by) against UPDATE. '
+  'The registry table is PUBLIC-writable, so without this a role could '
+  'repoint another role''s vectorizer at a table it cannot read and have '
+  'the PROCESSING role read it for it (a confused-deputy data leak). '
+  'pause/resume and the rate cap only touch enabled/options and are '
+  'unaffected.';
+
+-- Creator pinning: a registry row's creator is the role that actually
+-- inserted it, ALWAYS -- whatever the INSERT statement asked for. The
+-- column's DEFAULT is current_user, but a DEFAULT is only a fallback:
+-- an explicit created_by in the INSERT would otherwise let a caller
+-- impersonate a superuser and satisfy the authorization check in
+-- fractal_vectorizer_process_queue() below. Overwriting it here makes
+-- created_by unforgeable.
+--
+-- SECURITY INVOKER (default): current_user under an INVOKER trigger is
+-- the role that ran the INSERT -- the very thing being recorded. Making
+-- it DEFINER would record the definer instead, which is the opposite of
+-- what this column means.
+CREATE FUNCTION fractal_vectorizer_pin_creator() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    NEW.created_by := current_user;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER fractal_vectorizer_pin_creator_trg
+    BEFORE INSERT ON fractal_vectorizers
+    FOR EACH ROW EXECUTE FUNCTION fractal_vectorizer_pin_creator();
+
+COMMENT ON FUNCTION fractal_vectorizer_pin_creator() IS
+  'Forces fractal_vectorizers.created_by to the role that performed the '
+  'INSERT, ignoring any value the statement supplied. The registry is '
+  'PUBLIC-writable, so without this a caller could claim to be a '
+  'superuser and have fractal_vectorizer_process_queue() read content '
+  'on their behalf.';
 
 -- fractal_vectorizer_create() stays SECURITY INVOKER (unlike the enqueue
 -- trigger below) -- its own CREATE TRIGGER step is what actually
@@ -679,6 +779,9 @@ DECLARE
     r              record;
     n_processed    int := 0;
     v_text         text;
+    v_tbl          text;   -- r.source_table RE-canonicalized per row (the injection fix below)
+    v_tbl_oid      oid;    -- the SAME relation as an OID -- for privilege checks that
+                           -- must not depend on the caller's search_path
     vec            float8[];
     v_max_calls    int;
     v_window_secs  int;
@@ -697,7 +800,7 @@ BEGIN
     FOR r IN
         SELECT q.id, q.vectorizer_id, q.source_pk_value,
                v.source_table, v.source_pk_col, v.text_col, v.embedding_col,
-               v.options
+               v.options, v.created_by
         FROM fractal_vectorizer_queue q
         JOIN fractal_vectorizers v ON v.id = q.vectorizer_id
         WHERE q.status = 'pending'
@@ -758,12 +861,88 @@ BEGIN
             -- without a catalog lookup for the PK's type. Correctness
             -- over index-usability in this v1.
             --
-            -- %s (not %I) for r.source_table -- it's already the
-            -- canonical, self-quoted ::regclass text form stored by
-            -- fractal_vectorizer_create(), so %I would double-quote it.
-            -- See that function's v_tbl_ident comment for why.
+            -- %s (not %I) for v_tbl -- same reasoning as
+            -- fractal_vectorizer_create()'s v_tbl_ident comment.
+            --
+            -- BUT the value used here is re-canonicalized on use (a
+            -- confused-deputy guard): fractal_vectorizers
+            -- is documented PUBLIC-writable, and its STORED source_table
+            -- text cannot be assumed to still be the ::regclass form
+            -- create() wrote -- a second role can UPDATE the registry
+            -- row directly. A raw %s splice of a tampered value would
+            -- then run arbitrary SQL as the CALLER of process_queue()
+            -- (e.g. the MCP server's own role on its vectorizer tool).
+            -- The :::regclass conversion re-validates the stored text at
+            -- use time: a legit (possibly renamed) relation resolves to
+            -- its own canonical quoted form; anything else raises a
+            -- clean error that lands in this row's failed status below,
+            -- exactly like every other per-row failure.
+            -- Resolve the stored source_table to an OID ONCE, then format the
+            -- canonical name FROM the OID. Both steps raise for a name that
+            -- does not resolve, which lands in this row's failed status below
+            -- exactly like every other per-row failure.
+            v_tbl_oid := r.source_table::regclass;
+            v_tbl := v_tbl_oid::regclass::text;
+
+            -- AUTHORIZATION GATE (the confused-deputy fix).
+            --
+            -- The read below runs with the CALLER's privileges (this
+            -- function is SECURITY INVOKER), but the CALLER of
+            -- process_queue() is whoever ran the batch -- in the default
+            -- deployment that is the MCP server's own role, a SUPERUSER
+            -- (docker-compose.yml:94) -- while the vectorizer row may
+            -- have been created by, and the queue row INSERTed by, a
+            -- DIFFERENT, unprivileged role. Without a gate, that
+            -- unprivileged role could name any real relation in a
+            -- vectorizer it registered and have the SUPERUSER's
+            -- process_queue() read that relation's text column and ship
+            -- it to the embedding provider. The read would be
+            -- UNAUTHORIZED even though the SQL itself is legitimate --
+            -- the classic confused deputy.
+            --
+            -- THE CREATOR is the principal whose content this is: the
+            -- role that legitimately asked for this column to be
+            -- embedded. fractal_vectorizer_create() enforces that
+            -- through its CREATE TRIGGER step, but a direct INSERT into
+            -- the PUBLIC-writable registry bypasses create() entirely.
+            -- Checking the CREATOR's own entitlement is what closes that
+            -- hole: a forged row naming someone else's table has a
+            -- creator who cannot read that table, no matter how
+            -- privileged the processor happens to be. The creator is
+            -- unforgeable (pinned by fractal_vectorizer_pin_creator) and
+            -- the target is immutable (fractal_vectorizer_guard_identity),
+            -- so the pair cannot be steered to a target its creator is
+            -- not entitled to.
+            --
+            -- The check is on the CONTENT column specifically (the one
+            -- that gets shipped to the provider), not merely on the
+            -- relation: a creator who can see the table's metadata but
+            -- not the text being embedded has not consented to that
+            -- text leaving the database. Column-level SELECT is
+            -- implied by a table-level grant, so a table owner passes.
+            --
+            -- The CALLER's own privileges are enforced separately, and
+            -- more strictly, by the dynamic SELECT below itself: it runs
+            -- as the caller, so a caller without SELECT on the source
+            -- relation gets Postgres's own "permission denied for table
+            -- X" and the row is marked 'failed' -- the documented
+            -- gate-16 behavior, unchanged and still produced by the
+            -- engine's own privilege system rather than by a bespoke
+            -- re-implementation of it.
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r.created_by) THEN
+                RAISE EXCEPTION
+                    'fractal_vectorizer_process_queue: vectorizer % cannot be processed: the role that created it (%) no longer exists',
+                    r.vectorizer_id, r.created_by;
+            END IF;
+
+            IF NOT has_column_privilege(r.created_by, v_tbl_oid, r.text_col, 'SELECT') THEN
+                RAISE EXCEPTION
+                    'fractal_vectorizer_process_queue: vectorizer % cannot be processed: the creating role (%) is not entitled to SELECT the content column % of the source relation %',
+                    r.vectorizer_id, r.created_by, r.text_col, v_tbl;
+            END IF;
+
             EXECUTE format('SELECT %I FROM %s WHERE %I::text = $1',
-                           r.text_col, r.source_table, r.source_pk_col)
+                           r.text_col, v_tbl, r.source_pk_col)
                 INTO v_text USING r.source_pk_value;
 
             IF v_text IS NULL THEN
@@ -776,7 +955,7 @@ BEGIN
             ELSE
                 vec := fractal_embed(v_text);
                 EXECUTE format('UPDATE %s SET %I = $1 WHERE %I::text = $2',
-                               r.source_table, r.embedding_col, r.source_pk_col)
+                               v_tbl, r.embedding_col, r.source_pk_col)
                     USING vec, r.source_pk_value;
                 UPDATE fractal_vectorizer_queue
                    SET status = 'done', updated_at = now(), error = NULL
@@ -887,6 +1066,29 @@ COMMENT ON FUNCTION fractal_diversify_set_params(int4, float8, float8, float8, i
   'the core''s current value for that field; only supplied fields are '
   'overridden. Takes effect on the next fractal_search call.';
 
+CREATE FUNCTION fractal_diversify_current_dq() RETURNS float8
+AS 'MODULE_PATHNAME', 'fractal_diversify_current_dq'
+LANGUAGE C VOLATILE STRICT;
+
+COMMENT ON FUNCTION fractal_diversify_current_dq() IS
+  'Most recent D_q (diversity quotient) recorded on this session''s '
+  'search context. Returns NULL when the core has no value yet (no '
+  'search has run, or Diversify is disabled) -- the core signals that '
+  'as NaN internally, and NULL is the honest SQL spelling of it. '
+  'Same value as fractal_detect_collapse(), exposed under the name '
+  'the SQLite edition uses.';
+
+CREATE FUNCTION fractal_diversify_overhead_p99_us() RETURNS float8
+AS 'MODULE_PATHNAME', 'fractal_diversify_overhead_p99_us'
+LANGUAGE C VOLATILE STRICT;
+
+COMMENT ON FUNCTION fractal_diversify_overhead_p99_us() IS
+  'Rolling p99 of the core''s own per-query Diversify overhead, in '
+  'microseconds, over the last 1000 search calls. Returns NULL while '
+  'the rolling buffer is still filling, or if Diversify is disabled. '
+  'The same value is reported as overhead_p99_us by '
+  'fractal_explain_result().';
+
 CREATE FUNCTION fractal_detect_collapse() RETURNS float8
 AS 'MODULE_PATHNAME', 'fractal_detect_collapse'
 LANGUAGE C VOLATILE STRICT;
@@ -952,7 +1154,7 @@ COMMENT ON FUNCTION fractal_dimension_boxcount(float8[], int4) IS
   'flat, row-major array of n_points * dim doubles. Requires >= 8 '
   'points and a non-degenerate bounding box.';
 
--- ----- Change-Point Detection / Periodogram (v2.0.25) --------------------
+-- ----- Change-Point Detection / Periodogram (v2.0.20) --------------------
 
 CREATE FUNCTION fractal_change_point_detect(
     series      float8[],
@@ -987,12 +1189,33 @@ COMMENT ON FUNCTION fractal_periodogram(float8[], int4) IS
   'samples per cycle. Useful for network-beaconing/retry-loop cadence '
   'detection that DFA alone is blind to. Requires n >= 4.';
 
--- ----- State Fingerprinting / Cycle Detection (v2.0.25) -------------------
+-- ----- Short-time spectral entropy (core v2.0.26) ------------------------
+
+CREATE FUNCTION fractal_spectrogram_entropy(
+    series      float8[],
+    win         int4 DEFAULT 64,
+    hop         int4 DEFAULT 32,
+    max_frames  int4 DEFAULT 4096
+) RETURNS float8[]
+AS 'MODULE_PATHNAME', 'fractal_spectrogram_entropy'
+LANGUAGE C IMMUTABLE STRICT;
+
+COMMENT ON FUNCTION fractal_spectrogram_entropy(float8[], int4, int4, int4) IS
+  'Short-time spectral entropy: slides a win-sample window over the '
+  'series every hop samples and returns, per frame, the Shannon entropy '
+  'of that frame''s power spectrum (mean removed, Hann taper, direct '
+  'DFT) normalized to [0, 1]. Near 0 = energy in a few frequencies '
+  '(beacon, retry loop, locked carrier); near 1 = spread across the '
+  'band (noise, jamming). A constant frame reports 0.0, never NaN, so '
+  'the result feeds fractal_change_point_detect directly. win in '
+  '[8, 512], hop >= 1, max_frames in [1, 4096], n >= win.';
+
+-- ----- State Fingerprinting / Cycle Detection (v2.0.20) -------------------
 
 CREATE FUNCTION fractal_state_fingerprint(
     v      float8[],
     n_bits int4   DEFAULT 128,
-    seed   float8 DEFAULT 42.0
+    seed   float8 DEFAULT 0.0
 ) RETURNS bytea
 AS 'MODULE_PATHNAME', 'fractal_state_fingerprint'
 LANGUAGE C IMMUTABLE STRICT;
@@ -1005,7 +1228,12 @@ COMMENT ON FUNCTION fractal_state_fingerprint(float8[], int4, float8) IS
   'Hamming-distance fingerprint, unlike an exact hash''s all-or-'
   'nothing sensitivity to floating-point noise -- pairs with '
   'fractal_cycle_detect for tolerant "have I basically been in this '
-  'state before" loop detection.';
+  'state before" loop detection. The seed default is 0.0, the same '
+  'default the SQLite edition uses: the seed selects the random '
+  'hyperplanes, so a fingerprint is only comparable with another one '
+  'computed under the SAME seed. (This default '
+  'was 42.0 before 2.0.20; fingerprints stored under that default are '
+  'not comparable with ones computed after the change.)';
 
 CREATE FUNCTION fractal_cycle_detect(
     fingerprints        bytea[],
@@ -1025,7 +1253,7 @@ COMMENT ON FUNCTION fractal_cycle_detect(bytea[], int4) IS
   'requires byte-exact fingerprint matches; > 0 tolerates near-'
   'identical states.';
 
--- ----- Topological Data Analysis (v2.0.25) --------------------------------
+-- ----- Topological Data Analysis (v2.0.20) --------------------------------
 -- SCOPE NOTE: the 0-dim persistence diagram (h0_bars) is an EXACT,
 -- complete computation. betti1 is NOT full simplicial H1 -- it is the
 -- Vietoris-Rips graph's cycle rank, which over-counts true H1 when a
@@ -1061,10 +1289,12 @@ LANGUAGE C IMMUTABLE STRICT;
 
 COMMENT ON FUNCTION fractal_dimension_drift(float8[], int4) IS
   'DFA drift between a series'' recent `win` points and everything '
-  'before them. Returns {drift, recent_alpha, baseline_alpha}. Positive '
-  'drift = increasing complexity/irregularity. Requires n >= win + 16, '
-  'win >= 16. (Parameter named "win" not "window" -- the latter is a '
-  'reserved SQL keyword.)';
+  'before them. Returns {drift, recent_alpha, baseline_alpha}. drift is '
+  'a SIGNED number: recent_alpha - baseline_alpha, so a positive drift '
+  '= increasing complexity/irregularity and a negative drift = the '
+  'recent window is approaching a more ordered state (a zero drift = '
+  'no shift). Requires n >= win + 16, win >= 16. (Parameter named "win" '
+  'not "window" -- the latter is a reserved SQL keyword.)';
 
 -- ----- Portfolio Optimization --------------------------------------------
 
@@ -1445,6 +1675,93 @@ CREATE CAST (float8[] AS fractal_vector)
 CREATE CAST (fractal_vector AS float8[])
   WITH FUNCTION fractal_vector_to_float8_array(fractal_vector) AS IMPLICIT;
 
+-- Text/JSON interop for the vector type. The type's own text format is
+-- pgvector's ("[0.1,0.2,0.3]") and the float8[] casts above cover the
+-- array side; these two functions close the two gaps a caller keeps
+-- hitting: getting a JSON array OUT of a stored vector (to hand it to a
+-- JSON-producing function without assembling an array literal by hand),
+-- and getting a vector IN from a text column that holds either a JSON
+-- array or a plain comma-separated list.
+--
+-- fractal_vector_to_json goes through the type's OWN text rendering
+-- (fractal_vector_out) rather than through float8[], deliberately: the
+-- float8[] round trip widens every float4 component to double
+-- precision, so 0.1f would come back as 0.10000000149011612. The text
+-- rendering is the same one the column's own output shows, so the JSON
+-- and the stored text agree.
+CREATE FUNCTION fractal_vector_to_json(v fractal_vector) RETURNS jsonb AS $$
+BEGIN
+    RETURN (v::text)::jsonb;
+EXCEPTION WHEN others THEN
+    RAISE EXCEPTION 'fractal_vector_to_json: could not convert the vector to JSON: %',
+        SQLERRM
+        USING ERRCODE = 'invalid_text_representation';
+END;
+$$ LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE;
+
+COMMENT ON FUNCTION fractal_vector_to_json(fractal_vector) IS
+  'Converts a fractal_vector into a JSON array of numbers (jsonb), e.g. ''[0.1,0.2,0.3]''. Use it to hand a stored vector to a JSON-producing function (jsonb_build_object, a jsonb column, an API payload) without assembling an array literal by hand. The numbers are the vector''s own components in the vector''s order, rendered exactly as the type''s text output renders them (float4 components, 9 significant digits) -- deliberately NOT the float8[] round trip, which would widen 0.1f to 0.10000000149011612. NULL in, NULL out. A component that is NaN or Infinity has no JSON number and raises.';
+
+-- Parse a text column into a fractal_vector. Two forms are accepted,
+-- and only those two:
+--   '[1,2,3]'      a JSON/pgvector-style array -- parsed by the type's
+--                  own input function, so spaces after the commas,
+--                  exponent forms and the rest of the type's grammar
+--                  all behave exactly as they do for a literal;
+--   '1,2,3'        a plain comma-separated list of numbers.
+-- Anything else raises with the offending text named. The list form is
+-- split on commas, each element is trimmed and parsed as a number, and
+-- the result goes through fractal_vector_from_float8_array() -- the
+-- type's own float8[] entry point -- so the binary layout is never
+-- re-implemented here.
+CREATE FUNCTION fractal_vector_from_text(txt text) RETURNS fractal_vector AS $$
+DECLARE
+    v_trimmed text;
+    v_parts   text[];
+    v_i       int;
+BEGIN
+    v_trimmed := btrim(txt);
+    IF v_trimmed = '' THEN
+        RAISE EXCEPTION 'fractal_vector_from_text: an empty string is not a vector'
+            USING ERRCODE = 'invalid_text_representation';
+    END IF;
+
+    IF left(v_trimmed, 1) = '[' THEN
+        -- The array form: the type's own input function owns this, so
+        -- there is exactly one parser for the "[...]" grammar.
+        BEGIN
+            RETURN v_trimmed::fractal_vector;
+        EXCEPTION WHEN others THEN
+            -- PL/pgSQL's RAISE placeholder is a bare "%" (an optional
+            -- argument position may follow); "%s" would consume the
+            -- argument and then leave a stray literal "s" inside the
+            -- quoted text, so the error named the wrong string.
+            RAISE EXCEPTION 'fractal_vector_from_text: could not parse "%" as a vector array: %',
+                txt, SQLERRM
+                USING ERRCODE = 'invalid_text_representation';
+        END;
+    END IF;
+
+    -- The list form.
+    v_parts := string_to_array(v_trimmed, ',');
+    FOR v_i IN 1 .. array_length(v_parts, 1) LOOP
+        v_parts[v_i] := btrim(v_parts[v_i]);
+    END LOOP;
+
+    BEGIN
+        RETURN fractal_vector_from_float8_array(
+            ARRAY(SELECT x::float8 FROM unnest(v_parts) AS t(x)));
+    EXCEPTION WHEN others THEN
+        RAISE EXCEPTION 'fractal_vector_from_text: could not parse "%" as a vector: %',
+            txt, SQLERRM
+            USING ERRCODE = 'invalid_text_representation';
+    END;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE;
+
+COMMENT ON FUNCTION fractal_vector_from_text(text) IS
+  'Parses a text value into a fractal_vector. Two forms are accepted, and only those two: a JSON/pgvector-style array (''[1,2,3]'', parsed by the type''s own input function, so spaces after the commas and exponent forms are accepted), and a plain comma-separated list of numbers (''1,2,3'', each element trimmed and parsed as a number). Anything else raises an error naming the offending text. NULL in, NULL out. Use it to load a vector from a text column without hand-assembling a bracket literal.';
+
 -- Distance operators, adopting pgvector's own <->/<=>/<#> convention
 -- deliberately -- inventing bespoke operator syntax would cost users
 -- familiarity for no benefit.
@@ -1517,7 +1834,7 @@ COMMENT ON FUNCTION fractal_vector_add(fractal_vector, fractal_vector) IS 'Eleme
 COMMENT ON FUNCTION fractal_vector_sub(fractal_vector, fractal_vector) IS 'Elementwise difference.';
 COMMENT ON FUNCTION fractal_vector_scale(fractal_vector, float8) IS 'Elementwise scalar multiply.';
 
--- v2.0.25: Lp distance, quantization, Hamming distance.
+-- v2.0.20: Lp distance, quantization, Hamming distance.
 CREATE FUNCTION fractal_vector_lp_distance(fractal_vector, fractal_vector, p float8) RETURNS float8
   AS 'MODULE_PATHNAME', 'fractal_vector_lp_distance' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 CREATE FUNCTION fractal_vector_quantize_int8(fractal_vector, OUT codes bytea, OUT scale float4) RETURNS record
@@ -1586,6 +1903,78 @@ COMMENT ON FUNCTION fractal_cross_modal_search(text, text, fractal_vector, fract
   'same semantics, direct varlena reads instead of array unpacking.';
 
 -- ==================================================================
+-- Typed configuration surface: fractalsql_set_config / get_config
+-- ==================================================================
+-- The FractalSQL configuration lives in PostgreSQL's GUC machinery (the
+-- DefineCustom*Variable calls in _PG_init()). SET and ALTER SYSTEM are
+-- the operator's path to it and they keep working exactly as before --
+-- these two functions add a second way IN, not a second store OUT: every
+-- value they read or write IS the GUC's own value, so current_setting(),
+-- SHOW and pg_settings always agree with them.
+--
+-- What the plain GUC path cannot do:
+--   - it cannot TYPE a value. A numeric key accepts any string here
+--     ("2x" is stored as text and fails later, somewhere else), a boolean
+--     key accepts PostgreSQL's unique-prefix abbreviations, and the
+--     enum-ish keys accept anything at all. These functions validate
+--     per key BEFORE the value is applied, so a typo is an error that
+--     names what was expected.
+--   - it cannot answer "what does this key hold right now?" from an
+--     ordinary SQL session without knowing the GUC's exact name and
+--     spelling.
+--
+-- The keys, their types, their privilege and their scope are all taken
+-- from the GUC definitions themselves (the same table the C side reads),
+-- never invented here:
+--
+--   key                             type    scope        superuser
+--   ------------------------------- ------- ------------ ---------
+--   reasoning_plugin                string  reload        yes
+--   http_url                        string  reload        yes
+--   http_token                      string  reload        yes
+--   http_model                      string  reload        no
+--   http_allow_plaintext            bool    reload        yes
+--   http_embed_url                  string  reload        yes
+--   http_embed_model                string  reload        no
+--   http_think                      string  reload        no
+--   http_think_provider             string  reload        no
+--   http_native_url                 string  reload        no
+--   http_num_ctx                    int     reload        no
+--   text_to_sql_max_attempts        int     reload        no
+--   text_to_sql_allowed_statements  enum    reload        no
+--   text_to_sql_use_review          bool    reload        no
+--   agent_partial_reasoning_fail    bool    session       no
+--   enterprise_lib                  string  reload        yes
+--   enterprise_ledger_key           string  session       yes
+--   enterprise_require_signature    bool    reload        yes
+--
+-- "reload" = the GUC is PGC_SIGHUP: PostgreSQL's own rule is that a
+-- session cannot change it (a bare SET on one is refused with "cannot
+-- be changed now"), so the setter refuses it with the path that does
+-- work -- ALTER SYSTEM + pg_reload_conf() -- instead of pretending the
+-- change took effect. "session" = the GUC is PGC_USERSET or PGC_SUSET
+-- and can be changed in a session.
+--
+-- Both spellings of a key are accepted: the bare name ("http_url") and
+-- the GUC's own name ("fractalsql.http_url"), case-insensitively.
+-- An unknown key is an error, never a silent no-op.
+CREATE FUNCTION fractalsql_set_config(key text, value text) RETURNS text
+  AS 'MODULE_PATHNAME', 'fractalsql_set_config' LANGUAGE C VOLATILE;
+
+COMMENT ON FUNCTION fractalsql_set_config(text, text) IS
+  'Sets one FractalSQL configuration key, typed and validated per key, and returns the canonical value that was applied. This is the SQL-callable wrapper over the extension''s fractalsql.* GUCs -- it does NOT introduce a second configuration store: the value written IS the GUC''s own value, so current_setting(), SHOW and pg_settings agree with it. The GUCs keep working exactly as before via SET and ALTER SYSTEM. '
+  'KEYS: reasoning_plugin (string), http_url (string), http_token (string), http_model (string), http_allow_plaintext (bool), http_embed_url (string), http_embed_model (string), http_think (string), http_think_provider (string), http_native_url (string), http_num_ctx (int 0..1048576), text_to_sql_max_attempts (int 1..10), text_to_sql_allowed_statements (enum: select | select_insert_update), text_to_sql_use_review (bool), agent_partial_reasoning_fail (bool), enterprise_lib (string), enterprise_ledger_key (string), enterprise_require_signature (bool). Both the bare key ("http_url") and the GUC spelling ("fractalsql.http_url") are accepted, case-insensitively; an unknown key raises an error listing the known ones. '
+  'VALUE FORMS: an int key rejects anything that is not an integer and anything outside its range; a bool key accepts on/off/true/false/yes/no/1/0/t/f/y/n (case-insensitive) and is stored as on/off; an enum key accepts only its listed members; a string key accepts any text up to 8192 bytes. The value is validated BEFORE it is applied, so a rejected value is never partially written. '
+  'PRIVILEGE: a key whose GUC carries GUC_SUPERUSER_ONLY (reasoning_plugin, http_url, http_token, http_model, http_allow_plaintext, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, enterprise_lib, enterprise_ledger_key, enterprise_require_signature) can only be changed by a superuser -- the same rule PostgreSQL applies to that flag elsewhere. '
+  'SCOPE: most keys are PGC_SIGHUP (reload-scoped), so a session cannot change them -- exactly as a bare SET cannot. Such a key raises an error naming the ALTER SYSTEM + pg_reload_conf() path instead of silently doing nothing. agent_partial_reasoning_fail (PGC_USERSET) and enterprise_ledger_key (PGC_SUSET) are session-settable.';
+
+CREATE FUNCTION fractalsql_get_config(key text) RETURNS text
+  AS 'MODULE_PATHNAME', 'fractalsql_get_config' LANGUAGE C STABLE;
+
+COMMENT ON FUNCTION fractalsql_get_config(text) IS
+  'Returns the current value of one FractalSQL configuration key as text, or NULL when the key is unset. Both the bare key ("http_url") and the GUC spelling ("fractalsql.http_url") are accepted, case-insensitively; an unknown key raises an error listing the known ones. The value is the GUC''s own current value, so it always agrees with current_setting(), SHOW and pg_settings. A bool key is returned as "on" or "off" (the same spelling current_setting() uses); an int key as its decimal digits; everything else as the stored text. A key whose GUC carries GUC_SUPERUSER_ONLY (reasoning_plugin, http_url, http_token, http_model, http_allow_plaintext, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, enterprise_lib, enterprise_ledger_key, enterprise_require_signature) is not readable by a non-superuser -- the same rule PostgreSQL applies to that flag in pg_settings, so this is not a way around it.';
+
+-- ==================================================================
 -- Enterprise: QTL ledger + CISO audit (runtime-gated)
 -- ==================================================================
 -- These functions are built into the extension on EVERY edition
@@ -1641,6 +2030,17 @@ CREATE FUNCTION fractal_ledger_reset_hard()
 RETURNS void
 AS 'MODULE_PATHNAME', 'fractal_ledger_reset_hard'
 LANGUAGE C VOLATILE;
+
+-- The two ledger resets discard ledger state, so PUBLIC may not run them: only the
+-- role that owns the extension (a superuser) can until it grants EXECUTE explicitly,
+-- e.g. GRANT EXECUTE ON FUNCTION fractal_ledger_reset_soft() TO ledger_admin;
+-- This is the database-side guard behind the MCP server's FSQL_MCP_READ_ONLY switch
+-- and its destructiveHint annotation: a client that ignores either still gets
+-- "permission denied" from Postgres itself. A database that installed this extension
+-- before this change keeps its old (PUBLIC) rights; run the two REVOKE statements below
+-- by hand there.
+REVOKE EXECUTE ON FUNCTION fractal_ledger_reset_soft() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION fractal_ledger_reset_hard() FROM PUBLIC;
 
 CREATE FUNCTION fractal_ledger_truth_count()
 RETURNS bigint

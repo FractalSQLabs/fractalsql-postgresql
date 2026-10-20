@@ -30,6 +30,12 @@ Usage:
     python3 bench/vector_type_head_to_head.py --dsn postgresql:///fractalsql_bench
 """
 
+# PEP 563: annotations like `def read_rss_kb(conn) -> int | None` below use
+# PEP 604 union syntax, which evaluates at definition time without this
+# import and raises TypeError on the README-advertised Python 3.9 floor
+# (sibling v2.0.9's bench fix; the import makes the annotations lazy).
+from __future__ import annotations
+
 import argparse
 import sys
 import time
@@ -153,6 +159,30 @@ def bench_peak_rss(conn, n: int) -> None:
               f"(see its own comment on the pointer-identity check)")
 
 
+def validate_dsn(raw: str) -> str:
+    """Portability hardening (sibling v2.0.8's bench-arg guard class, PG half):
+    the --dsn CLI value is connection INPUT, not trusted config. Reject
+    control characters (a newline inside a conninfo keyword/value line
+    smuggles a second keyword past operators reading logs), and reject
+    keywords that make the connection a side channel rather than a bench
+    target (options= -c injection, passfile=, service=, hostfile=). The
+    containment the sqlite column gives its --db file path is impossible
+    here (a DSN has no filesystem path); this is the equivalent input pin.
+    Returns the validated string unchanged."""
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+        raise SystemExit("bench: --dsn contains control characters; refusing")
+    try:
+        from psycopg import conninfo as _ci
+        kv = _ci.conninfo_to_dict(raw)
+    except Exception as exc:              # unparseable conninfo
+        raise SystemExit(f"bench: --dsn is not a valid conninfo: {exc}")
+    bad = {"options", "passfile", "service", "hostfile"}
+    found = bad & ({k.lower() for k in kv} if kv else set())
+    if found:
+        raise SystemExit("bench: --dsn refuses control-surface keyword(s) "
+                         + ",".join(sorted(found)))
+    return raw
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -167,7 +197,15 @@ def main() -> int:
                          "(default: %(default)s)")
     args = ap.parse_args()
 
-    with psycopg.connect(args.dsn, autocommit=True) as conn:
+    # int() re-cast at the point of use (same posture as data_gen.py's
+    # --dim cast): --copy-n / --search-queries are CLI-supplied
+    # arguments; argparse's type=int already enforces numeric, this
+    # pins the cast where the values are handed to the sub-benchmarks
+    # below rather than trusting argparse alone.
+    copy_n = int(args.copy_n)
+    search_queries = int(args.search_queries)
+
+    with psycopg.connect(validate_dsn(args.dsn), autocommit=True) as conn:
         n_total, dim = conn.execute(
             "SELECT count(*), max(array_length(emb_arr, 1)) FROM bench_vectors"
         ).fetchone()
@@ -178,8 +216,8 @@ def main() -> int:
         print(f"vector_type_head_to_head: {n_total} rows, dim={dim}")
 
         bench_storage_size(conn)
-        bench_copy_throughput(conn, args.copy_n, dim)
-        bench_search_latency(conn, args.search_queries)
+        bench_copy_throughput(conn, copy_n, dim)
+        bench_search_latency(conn, search_queries)
         bench_peak_rss(conn, n_total)
 
     return 0

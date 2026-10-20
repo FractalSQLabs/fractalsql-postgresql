@@ -22,6 +22,7 @@ __pycache__/
 *.gcda
 *.gcov
 coverage_html/
+coverage_html_mcp/
 
 # NOTE: include/sfs_core_bc.h is a tracked source file
 # (pre-compiled LuaJIT bytecode). Do not add it to this list.
@@ -83,3 +84,27 @@ fsql_setup.sql
 *~
 .DS_Store
 Thumbs.db
+
+# MCP server build artifacts (the C++17 plugin's own Makefile / cl output).
+# NEVER ignored: mcp/.mcp-schema-lock, mcp/.mcp-safety-annotations-lock,
+# mcp/manifest.json, mcp/vendor/json.hpp -- all four are committed per the
+# MCP plugin spec (10.5 supply-chain pinning + 15.3/15.5 artifacts).
+mcp/obj/
+mcp/*.exe
+mcp/fractalsql-postgresql-mcp
+mcp/err.txt
+
+# Local TLS-wiring scratch artifacts (openssl key/cert/config + the
+# server log) produced when hand-testing the MCP server's HTTPS mode
+# against a throwaway self-signed pair. These are LOCAL-ONLY and must
+# never be committed: two of them are PRIVATE KEYS, and a third is a
+# live server log. The MCP plugin's own committed TLS material, if any,
+# lives under mcp/ and is tracked deliberately.
+mcp_https_*.pem
+mcp_https_*.key
+mcp_https_*.cnf
+mcp_https_*.log
+
+# mcp/Makefile -MMD dependency files
+mcp/src/*.d
+mcp/src/adapters/*.d

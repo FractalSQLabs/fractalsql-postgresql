@@ -154,6 +154,23 @@ fractalsql.http_embed_model = 'nomic-embed-text'
 ```
 *Note: You must run `ollama pull nomic-embed-text` separately.*
 
+### Docker Model Runner (DMR)
+Same Docker Desktop feature as the reasoning endpoint (see
+[reasoning-setup.md](reasoning-setup.md#docker-model-runner-dmr)); only
+the model names change for embeddings.
+
+```ini
+# chat / text-to-sql
+fractalsql.http_url             = 'http://127.0.0.1:12434/engines/v1/chat/completions'
+fractalsql.http_model           = 'ai/gpt-oss:20b'
+fractalsql.http_allow_plaintext = on
+
+# embeddings
+fractalsql.http_embed_url   = 'http://127.0.0.1:12434/engines/v1/embeddings'
+fractalsql.http_embed_model = 'ai/nomic-embed-text-v1.5'
+```
+*Note: Run `docker model pull ai/nomic-embed-text-v1.5` before connecting. From inside another container on Docker Desktop, use `http://model-runner.docker.internal/engines/v1/embeddings` — the repo's `docker-compose.dmr.yml` compose override does exactly that for the demo stack.*
+
 ### OpenAI-Compatible (OpenAI, Together AI, Fireworks, vLLM)
 ```ini
 fractalsql.http_url         = 'https://api.openai.com/v1/chat/completions'

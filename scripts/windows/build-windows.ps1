@@ -74,7 +74,11 @@ param(
     [Parameter(Mandatory = $true)][ValidateSet('14', '15', '16', '17', '18')][string]$PgMajor,
     [string]$CoreVariant = 'community-sovereign-c',
     [string]$OutputDir,
-    [switch]$SkipAudit
+    [switch]$SkipAudit,
+    # Test builds only (build_test.ps1 passes it): compiles in src\fsql_fault.h,
+    # the hook gate 47 uses to fail individual SPI/core calls. Never set for a
+    # shipped build.
+    [switch]$FaultInject
 )
 
 $ErrorActionPreference = 'Stop'
@@ -186,6 +190,7 @@ $commonCompileArgs = @(
     "/I$(Join-Path $PgDir 'include')",
     "/I$Inc"
 )
+if ($FaultInject) { $commonCompileArgs += '/DFSQL_FAULT_INJECT' }
 
 # Compile-only (/c) to an explicitly named .obj, not a directory-form
 # /Fo (trailing backslash). The directory form breaks when $OutputDir

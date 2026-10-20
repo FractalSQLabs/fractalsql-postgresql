@@ -42,11 +42,26 @@ RUN apt-get update \
         binutils \
         build-essential \
         file \
+        libpq-dev \
+        libssl-dev \
+        openssl \
+        pkg-config \
+        python3 \
         "postgresql-server-dev-${PG_MAJOR}" \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY . /build
+# COPY carries .dockerignore'd? NO: files git-ignored but present in the
+# working tree come along anyway (Dockerfile.test.dockerignore filters only
+# what it names). Host-built artifacts (mcp/src/*.o compiled against a
+# newer glibc, the committed Linux-mcp binary) must NOT survive into the
+# gate build: make would see them as up-to-date and try to LINK a
+# GLIBC_2.38 binary into this 2.36 image ("__isoc23_strtoll undefined" /
+# "GLIBC_2.38 not found", docker-caught).
+RUN find /build/mcp -name '*.o' -delete \
+ && rm -f /build/mcp/fractalsql-postgresql-mcp /build/mcp/fractalsql-postgresql-mcp.exe \
+ && rm -rf /build/mcp/obj /build/mcp/dist
 RUN chown -R postgres:postgres /build
 
 # build_test.sh's pg_setup() runs initdb, which refuses to run as root.

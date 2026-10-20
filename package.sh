@@ -9,6 +9,10 @@
 #   dist/${ARCH}/fractalsql_pg17.so
 #   dist/${ARCH}/fractalsql_pg18.so
 #
+# The MCP server (fractalsql-postgresql-mcp) is built right here on the
+# packaging host (make -C mcp; see below) and shipped in every package:
+# binary in the PG libdir, docs/locks in the package doc dir.
+#
 # Emits one .deb and one .rpm per (PG major, arch) pair into
 # dist/packages/:
 #   dist/packages/postgresql-14-fractalsql-amd64.deb
@@ -61,7 +65,7 @@ esac
 case "${PKG_ARCH}" in
     amd64) RPM_ARCH="x86_64" ;;
     arm64) RPM_ARCH="aarch64" ;;
-    *) ;;   # unreachable: PKG_ARCH already validated above
+    *) echo "internal error: unhandled arch '${PKG_ARCH}' (validated above)" >&2; exit 2 ;;
 esac
 
 # Map the package arch to the vendored-artifact platform dir so we
@@ -85,6 +89,28 @@ if [[ ! -f "${REASONING_SO}" ]]; then
     echo "missing ${REASONING_SO} — re-run the vendored-artifact deploy step" >&2
     exit 1
 fi
+
+# The MCP server (fractalsql-postgresql-mcp) is a standalone C++17 JSON-RPC
+# server, built right here on the packaging host from mcp/Makefile (plain
+# make; pkg-config libpq + -lssl -lcrypto -lpthread — needs libpq-dev,
+# libssl-dev, g++ and pkg-config on the build image) and shipped in every
+# package: the binary lands in the PG libdir alongside fractalsql.so, the
+# committed tool-surface/safety locks land NEXT TO THAT BINARY (the server
+# resolves them relative to its own directory — see stage_mcp_locks below),
+# and the README + manifest go into the package's own doc dir (mcp/
+# subfolder, matching the darwin tarball).
+# An already-built binary is reused; make only runs when it's absent.
+MCP_BIN="mcp/fractalsql-postgresql-mcp"
+if [[ ! -x "${MCP_BIN}" ]]; then
+    make -C mcp -j2 \
+        || { echo "MCP server build failed (requires gcc-c++, libpq-dev, libssl-dev, pkg-config on the build host)" >&2; exit 1; }
+fi
+[[ -x "${MCP_BIN}" ]] \
+    || { echo "MCP server binary missing after build: ${MCP_BIN}" >&2; exit 1; }
+for f in mcp/README.md mcp/manifest.json mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock; do
+    [[ -f "${f}" ]] \
+        || { echo "missing ${f} — required to stage the shipped MCP server's client guide + locks" >&2; exit 1; }
+done
 
 for PG_VER in 14 15 16 17 18; do
     SO="${SRC_DIR}/fractalsql_pg${PG_VER}.so"
@@ -131,6 +157,30 @@ for PG_VER in 14 15 16 17 18; do
             "${stage}/usr/share/doc/${PKG_NAME}/LICENSE-THIRD-PARTY"
     }
 
+    # The shipped MCP server's client guide + distribution manifest (mcp/
+    # subfolder of the package's doc dir, same shape the darwin tarball
+    # uses). Documentation only — nothing here is read at runtime.
+    stage_mcp_docs() {
+        local stage="$1"
+        install -Dm0644 mcp/README.md      "${stage}/usr/share/doc/${PKG_NAME}/mcp/README.md"
+        install -Dm0644 mcp/manifest.json "${stage}/usr/share/doc/${PKG_NAME}/mcp/manifest.json"
+    }
+
+    # The supply-chain pins ship NEXT TO THE MCP BINARY, not in the doc dir.
+    # The server resolves its lock paths relative to the directory the
+    # executable lives in (main.cpp's selfDir(); overridable with
+    # FSQL_MCP_LOCK_DIR / FSQL_MCP_SCHEMA_LOCK / FSQL_MCP_SAFETY_LOCK), and
+    # an ABSENT lock counts as a pass (dev-mode friendly). Shipping the pins
+    # in /usr/share/doc/.../mcp/ therefore meant a packaged install never
+    # read them: the safety-annotation pin — a HARD startup gate — was
+    # never enforced on a real deployment. One copy, next to the binary, is
+    # the copy that is read.
+    stage_mcp_locks() {
+        local stage="$1" libdir="$2"
+        install -Dm0644 mcp/.mcp-schema-lock             "${stage}${libdir}/.mcp-schema-lock"
+        install -Dm0644 mcp/.mcp-safety-annotations-lock "${stage}${libdir}/.mcp-safety-annotations-lock"
+    }
+
     # Debian layout. The reasoning plugin lands in the same pkglibdir as
     # fractalsql.so; reasoning-setup.md points fractalsql.reasoning_plugin
     # at .../lib/fractalsql-reasoning-http.so there.
@@ -150,6 +200,12 @@ for PG_VER in 14 15 16 17 18; do
     install -Dm0644 fractalsql_agents/sql/fractalsql_agents--1.0.sql \
         "${STAGE_DEB}/usr/share/postgresql/${PG_VER}/extension/fractalsql_agents--1.0.sql"
     stage_common_docs "${STAGE_DEB}"
+    # Standalone MCP server binary: PG libdir, same level as
+    # fractalsql.so / fractalsql-reasoning-http.so.
+    install -Dm0755 "${MCP_BIN}" \
+        "${STAGE_DEB}/usr/lib/postgresql/${PG_VER}/lib/fractalsql-postgresql-mcp"
+    stage_mcp_locks "${STAGE_DEB}" "/usr/lib/postgresql/${PG_VER}/lib"
+    stage_mcp_docs  "${STAGE_DEB}"
 
     # RHEL PGDG layout.
     install -Dm0755 "${SO}" \
@@ -167,6 +223,12 @@ for PG_VER in 14 15 16 17 18; do
     install -Dm0644 fractalsql_agents/sql/fractalsql_agents--1.0.sql \
         "${STAGE_RPM}/usr/pgsql-${PG_VER}/share/extension/fractalsql_agents--1.0.sql"
     stage_common_docs "${STAGE_RPM}"
+    # Standalone MCP server binary: PG libdir (PGDG tree), same level as
+    # the extension .so files.
+    install -Dm0755 "${MCP_BIN}" \
+        "${STAGE_RPM}/usr/pgsql-${PG_VER}/lib/fractalsql-postgresql-mcp"
+    stage_mcp_locks "${STAGE_RPM}" "/usr/pgsql-${PG_VER}/lib"
+    stage_mcp_docs  "${STAGE_RPM}"
 
     echo "------------------------------------------"
     echo "Packaging ${PKG_NAME} (${PKG_ARCH})"
@@ -175,7 +237,11 @@ for PG_VER in 14 15 16 17 18; do
     # The SFS core is statically linked into fractalsql.so — no script
     # runtime, so no luajit/lua dependency is declared. libcurl is
     # required by the bundled reasoning plugin (fractalsql-reasoning-http.so),
-    # which dlopen-links it at runtime when reasoning is enabled.
+    # which dlopen-links it at runtime when reasoning is enabled. The
+    # shipped MCP server links libpq (provided by the postgresql-<ver>
+    # dep) and libssl3, which is declared explicitly so a package
+    # manager won't happily install the MCP-less-actually-broken
+    # combination on hosts lacking OpenSSL 3.
     fpm -s dir -t deb \
         -n "${PKG_NAME}" \
         -v "${VERSION}" \
@@ -185,6 +251,7 @@ for PG_VER in 14 15 16 17 18; do
         --license "Apache-2.0" \
         --depends "libc6 (>= 2.34)" \
         --depends "libcurl4" \
+        --depends "libssl3" \
         --depends "postgresql-${PG_VER}" \
         -C "${STAGE_DEB}" \
         -p "${DEB_OUT}" \
@@ -200,6 +267,7 @@ for PG_VER in 14 15 16 17 18; do
         --description "FractalSQL: Stochastic Fractal Search extension for PostgreSQL ${PG_VER}" \
         --license "Apache-2.0" \
         --depends "libcurl.so.4()(64bit)" \
+        --depends "openssl-libs" \
         --depends "postgresql${PG_VER}-server" \
         -C "${STAGE_RPM}" \
         -p "${RPM_OUT}" \

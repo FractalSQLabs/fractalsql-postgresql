@@ -137,7 +137,7 @@ ORDER BY t.distance;
 -- enable repulsion, set params, warm the D_q rolling window with varied
 -- genre-center queries, report negative feedback on the genre-3 top
 -- result (fractal_isolate_background on its scan_pos -- scan_pos IS the
--- handle; doc_id is a ctid since v2.0.25, a different concept from the
+-- handle; doc_id is a ctid since v2.0.20, a different concept from the
 -- core engine's own internal result_handle), read back the real
 -- diversity_quotient + session diagnostics, and disable. Generalized
 -- below by the shipped fractal_agent_feedback_audit preset, which runs

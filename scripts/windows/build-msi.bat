@@ -96,6 +96,25 @@ if not exist "include\windows-x86_64\fractalsql-reasoning-http.dll" (
 copy /Y "include\windows-x86_64\fractalsql-reasoning-http.dll" "%STAGE%\fractalsql-reasoning-http.dll" > nul
 :after_reasoning_dll
 
+REM MCP server exe — shipped in a mcp\ subfolder of the install root
+REM (mirrors the darwin tarball's mcp/ bundle). Auto-detected: staged
+REM only when the exe is already present (built by build_test.ps1's
+REM gate 33, or mcp\scripts\windows\build.bat) — the release.yml
+REM windows legs don't build the exe yet, so the wxs MCP components
+REM (guarded on SHIP_MCP) must stay compileable both ways. No error
+REM when absent; a missing exe deliberately ships MCP-less, same as the
+REM macOS leg's graceful openssl@3 skip.
+set SHIP_MCP=0
+if exist "mcp\fractalsql-postgresql-mcp.exe" set SHIP_MCP=1
+if "%SHIP_MCP%"=="1" (
+    mkdir "%STAGE%\mcp"
+    copy /Y "mcp\fractalsql-postgresql-mcp.exe"                "%STAGE%\mcp\fractalsql-postgresql-mcp.exe"        > nul
+    copy /Y "mcp\README.md"                                    "%STAGE%\mcp\README.md"                            > nul
+    copy /Y "mcp\.mcp-schema-lock"                             "%STAGE%\mcp\.mcp-schema-lock"                     > nul
+    copy /Y "mcp\.mcp-safety-annotations-lock"                 "%STAGE%\mcp\.mcp-safety-annotations-lock"         > nul
+    copy /Y "mcp\manifest.json"                                "%STAGE%\mcp\manifest.json"                        > nul
+)
+
 REM Per-cell README ships in the MSI so users who only grab the .msi
 REM still see the "which PG, which arch" pairing without hopping to
 REM GitHub.
@@ -138,12 +157,13 @@ echo ==^> MSI        = %MSI%
 REM -arch propagates into $(sys.BUILDARCH) inside the WXS, which sets
 REM <Package Platform="…"/> and keeps ICE80 happy about the
 REM component/directory bitness pairing.
-REM -dPG_MAJOR / -dSTAGE_DIR / -dMSI_VERSION are consumed by the
-REM preprocessor inside fractalsql.wxs (see <?define?> section).
+REM -dPG_MAJOR / -dSTAGE_DIR / -dMSI_VERSION / -dSHIP_MCP are consumed
+REM by the preprocessor inside fractalsql.wxs (see <?define?> section).
 candle -nologo -arch %MSI_ARCH% ^
     -dPG_MAJOR=%PG_MAJOR% ^
     -dSTAGE_DIR=%STAGE% ^
     -dMSI_VERSION=%MSI_VERSION% ^
+    -dSHIP_MCP=%SHIP_MCP% ^
     -out %OBJ% %WXS%
 if errorlevel 1 (
     echo ==^> candle failed

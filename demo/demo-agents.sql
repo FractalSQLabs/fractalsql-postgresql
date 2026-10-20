@@ -45,6 +45,14 @@
 -- output. A closing fractal_reason() call synthesizes over the computed
 -- results -- same closing pattern as demo.sql and every vertical demo.
 --
+-- Every cognition engine also returns a trailing 'reasoning_step_failed'
+-- column (text). It is NULL on a normal run. If the reasoning step fails
+-- AND fractalsql.agent_partial_reasoning_fail is on, the engine's LLM
+-- column comes back NULL and that column carries the error text instead --
+-- so a consumer tests the LLM column for NULL rather than looking for a
+-- marker prefix. A missing reasoning plugin is a setup mistake and always
+-- raises, flag or no flag.
+--
 -- fractal_agent_diverse_portfolios is enterprise tier (companion to
 -- fractal_agent_allocate, Engine B): exception-guarded like
 -- demo/enterprise-qtl-audit.sql so this script still completes cleanly on
@@ -279,7 +287,7 @@ FROM fractal_agent_patient_deterioration_triage(
 -- D_q rolling window with varied queries from a warmup table, reports
 -- negative feedback on the audit target (fractal_isolate_background on the
 -- k=1 telemetry scan_pos -- scan_pos IS the handle, not doc_id, which is a
--- ctid since v2.0.25), then reads back the real
+-- ctid since v2.0.20), then reads back the real
 -- diversity_quotient (fractal_detect_collapse, NOT NaN once the window is
 -- warm) and session diagnostics (fractal_explain_result). Self-disables
 -- diversify (unlike recommend_diverse, which leaves it on).

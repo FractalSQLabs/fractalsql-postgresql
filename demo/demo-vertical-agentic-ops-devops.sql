@@ -3,7 +3,7 @@
 -- =============================================================================
 -- End-to-end regression test for the embed-coupled agents. Exercises:
 --   * fractal_agent_detect_loop   -- period-2 loop detection via SimHash +
---                                    Brent's cycle detection (v2.0.25)
+--                                    Brent's cycle detection (v2.0.20)
 --   * fractal_search_agent        -- runs on a real 768-dim fractal_vector
 --                                    column (was crashing / commented out;
 --                                    C fix A1 makes a wrong column type a
@@ -101,7 +101,7 @@ INSERT INTO known_bad_states (state_id, description, state_vec) VALUES
 -- -----------------------------------------------------------------------------
 
 -- 4. Loop Detection via SimHash-fingerprinted cycle detection + DFA
--- (v2.0.25 rewrite: fractal_agent_detect_loop now fingerprints real state
+-- (v2.0.20 rewrite: fractal_agent_detect_loop now fingerprints real state
 -- vectors and streams them through Brent's cycle detector, rather than an
 -- exact-hash period scan). fsql_state_fingerprint is a cosine/direction-
 -- based SimHash (consistent with this whole extension's cosine-distance

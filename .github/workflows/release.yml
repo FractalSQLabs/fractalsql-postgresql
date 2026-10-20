@@ -9,6 +9,12 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Workflow level stays read-only; the three jobs that publish release
+# assets (package / build-darwin / build-windows-msi) grant
+# contents: write at job level below.
+permissions:
+  contents: read
+
 # contents: write is granted per-job below (package/build-darwin/build-
 # windows-msi, the three that call softprops/action-gh-release to upload
 # assets), not here at workflow level -- build doesn't touch the release
@@ -133,7 +139,7 @@ jobs:
           VERSION=$(docker exec pg psql -U postgres -tAc \
               "SELECT fractal_version();")
           echo "version: ${VERSION}"
-          test "${VERSION}" = "2.0.19"
+          test "${VERSION}" = "2.0.20"
 
           # Convergence sanity check: query = (0.6, 0.8), objective is
           # cosine distance. Cosine distance is magnitude-invariant,
@@ -220,8 +226,13 @@ jobs:
 
       - name: Install Packaging Tools
         run: |
+          # libpq-dev + libssl-dev (+ pkg-config, in base image already):
+          # package.sh builds the bundled MCP server (mcp/Makefile,
+          # pkg-config libpq + -lssl -lcrypto) on the packaging host
+          # before staging it into each package.
           sudo apt-get update
-          sudo apt-get install -y ruby ruby-dev build-essential rpm
+          sudo apt-get install -y ruby ruby-dev build-essential rpm \
+              libpq-dev libssl-dev pkg-config
           sudo gem install --no-document fpm
 
       - name: Build .deb and .rpm for ${{ matrix.arch }}
@@ -289,20 +300,38 @@ jobs:
               CONTENTS=$(dpkg-deb -c "${deb}")
               echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/fractalsql\.so$'
               echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/fractalsql-reasoning-http\.so$'
+              echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/fractalsql-postgresql-mcp$'
               echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql\.control$'
               echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql--1\.0\.sql$'
               echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql_agents\.control$'
               echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql_agents--1\.0\.sql$'
+              echo "${CONTENTS}" | grep -E 'usr/share/doc/postgresql-[0-9]+-fractalsql/mcp/README\.md$'
+              # The supply-chain pins must land NEXT TO THE MCP BINARY: the
+              # server resolves its lock paths relative to the executable's own
+              # directory and treats an absent lock as a pass, so a pin that
+              # ships anywhere else is a pin that is never enforced.
+              echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/\.mcp-schema-lock$'
+              echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/\.mcp-safety-annotations-lock$'
+              echo "${CONTENTS}" | grep -E 'usr/share/doc/postgresql-[0-9]+-fractalsql/mcp/manifest\.json$'
           done
           for rpm in dist/packages/*-${{ matrix.arch }}.rpm; do
               echo "=== ${rpm} ==="
               CONTENTS=$(rpm -qlp "${rpm}")
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/fractalsql\.so$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/fractalsql-reasoning-http\.so$'
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/fractalsql-postgresql-mcp$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql\.control$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql--1\.0\.sql$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql_agents\.control$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql_agents--1\.0\.sql$'
+              echo "${CONTENTS}" | grep -E '/usr/share/doc/postgresql-[0-9]+-fractalsql/mcp/README\.md$'
+              # The supply-chain pins must land NEXT TO THE MCP BINARY: the
+              # server resolves its lock paths relative to the executable's own
+              # directory and treats an absent lock as a pass, so a pin that
+              # ships anywhere else is a pin that is never enforced.
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/\.mcp-schema-lock$'
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/\.mcp-safety-annotations-lock$'
+              echo "${CONTENTS}" | grep -E '/usr/share/doc/postgresql-[0-9]+-fractalsql/mcp/manifest\.json$'
           done
 
       - name: Upload package artifacts
@@ -359,7 +388,11 @@ jobs:
       - name: Install PostgreSQL ${{ matrix.pg }} (Homebrew)
         run: |
           set -euo pipefail
-          brew install postgresql@${{ matrix.pg }}
+          # openssl@3 + postgresql@<major>'s own libpq keg: package-darwin.sh
+          # builds the bundled MCP server (mcp/Makefile, pkg-config libpq +
+          # -lssl -lcrypto) right on this runner; without openssl@3 it
+          # ships the tarball MCP-less.
+          brew install postgresql@${{ matrix.pg }} openssl@3
           echo "$(brew --prefix postgresql@${{ matrix.pg }})/bin" >> "$GITHUB_PATH"
 
       - name: Build + package tarball (links vendored pure-C core)
@@ -381,6 +414,16 @@ jobs:
           TARBALL="dist/packages/fractalsql-postgresql-${FSQL_VERSION}-pg${{ matrix.pg }}-darwin-${{ matrix.arch }}.tar.gz"
           tar -tzf "$TARBALL" | grep -E 'fractalsql_agents\.control$'
           tar -tzf "$TARBALL" | grep -E 'fractalsql_agents--1\.0\.sql$'
+          # The bundled MCP server (binary + mcp/README.md + locks) rides
+          # in the tarball's mcp/ folder -- mirrors the Linux packages'
+          # shipped-MCP post-install verification. Only the native arm64
+          # leg builds it: Homebrew's libpq and openssl@3 are arm64-only, so
+          # the x86_64 cross build ships without it (package-darwin.sh warns).
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            tar -tzf "$TARBALL" | grep -E 'mcp/fractalsql-postgresql-mcp$'
+            tar -tzf "$TARBALL" | grep -E 'mcp/\.mcp-schema-lock$'
+            tar -tzf "$TARBALL" | grep -E 'mcp/\.mcp-safety-annotations-lock$'
+          fi
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
@@ -563,6 +606,15 @@ jobs:
           $ver = "${{ github.ref_name }}".Substring(1)
           Add-Content -Path $env:GITHUB_ENV -Value "MSI_VERSION=$ver"
 
+      # MCP server: scripts\windows\build-msi.bat auto-detects
+      # mcp\fractalsql-postgresql-mcp.exe (built by build_test.ps1's
+      # gate 33, or mcp\scripts\windows\build.bat) and stages it into
+      # the MSI's mcp\ folder only when it is present — this job does
+      # not build the exe itself yet (needs a vcpkg x64-windows-static
+      # OpenSSL, which the release leg doesn't install today, unlike
+      # the sqlite sibling), so release MSIs ship MCP-less until that
+      # build step lands. build_test.ps1's gate 33 exists today (33);
+      # future mcp gates (39-42) also slot in beside it.
       - name: Build MSI (candle + light, PG ${{ matrix.pg }} / ${{ matrix.arch }})
         shell: cmd
         env:

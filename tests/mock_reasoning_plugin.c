@@ -26,6 +26,36 @@
 
 #define MOCK_SQL_FILE "/tmp/fractalsql_bt_sql.txt"
 
+/* The MCP shutdown-drain phase's slow knob: the MCP smoke writes a
+ * millisecond count into this file, and every generate() call sleeps that
+ * long first -- which holds an in-flight fractal_reason() tools/call at
+ * SIGTERM time so the server's bounded drain (FSQL_MCP_SHUTDOWN_DRAIN_MS)
+ * provably runs its wait loop with a straggler, not on a quiescent server.
+ * Same fixed-path/no-env-inheritance rationale as MOCK_SQL_FILE. Capped at
+ * 60s: a stale file must never hang a whole gate run. */
+#define MOCK_SLOW_MS_FILE "/tmp/fractalsql_bt_slow_ms.txt"
+
+#ifndef _WIN32
+#include <time.h>
+#else
+#include <windows.h>
+#endif
+
+static long
+mock_slow_ms(void)
+{
+    FILE *f = fopen(MOCK_SLOW_MS_FILE, "r");
+    long ms = 0;
+    if (f == NULL)
+        return 0;
+    if (fscanf(f, "%ld", &ms) != 1 || ms < 0)
+        ms = 0;
+    if (ms > 60000)
+        ms = 60000;
+    fclose(f);
+    return ms;
+}
+
 /* Dumped fresh on every generate() call (GENERATE, REVIEW, or a bare
  * fractal_reason()) so gate_28_review_isolation can tell which tier's
  * dispatch last ran without needing a distinct plugin: since REVIEW
@@ -61,6 +91,20 @@ mock_generate(void *u, const char *p, size_t pl,
 {
     (void) u; (void) p; (void) pl;
 
+    /* The drain phase's in-flight request (see MOCK_SLOW_MS_FILE above). */
+    long slow = mock_slow_ms();
+    if (slow > 0)
+#ifndef _WIN32
+    {
+        struct timespec sd = { slow / 1000, (slow % 1000) * 1000000L };
+        nanosleep(&sd, NULL);
+    }
+#else
+    {
+        Sleep((DWORD) slow);
+    }
+#endif
+
     char  sql[8192] = "SELECT 1";
     FILE *f = fopen(MOCK_SQL_FILE, "r");
     if (f != NULL)
@@ -70,6 +114,31 @@ mock_generate(void *u, const char *p, size_t pl,
         while (n > 0 && (sql[n - 1] == '\n' || sql[n - 1] == '\r'))
             sql[--n] = '\0';
         fclose(f);
+    }
+
+    /* Gate 33's MCP smoke writes this sentinel into the file to force a
+     * deterministic REASONING failure (agent_partial_reasoning_fail's
+     * MCP-level case): nonzero rc, no response body -- the shape a real
+     * provider outage surfaces through. */
+    if (strcmp(sql, "FSQL_BT_FORCE_FAIL") == 0)
+        return 1;
+
+    /* Gate 04's empty-candidate case: rc==0 with an intentionally EMPTY
+     * response body -- "the model said something, but contained no SQL".
+     * The T2S pipeline must reject it as a validation failure ("expected
+     * exactly one SQL statement, found 0") and feed the reason back into
+     * the retry loop, not pass an empty statement anywhere. A distinct
+     * shape from FORCE_FAIL above (that one is a dispatch failure). */
+    if (strcmp(sql, "FSQL_BT_EMPTY_RESPONSE") == 0)
+    {
+        char *resp = (char *) malloc(1);
+        if (resp == NULL)
+            return -1;
+        resp[0] = '\0';
+        *response_out         = resp;
+        *response_len_out     = 0;
+        *response_free_fn_out = mock_free;
+        return 0;
     }
 
     /* fractal_text_to_sql()'s GENERATE step loads its own reasoning

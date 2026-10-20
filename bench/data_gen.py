@@ -39,6 +39,30 @@ import psycopg
 from pgvector.psycopg import register_vector
 
 
+def validate_dsn(raw: str) -> str:
+    """Portability hardening (sibling v2.0.8's bench-arg guard class, PG half):
+    the --dsn CLI value is connection INPUT, not trusted config. Reject
+    control characters (a newline inside a conninfo keyword/value line
+    smuggles a second keyword past operators reading logs), and reject
+    keywords that make the connection a side channel rather than a bench
+    target (options= -c injection, passfile=, service=, hostfile=). The
+    containment the sqlite column gives its --db file path is impossible
+    here (a DSN has no filesystem path); this is the equivalent input pin.
+    Returns the validated string unchanged."""
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+        raise SystemExit("bench: --dsn contains control characters; refusing")
+    try:
+        from psycopg import conninfo as _ci
+        kv = _ci.conninfo_to_dict(raw)
+    except Exception as exc:              # unparseable conninfo
+        raise SystemExit(f"bench: --dsn is not a valid conninfo: {exc}")
+    bad = {"options", "passfile", "service", "hostfile"}
+    found = bad & ({k.lower() for k in kv} if kv else set())
+    if found:
+        raise SystemExit("bench: --dsn refuses control-surface keyword(s) "
+                         + ",".join(sorted(found)))
+    return raw
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -65,6 +89,14 @@ def main() -> int:
                     help="RNG seed (default: %(default)s)")
     args = ap.parse_args()
 
+    # int() re-cast at the point of use: --dim is CLI-supplied text that
+    # feeds the f-string CREATE TABLE below, and an explicit numeric cast
+    # at the use site is what guarantees the interpolated piece is a
+    # number, not an identifier. (argparse's type=int already enforces
+    # this; this use-site cast is the guard -- and the pinned variable --
+    # the SQL string actually relies on.)
+    dim = int(args.dim)
+
     rng = np.random.default_rng(args.seed)
 
     print(f"Generating {args.n} points in R^{args.dim}, "
@@ -85,12 +117,12 @@ def main() -> int:
 
     # ---- load into Postgres --------------------------------------------
     print(f"Connecting to {args.dsn} ...")
-    with psycopg.connect(args.dsn, autocommit=True) as conn:
+    with psycopg.connect(validate_dsn(args.dsn), autocommit=True) as conn:
         conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         conn.execute("CREATE EXTENSION IF NOT EXISTS fractalsql;")
         register_vector(conn)
 
-        fv_col = ",\n                emb_fv     fractal_vector(%d) NOT NULL" % args.dim \
+        fv_col = ",\n                emb_fv     fractal_vector(%d) NOT NULL" % dim \
             if args.with_fractal_vector else ""
 
         conn.execute("DROP TABLE IF EXISTS bench_vectors;")
@@ -99,7 +131,7 @@ def main() -> int:
             CREATE TABLE bench_vectors (
                 id         int       PRIMARY KEY,
                 cluster_id int       NOT NULL,
-                emb        vector({args.dim}) NOT NULL,
+                emb        vector({dim}) NOT NULL,
                 emb_arr    float8[]  NOT NULL{fv_col}
             );
         """)

@@ -31,6 +31,13 @@ fractal_search(
 | `population_size` | `int4` | `50` | 1–100,000 | Number of particles per generation. |
 | `diffusion_factor` | `int4` | `2` | 1–32 | SFS MDN (walk-per-particle count). |
 
+### Query-Vector Dimension Limit
+The query vector may carry up to **16,384 dimensions** — the shared core library's `FSQL_MAX_DIM`, and the ceiling that actually fires (`exceeds FSQL_MAX_DIM`). This engine's own SQL-side guard allows up to 1,048,576, but the core library's limit is always the tighter one, so a query beyond 16,384 dimensions is rejected.
+
+> **Engine note (dimension ceiling).** The SQLite edition caps the same call at **4,096** dimensions (its fixed query arena), even though it links the same core library. A query of 4,097–16,384 dimensions is therefore accepted here and rejected there — the two engines are not interchangeable at the dimension extremes. The rejection text differs too: the sibling reports `query dim N out of range [1, 4096]`, while this engine reports the core library's `exceeds FSQL_MAX_DIM`.
+
+`fractal_search_debug` and `fractal_search_explore` take the same query and share the same limit.
+
 ---
 
 ## `fractal_search_debug`
@@ -88,8 +95,9 @@ fractal_search_explore(
 | --- | --- | --- | --- | --- |
 | `population_size` | `int` | `50` | — | Number of results to return. |
 | `mmr_lambda` | `float` | `0.5` | $[0, 1]$ | Tradeoff between relevance ($1.0$) and diversity ($0.0$). Lower it when a query lands inside a dense cluster. |
-| `iterations` | `int` | — | — | (Backward compatibility) No effect on Scout output. |
-| `diffusion_factor` | `int` | — | — | (Backward compatibility) No effect on Scout output. |
+| `iterations` | `int` | `15` | — | SFS generations per search. |
+| `diffusion_factor` | `int` | `2` | — | SFS MDN (walk-per-particle count). |
+| `walk` | `float` | `0.0` | — | Cross-particle best-pull weight; `0` (the default) removes the cross-particle best-pull, so the population spreads across distinct basins. |
 
 ---
 
@@ -257,7 +265,7 @@ fractal_diversify_set_params(
 | `repulsion_sigma` | Gaussian width of each shadow's repulsion field. |
 | `repulsion_weight` | Overall strength of the repulsion penalty. |
 | `max_shadows_considered` | Cap on how many recorded shadows influence a search. |
-| `tail_buffer_cap` | Cap on the tail buffer of recent results. |
+| `tail_buffer_cap` | **Reserved.** Reserved for a future shadow-index release: the value is range-checked (1-1024) and stored, but has no effect on search or the ledger in v2.0.x. |
 
 Takes effect on the next `fractal_search` call.
 

@@ -104,7 +104,16 @@ endif
 FSQL_OPENSSL_CPPFLAGS ?=
 FSQL_OPENSSL_LDFLAGS ?=
 
-PG_CPPFLAGS = -Iinclude $(FSQL_COV_FLAGS) $(FSQL_SAN_FLAGS) $(FSQL_OPENSSL_CPPFLAGS)
+# make FAULT_INJECT=1: compile in src/fsql_fault.h, the test-only hook that
+# lets build_test.sh gate 47 fail individual SPI/core calls. Never set for a
+# shipped build.
+ifdef FAULT_INJECT
+  FSQL_FI_FLAGS := -DFSQL_FAULT_INJECT
+else
+  FSQL_FI_FLAGS :=
+endif
+
+PG_CPPFLAGS = -Iinclude $(FSQL_COV_FLAGS) $(FSQL_SAN_FLAGS) $(FSQL_FI_FLAGS) $(FSQL_OPENSSL_CPPFLAGS)
 # Static-link the core archive into the extension .so.
 # -lm: math symbols (sqrt, etc.) the core depends on.
 # -ldl: dlopen/dlsym used by fsql_load_reasoning inside the sovereign archive.

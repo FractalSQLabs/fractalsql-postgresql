@@ -4,6 +4,11 @@ Priority: optional
 Maintainer: FractalSQLabs
 Build-Depends:
  debhelper-compat (= 13),
+ gcc,
+ g++,
+ libpq-dev,
+ libssl-dev,
+ pkg-config,
  postgresql-server-dev-all
 Standards-Version: 4.6.2
 Homepage: https://github.com/FractalSQLabs/fractalsql-postgresql
@@ -15,6 +20,7 @@ Depends:
  ${misc:Depends},
  libc6 (>= 2.34),
  libcurl4,
+ libssl3,
  postgresql-14
 Description: Stochastic Fractal Search extension for PostgreSQL 14
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
@@ -22,7 +28,12 @@ Description: Stochastic Fractal Search extension for PostgreSQL 14
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin
- (fractalsql-reasoning-http, which links libcurl). This binary is
+ (fractalsql-reasoning-http, which links libcurl). Also ships the
+ fractalsql-postgresql-mcp MCP (Model Context Protocol) JSON-RPC server
+ (in the PG libdir, alongside the extension .so) exposing the same
+ surface as one-tool-per-function for external agent clients over stdio
+ or an optional TLS / Bearer-token-authenticated HTTP transport -- see
+ the package doc dir's mcp/README.md. This binary is
  compiled against the PostgreSQL 14 server ABI.
 
 Package: postgresql-15-fractalsql
@@ -32,6 +43,7 @@ Depends:
  ${misc:Depends},
  libc6 (>= 2.34),
  libcurl4,
+ libssl3,
  postgresql-15
 Description: Stochastic Fractal Search extension for PostgreSQL 15
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
@@ -39,7 +51,12 @@ Description: Stochastic Fractal Search extension for PostgreSQL 15
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin
- (fractalsql-reasoning-http, which links libcurl). This binary is
+ (fractalsql-reasoning-http, which links libcurl). Also ships the
+ fractalsql-postgresql-mcp MCP (Model Context Protocol) JSON-RPC server
+ (in the PG libdir, alongside the extension .so) exposing the same
+ surface as one-tool-per-function for external agent clients over stdio
+ or an optional TLS / Bearer-token-authenticated HTTP transport -- see
+ the package doc dir's mcp/README.md. This binary is
  compiled against the PostgreSQL 15 server ABI.
 
 Package: postgresql-16-fractalsql
@@ -49,6 +66,7 @@ Depends:
  ${misc:Depends},
  libc6 (>= 2.34),
  libcurl4,
+ libssl3,
  postgresql-16
 Description: Stochastic Fractal Search extension for PostgreSQL 16
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
@@ -56,7 +74,12 @@ Description: Stochastic Fractal Search extension for PostgreSQL 16
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin
- (fractalsql-reasoning-http, which links libcurl). This binary is
+ (fractalsql-reasoning-http, which links libcurl). Also ships the
+ fractalsql-postgresql-mcp MCP (Model Context Protocol) JSON-RPC server
+ (in the PG libdir, alongside the extension .so) exposing the same
+ surface as one-tool-per-function for external agent clients over stdio
+ or an optional TLS / Bearer-token-authenticated HTTP transport -- see
+ the package doc dir's mcp/README.md. This binary is
  compiled against the PostgreSQL 16 server ABI.
 
 Package: postgresql-17-fractalsql
@@ -66,6 +89,7 @@ Depends:
  ${misc:Depends},
  libc6 (>= 2.34),
  libcurl4,
+ libssl3,
  postgresql-17
 Description: Stochastic Fractal Search extension for PostgreSQL 17
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
@@ -73,7 +97,12 @@ Description: Stochastic Fractal Search extension for PostgreSQL 17
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin
- (fractalsql-reasoning-http, which links libcurl). This binary is
+ (fractalsql-reasoning-http, which links libcurl). Also ships the
+ fractalsql-postgresql-mcp MCP (Model Context Protocol) JSON-RPC server
+ (in the PG libdir, alongside the extension .so) exposing the same
+ surface as one-tool-per-function for external agent clients over stdio
+ or an optional TLS / Bearer-token-authenticated HTTP transport -- see
+ the package doc dir's mcp/README.md. This binary is
  compiled against the PostgreSQL 17 server ABI.
 
 Package: postgresql-18-fractalsql
@@ -83,6 +112,7 @@ Depends:
  ${misc:Depends},
  libc6 (>= 2.34),
  libcurl4,
+ libssl3,
  postgresql-18
 Description: Stochastic Fractal Search extension for PostgreSQL 18
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
@@ -90,5 +120,10 @@ Description: Stochastic Fractal Search extension for PostgreSQL 18
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin
- (fractalsql-reasoning-http, which links libcurl). This binary is
+ (fractalsql-reasoning-http, which links libcurl). Also ships the
+ fractalsql-postgresql-mcp MCP (Model Context Protocol) JSON-RPC server
+ (in the PG libdir, alongside the extension .so) exposing the same
+ surface as one-tool-per-function for external agent clients over stdio
+ or an optional TLS / Bearer-token-authenticated HTTP transport -- see
+ the package doc dir's mcp/README.md. This binary is
  compiled against the PostgreSQL 18 server ABI.

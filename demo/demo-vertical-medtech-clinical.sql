@@ -78,7 +78,7 @@ UPDATE vmc_patients SET age = 70, condition = 'sepsis'
 -- age>65 AND condition='sepsis' sepsis-watch cohort). Generalized by the
 -- shipped fractal_agent_patient_deterioration_triage preset in Section 3,
 -- which folds this cohort search together with the baseline->current
--- drift search and a reasoning step. (v2.0.25: doc_ids/doc_id are now
+-- drift search and a reasoning step. (v2.0.20: doc_ids/doc_id are now
 -- real ctid row locators, not a 0-indexed scan position -- so cohort
 -- membership and the search's own result identity are BOTH exact,
 -- regardless of any UPDATE relocating a tuple in between; vmc_patients'
