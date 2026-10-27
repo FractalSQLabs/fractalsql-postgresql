@@ -121,7 +121,7 @@ SELECT fractal_diversify_disable();
 -- clinically-named function here -- same composition
 -- demo-vertical-fleet-logistics.sql uses for its route-3 cohort).
 --
--- doc_id is the row's real ctid (v2.0.25), NOT id - 1 -- those only
+-- doc_id is the row's real ctid (v2.0.20), NOT id - 1 -- those only
 -- coincide for a table that has never been UPDATEd (a plain heap scan
 -- then visits rows in insertion order). vcy_dmz_cohort was built by
 -- filtering the ALREADY-UPDATEd vcy_hosts (host 7's compromise UPDATE

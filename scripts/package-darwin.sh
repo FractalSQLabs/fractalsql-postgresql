@@ -73,6 +73,54 @@ for f in "${REASONING_SO}" "${CORE_A}" LICENSE THIRD-PARTY-NOTICES.md \
         || { echo "missing ${f} — re-run the vendored-artifact deploy step" >&2; exit 1; }
 done
 
+# MCP server (fractalsql-postgresql-mcp) — built from source on this
+# host, same as the Linux/Windows legs; plain C++17 via mcp/Makefile
+# (pkg-config libpq + -lssl -lcrypto -lpthread). Homebrew's openssl@3
+# is keg-only (never symlinked onto the default -I/-L search path), so
+# resolve its prefix explicitly; skip gracefully (warning, not a hard
+# failure) when it isn't installed.
+#
+# -mmacosx-version-min=13.3 overrides the caller's (release.yml's)
+# MACOSX_DEPLOYMENT_TARGET=11.0, which the extension .dylib DOES need
+# for broad compatibility: mcp/src/vectors.cpp's formatDouble() uses
+# std::to_chars on a double for shortest-round-trip formatting, and
+# Apple's libc++ marks that overload unavailable before macOS 13.3. The
+# MCP server is a separate, optional binary with no compatibility
+# promise tying it to the dylib's floor, so it gets its own newer
+# minimum instead of raising the whole package's.
+HAVE_MCP=0
+OPENSSL_PREFIX="${OPENSSL_PREFIX:-$(brew --prefix openssl@3 2>/dev/null || true)}"
+if [[ "${ARCH}" != "$(uname -m)" ]]; then
+    # Homebrew's libpq and openssl@3 are host-arch only; an x86_64 MCP
+    # linked on an arm64 runner fails with undefined OpenSSL/libpq symbols.
+    echo "warning: cross build (${ARCH} on $(uname -m)) — skipping the MCP server (no ${ARCH} libpq/openssl)" >&2
+elif [[ -z "${OPENSSL_PREFIX}" || ! -f "${OPENSSL_PREFIX}/include/openssl/evp.h" ]]; then
+    echo "warning: Homebrew openssl@3 not found — skipping the MCP server (brew install openssl@3 to include it)" >&2
+else
+    # pkg-config must also see libpq.pc: a full-path PG_CONFIG means a
+    # Homebrew/opt keg whose pkgconfig dir is likewise off the default
+    # search path. A plain `pg_config` on PATH gets no override and
+    # falls back to whatever else pkg-config resolves (or nothing).
+    # Homebrew keeps libpq.pc under lib/ or lib/postgresql@<major>/pkgconfig,
+    # depending on the formula revision, so search for it rather than assume.
+    PGBIN_DIR="$(dirname "${PG_CONFIG}")"
+    PGPREFIX=""
+    PGPCDIR=""
+    if [[ "${PGBIN_DIR}" != "." && -d "${PGBIN_DIR}/../lib" ]]; then
+        PGPREFIX="$(cd "${PGBIN_DIR}/.." && pwd)"
+        PGPC="$(find "${PGPREFIX}/lib/" -name libpq.pc -print -quit 2>/dev/null || true)"
+        [[ -n "${PGPC}" ]] && PGPCDIR="$(dirname "${PGPC}")"
+    fi
+    PGINC="$("${PG_CONFIG}" --includedir 2>/dev/null || true)"
+    export PKG_CONFIG_PATH="${OPENSSL_PREFIX}/lib/pkgconfig${PGPCDIR:+:${PGPCDIR}}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+    echo "== building fractalsql-postgresql-mcp for darwin-${ARCH} ==" >&2
+    CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -arch ${ARCH} -mmacosx-version-min=13.3 ${PGINC:+-I${PGINC}} -I${OPENSSL_PREFIX}/include -L${OPENSSL_PREFIX}/lib" \
+        make -C mcp
+    lipo -info mcp/fractalsql-postgresql-mcp | grep -q "${ARCH}" \
+        || { echo "mcp binary is not ${ARCH}: $(lipo -info mcp/fractalsql-postgresql-mcp)" >&2; exit 1; }
+    HAVE_MCP=1
+fi
+
 echo "== building fractalsql${DLSUFFIX} for PG ${PG_MAJOR} / darwin-${ARCH} (DLSUFFIX=${DLSUFFIX}) =="
 # COPT is appended to both CFLAGS and LDFLAGS by PGXS, so -arch reaches the
 # compile and the link. FSQL_PLATFORM overrides the Makefile's host-derived
@@ -141,6 +189,18 @@ install -m 0644 THIRD-PARTY-NOTICES.md   "${STAGE}/THIRD-PARTY-NOTICES.md"
 install -m 0755 scripts/macos/install.sh "${STAGE}/install.sh"
 printf '%s\n' "${PG_MAJOR}" > "${STAGE}/PG_MAJOR"
 
+if [[ "${HAVE_MCP}" = "1" ]]; then
+    # BSD install (macOS) has no -D to create leading directories, unlike
+    # the GNU install the Linux packaging script relies on — mirror the
+    # sibling's mcp/ bundle shape (binary + client guide + locks).
+    mkdir -p "${STAGE}/mcp"
+    install -m 0755 mcp/fractalsql-postgresql-mcp    "${STAGE}/mcp/fractalsql-postgresql-mcp"
+    install -m 0644 mcp/README.md                    "${STAGE}/mcp/README.md"
+    install -m 0644 mcp/.mcp-schema-lock             "${STAGE}/mcp/.mcp-schema-lock"
+    install -m 0644 mcp/.mcp-safety-annotations-lock "${STAGE}/mcp/.mcp-safety-annotations-lock"
+    install -m 0644 mcp/manifest.json                "${STAGE}/mcp/manifest.json"
+fi
+
 cat > "${STAGE}/README.txt" <<EOF
 FractalSQL for PostgreSQL ${PG_MAJOR} (Community) ${VERSION} — macOS ${ARCH}
 
@@ -162,6 +222,17 @@ system libcurl on macOS, so there is nothing extra to install — point
 fractalsql.reasoning_plugin at it and configure an endpoint. See
 docs/reasoning-setup.md.
 EOF
+
+if [[ "${HAVE_MCP}" = "1" ]]; then
+cat >> "${STAGE}/README.txt" <<EOF
+
+MCP server (mcp/fractalsql-postgresql-mcp):
+  cd "${PKG}"
+  xattr -d com.apple.quarantine mcp/fractalsql-postgresql-mcp   # unsigned release
+  ./mcp/fractalsql-postgresql-mcp --list-tools                  # 82-tool catalog
+  See mcp/README.md for usage.
+EOF
+fi
 
 TARBALL="${DIST}/${PKG}.tar.gz"
 tar -C "${WORK}" -czf "${TARBALL}" "${PKG}"

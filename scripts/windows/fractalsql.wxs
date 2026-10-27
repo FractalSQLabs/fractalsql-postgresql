@@ -3,10 +3,12 @@
   scripts/windows/fractalsql.wxs — WiX Toolset source for the
   FractalSQL PostgreSQL extension Windows MSI.
 
-  Driven by three preprocessor vars supplied by build-msi.bat:
+  Driven by preprocessor vars supplied by build-msi.bat:
     -dPG_MAJOR=14|15|16|17|18
     -dSTAGE_DIR=dist\windows\staging-pg<NN>-<arch>
     -dMSI_VERSION=2.0.0
+    -dSHIP_MCP=0|1   (1 when mcp\fractalsql-postgresql-mcp.exe was
+                      staged — see the MCP server components below)
   plus the standard candle -arch <x64|arm64> which populates
   $(sys.BUILDARCH) and picks the right ProgramFiles dir / Package
   Platform.
@@ -112,6 +114,9 @@
            C:\Program Files\PostgreSQL\<PG_MAJOR>\
              lib\                 fractalsql.dll
                                   fractalsql-reasoning-http.dll (x64)
+             mcp\                 fractalsql-postgresql-mcp.exe
+                                  README.md / .mcp-*-lock / manifest.json
+                                  (x64 + SHIP_MCP; see the components)
              share\extension\     fractalsql.control
                                   fractalsql-1.0.sql (install script)
              share\doc\fractalsql\ LICENSE
@@ -123,6 +128,7 @@
         <Directory Id="PostgreSQLFolder" Name="PostgreSQL">
           <Directory Id="PGROOT" Name="$(var.PG_MAJOR)">
             <Directory Id="LibDir" Name="lib" />
+            <Directory Id="McpFolder" Name="mcp" />
             <Directory Id="ShareDir" Name="share">
               <Directory Id="ExtensionDir" Name="extension" />
               <Directory Id="DocDir" Name="doc">
@@ -205,6 +211,61 @@
               Source="$(var.STAGE_DIR)\fractalsql_agents--1.0.sql"
               KeyPath="yes" />
       </Component>
+
+      <!-- MCP server files, in their own mcp\ subdirectory of the PG
+           install root (parity with the darwin tarball's mcp/ folder
+           and the Linux packages' doc-dir mcp/ layout) rather than
+           flattened alongside the extension DLLs. mcp\scripts\windows\
+           build.bat (or build_test.ps1's gate 33) produces
+           mcp\fractalsql-postgresql-mcp.exe; build-msi.bat stages it
+           and passes -dSHIP_MCP=1 only when the exe exists, so an MSI
+           built without the exe (e.g. CI legs that don't run the MCP
+           build yet) simply ships MCP-less instead of failing. x64
+           only, mirroring the reasoning-plugin guard above. -->
+      <?if $(var.SHIP_MCP) = "1" ?>
+      <?if $(sys.BUILDARCH) = "x64" ?>
+      <Component Id="c_McpServerExe"
+                 Directory="McpFolder"
+                 Guid="C1A1$(var.PG_MAJOR)10-0000-4000-B000-000000005A70">
+        <File Id="fractalsql_postgresql_mcp.exe"
+              Name="fractalsql-postgresql-mcp.exe"
+              Source="$(var.STAGE_DIR)\mcp\fractalsql-postgresql-mcp.exe"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="c_McpReadme"
+                 Directory="McpFolder"
+                 Guid="C1A1$(var.PG_MAJOR)11-0000-4000-B000-000000005A71">
+        <File Id="mcp_readme_md"
+              Name="README.md"
+              Source="$(var.STAGE_DIR)\mcp\README.md"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="c_McpSchemaLock"
+                 Directory="McpFolder"
+                 Guid="C1A1$(var.PG_MAJOR)12-0000-4000-B000-000000005A72">
+        <File Id="mcp_schema_lock"
+              Name=".mcp-schema-lock"
+              Source="$(var.STAGE_DIR)\mcp\.mcp-schema-lock"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="c_McpSafetyLock"
+                 Directory="McpFolder"
+                 Guid="C1A1$(var.PG_MAJOR)13-0000-4000-B000-000000005A73">
+        <File Id="mcp_safety_lock"
+              Name=".mcp-safety-annotations-lock"
+              Source="$(var.STAGE_DIR)\mcp\.mcp-safety-annotations-lock"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="c_McpManifest"
+                 Directory="McpFolder"
+                 Guid="C1A1$(var.PG_MAJOR)14-0000-4000-B000-000000005A74">
+        <File Id="mcp_manifest_json"
+              Name="manifest.json"
+              Source="$(var.STAGE_DIR)\mcp\manifest.json"
+              KeyPath="yes" />
+      </Component>
+      <?endif ?>
+      <?endif ?>
 
       <Component Id="c_License"
                  Directory="FractalSqlDocDir"

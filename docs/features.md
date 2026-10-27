@@ -10,7 +10,7 @@ FractalSQL is a tiered capability framework that runs discovery, reasoning, and 
 
 ## 🏗️ Capability Tiering Model
 
-FractalSQL ships in two editions, each unlocking more of the four capability tiers described below (Discovery → Cognition → Agency → Analytics). The editions are a *build/licensing* axis; the capability tiers are a *functional* axis. A single install belongs to one edition and exposes whichever capability tiers that edition includes.
+FractalSQL ships in two editions, each unlocking more of the four capability tiers described below (Discovery → Cognition → Agency → Analytics). The editions are a *build/licensing* axis — which capability set the install was built and licensed to serve; the capability tiers are a *functional* axis — what that set can do. The two are orthogonal: a single install belongs to one edition and exposes whichever capability tiers that edition includes.
 
 | Tier | Focus | Key Capabilities | Build / Requirement |
 | --- | --- | --- | --- |
@@ -27,7 +27,7 @@ The foundation of FractalSQL is the **Stochastic Fractal Search (SFS)** engine, 
 Pure SFS convergence to the single best point minimizing cosine distance to a query over a unit box. It is a "precision" tool for finding the absolute global minimum.
 
 ### Scout Discovery (`fractal_search_explore`)
-Scans a stored corpus and returns a diverse population of results: an SFS population search blended with **Maximal Marginal Relevance (MMR)** re-ranking, so the results cover the data's distinct basins of attraction instead of the "mode collapse" common in top-K search.
+Scans a stored corpus and returns a diverse population of results: an SFS population search blended with **Maximal Marginal Relevance (MMR)** re-ranking, so the results cover the data's distinct basins of attraction instead of the "mode collapse" common in top-K search. A set-returning function here — `SELECT * FROM fractal_search_explore('corpus', 'emb', 'query')` — returns one row per population member, rather than folding the whole Scout population into one JSON result (the scalar-aggregate shape some other bindings use).
 
 ### Table-Backed Telemetry (`fractal_search_telemetry`)
 A deterministic primitive that returns the $K$ nearest real table rows to a query. This is the ground-truth layer used by all higher-order agentic functions.
@@ -111,6 +111,7 @@ The final tier provides mathematical primitives for analyzing the "shape" of dat
 - **Drift (`fractal_dimension_drift`)**: Detects regime changes by comparing the DFA exponent of a recent window against a baseline.
 - **Change-Point Localization (`fractal_change_point_detect`)**: Localizes where a series' mean or variance shifted, complementing DFA's overall characterization.
 - **Periodogram (`fractal_periodogram`)**: Exact power spectrum (direct DFT) for cadence detection such as beaconing or retry loops.
+- **Spectral entropy (`fractal_spectrogram_entropy`)**: Per-window Shannon entropy of the power spectrum (0 = ordered tone, ~0.9 = noise); pair with `fractal_change_point_detect` to find when order is lost.
 
 ### Topology and State Fingerprints
 - **Persistence (`fractal_tda_persistence_diagram`)**: Exact 0-dimensional persistence over a point cloud's Vietoris-Rips filtration, plus the graph cycle rank as an informational Betti-number estimate.
@@ -175,6 +176,7 @@ Using the native `fractal_vector` type gives close to a **~2x** speedup over `fl
 - `fractal_dimension_drift(series, win)`: Regime change detection. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_change_point_detect(series, win, ...)`: Change-point localization. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_periodogram(series, max_peaks?)`: Exact power spectrum. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
+- `fractal_spectrogram_entropy(series, win?, hop?, max_frames?)`: Short-time spectral entropy per frame. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_tda_persistence_diagram(points, dim, ...)`: Point-cloud persistence. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_state_fingerprint(v, ...)` / `fractal_cycle_detect(fingerprints, ...)`: SimHash + Brent cycle detection. $\rightarrow$ **[api-analytics.md](api-analytics.md)**
 - `fractal_vector_lp_distance(a, b, p)` / `fractal_vector_quantize_int8(v)` / `_binary(v)`: Vector math and quantization. $\rightarrow$ **[api-analytics.md](api-analytics.md)**

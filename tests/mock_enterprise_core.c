@@ -55,6 +55,19 @@ static int mock_should_fail(void) {
     return path != NULL && path[0] != '\0' && access(path, F_OK) == 0;
 }
 
+/* FSQL_MOCK_ENT_ZERO_FOUND: sentinel-file convention (same touch/remove
+ * shape as FSQL_MOCK_ENT_FAIL, so the same between-calls flip control
+ * applies). When the sentinel exists, the three
+ * fsql_optimize_portfolio_multimodal* entry points return FSQL_OK with
+ * *out_n_found = 0 -- which is what drives fractal_agent_diverse_portfolios'
+ * "no candidates found" error branch, a branch the fixed n_found=1 mock can
+ * never reach (a test-only behavior; a real core never reports 0 found on
+ * FSQL_OK). */
+static int mock_should_find_zero(void) {
+    const char *path = getenv("FSQL_MOCK_ENT_ZERO_FOUND");
+    return path != NULL && path[0] != '\0' && access(path, F_OK) == 0;
+}
+
 /* ---- the 8 required symbols (ensure_enterprise_lib's own check) ---- */
 
 FSQL_API int fsql_ledger_flush(fsql_ctx *ctx) {
@@ -96,6 +109,9 @@ FSQL_API int fsql_ledger_shadow_count(const fsql_ctx *ctx, size_t *out) {
     return FSQL_OK;
 }
 
+/* MOCK_OMIT_AUDIT_UNPACK drops this required symbol, to exercise the
+ * "library is missing expected symbols" refusal. */
+#ifndef MOCK_OMIT_AUDIT_UNPACK
 /* Pure echo, not real unpacking (see the file header): copies the
  * caller's blob back out verbatim, exercising fractal_audit_unpack's
  * own buffer-growth retry loop (FSQL_ETRUNCATED when it doesn't fit)
@@ -111,7 +127,11 @@ FSQL_API int fsql_audit_unpack(const void *blob, size_t blob_len,
     *json_cap = blob_len;
     return FSQL_OK;
 }
+#endif
 
+/* MOCK_OMIT_MULTIMODAL drops the three optional symbols, to exercise the
+ * "older enterprise build" path. */
+#ifndef MOCK_OMIT_MULTIMODAL
 /* ---- optional symbols (fsql_optimize_portfolio_multimodal family) -- */
 
 /* One canned candidate: uniform weights over the first k assets,
@@ -138,6 +158,7 @@ fsql_optimize_portfolio_multimodal(const double *mu, const double *cov,
     (void) mu; (void) cov; (void) n_restarts;
     (void) overlap_threshold; (void) quality_frac; (void) seed;
     if (mock_should_fail()) return FSQL_ESTORAGE;
+    if (mock_should_find_zero()) { *out_n_found = 0; return FSQL_OK; }
     mock_uniform_weights(out_weights, n_assets, k);
     out_sharpes[0] = 0.5;
     *out_n_found = 1;
@@ -159,6 +180,7 @@ fsql_optimize_portfolio_multimodal_ex(const double *mu, const double *cov,
     (void) overlap_threshold; (void) quality_frac; (void) seed;
     (void) use_obl; (void) diffusion_mode;
     if (mock_should_fail()) return FSQL_ESTORAGE;
+    if (mock_should_find_zero()) { *out_n_found = 0; return FSQL_OK; }
     mock_uniform_weights(out_weights, n_assets, k);
     out_sharpes[0] = 0.5;
     *out_n_found = 1;
@@ -178,9 +200,11 @@ fsql_optimize_portfolio_multimodal_pareto(const double *mu, const double *cov,
     (void) mu; (void) cov; (void) n_restarts; (void) max_front;
     (void) seed; (void) use_obl; (void) diffusion_mode;
     if (mock_should_fail()) return FSQL_ESTORAGE;
+    if (mock_should_find_zero()) { *out_n_found = 0; return FSQL_OK; }
     mock_uniform_weights(out_weights, n_assets, k);
     out_returns[0] = 0.1;
     out_risks[0]   = 0.05;
     *out_n_found   = 1;
     return FSQL_OK;
 }
+#endif /* MOCK_OMIT_MULTIMODAL */

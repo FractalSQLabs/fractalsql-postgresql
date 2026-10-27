@@ -108,7 +108,7 @@ SELECT fractal_diversify_disable();
 \echo ''
 \echo '=== 3. Cohort-restricted search: route-3 vehicles only ==='
 
--- v2.0.25: doc_id is a real ctid, so this join is exact regardless of
+-- v2.0.20: doc_id is a real ctid, so this join is exact regardless of
 -- any UPDATE relocating a tuple -- no more "only holds because this
 -- particular cohort excludes the updated row" caveat (that used to be
 -- true when doc_id was a 0-indexed scan position; see section 4 below

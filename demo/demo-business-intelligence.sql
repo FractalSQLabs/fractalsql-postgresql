@@ -63,6 +63,9 @@ $$ LANGUAGE plpgsql;
 DROP TABLE IF EXISTS bi_customer_features;
 DROP TABLE IF EXISTS bi_orders;
 DROP TABLE IF EXISTS bi_customers;
+-- Also drop the session-scoped staging tables so the file can be re-run in
+-- one psql session (a duplicate CREATE TEMP TABLE aborts under ON_ERROR_STOP=1).
+DROP TABLE IF EXISTS bi_archetypes;
 
 CREATE TABLE bi_customers (
     id       serial PRIMARY KEY,

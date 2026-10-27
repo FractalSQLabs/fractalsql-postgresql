@@ -140,6 +140,14 @@ SELECT array_length(fractal_embed('hello world'), 1) AS embed_dim;
 --  768
 ```
 
+→ On Docker Desktop, Docker Model Runner serves `ai/gpt-oss:20b` /
+`ai/nomic-embed-text-v1.5` the same way with no Ollama container to run
+(`docker model pull ai/gpt-oss:20b` first) — see
+**[docs/reasoning-setup.md § Docker Model Runner](reasoning-setup.md#docker-model-runner-dmr)**,
+and use the repo's `docker-compose.dmr.yml` compose override (alongside
+`docker-compose.yml`) to point the demo stack's `fractalsql.http_*` GUCs
+at `model-runner.docker.internal`.
+
 → To point at a cloud endpoint instead of local Ollama, see
 **[docs/reasoning-setup.md](reasoning-setup.md)** (provider config, GUCs,
 the slow-hardware timeout notes).

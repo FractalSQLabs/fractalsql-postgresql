@@ -27,8 +27,18 @@
 --   N. fractal_agent_network_coverage_alert — morphological_complexity + dimension_drift + reason
 --   O. fractal_agent_regime_triage   — dimension_dfa + dimension_drift + reason
 --   P. fractal_agent_diverse_portfolios — optimize_portfolio_multimodal + reason (enterprise tier)
--- A/B/C/D/G/H/J/K/L/M/N/O/P are cognition engines (end in fractal_reason); E/F
--- are pure retrieval; I is pure analytics -- none of E/F/I have an LLM step.
+-- A/B/C/D/G/H/J/K/L/M/N/O/P are cognition engines (end in a reasoning call,
+-- routed through the shared _fractalsql_agents_reason_ex helper); E/F are pure
+-- retrieval; I is pure analytics -- none of E/F/I have an LLM step. When the
+-- per-connection key fractalsql.agent_partial_reasoning_fail is on (default
+-- off, the base extension defines it), a reasoning-step failure is reported
+-- SOFTLY: the engine's LLM column comes back NULL and a trailing
+-- 'reasoning_step_failed' column (text) carries the raw error text -- the
+-- error text, so a consumer can test the LLM column for NULL instead of
+-- sniffing a marker prefix. The engine's computed data
+-- half is still delivered. embed/search-tier failures always raise, and a
+-- SETUP mistake (SQLSTATE 55000 -- no reasoning plugin loaded) always raises
+-- even with the flag on. See _fractalsql_agents_reason_ex at the top.
 -- The demo reference functions stay in the demos as copy-the-pattern
 -- blueprints; the eight vertical demos are wired as presets to these
 -- engines. See docs/api-agency.md > "The sixteen recipes".
@@ -39,6 +49,107 @@
 -- fractal_search_telemetry, fractal_hybrid_clinical_search,
 -- fractal_diversify_enable) resolve via the caller's search_path exactly as
 -- the base's own PL/pgSQL functions do.
+
+-- =====================================================================
+-- Shared reasoning step: _fractalsql_agents_reason_ex(query, context)
+-- =====================================================================
+-- Every engine's final LLM turn goes through THIS helper, not inline
+-- fractal_reason, so the agent_partial_reasoning_fail convention lives in
+-- exactly one place. It returns exactly one row:
+--   success        -> (the LLM text, false, NULL)
+--   soft failure   -> (NULL, true, <the raw error message>)
+--   hard failure   -> it RAISES (nothing is returned)
+-- "Soft" means the reasoning ENDPOINT failed -- the plugin loaded and the
+-- dispatch failed (the transient case). "Hard" means either the flag is off
+-- (the default: a reasoning failure propagates exactly as fractal_reason
+-- raised it) or the failure is a SETUP mistake -- SQLSTATE 55000
+-- (object_not_in_prerequisite_state: "fractal_reason: no reasoning plugin
+-- loaded" / "no text-to-sql plugin loaded"). A missing reasoning plugin is a
+-- configuration error, not a transient endpoint failure, so it is ALWAYS
+-- re-raised even with the partial flag on.
+--
+-- The calling engine turns a soft failure into the two-column contract: its
+-- LLM column comes back NULL and its trailing 'reasoning_step_failed' column
+-- carries the error text, so a consumer tests the LLM column for NULL
+-- instead of sniffing a marker prefix.
+--
+-- Only THIS step is softened; embed-tier/search-tier failures still raise,
+-- and fractal_reason/fractal_text_to_sql/fractal_sql_agent keep raising
+-- (their raise IS their result, or it preempts the data half). The flag is
+-- read with missing_ok=true so an engine predating the GUC, or a placeholder
+-- left by a blind SET, still resolves (to off).
+CREATE FUNCTION _fractalsql_agents_reason_ex(p_query text, p_context text DEFAULT '{}')
+RETURNS TABLE(result text, failed boolean, err text)
+AS $fn$
+DECLARE
+    v_partial boolean;
+BEGIN
+    BEGIN
+        v_partial := COALESCE(current_setting('fractalsql.agent_partial_reasoning_fail', true), 'off')::boolean;
+    EXCEPTION WHEN OTHERS THEN
+        v_partial := false;
+    END;
+    BEGIN
+        RETURN QUERY SELECT fractal_reason(p_query, p_context), false, NULL::text;
+    EXCEPTION
+        WHEN SQLSTATE '55000' THEN
+            -- A setup mistake (no reasoning plugin loaded), not a transient
+            -- endpoint failure: always re-raise, partial flag or not.
+            RAISE;
+        WHEN OTHERS THEN
+            IF v_partial THEN
+                -- Soft failure: the row carries the error text, and the
+                -- function returns normally (RETURN QUERY does NOT exit the
+                -- function, so the ELSE branch below must own the re-raise).
+                RETURN QUERY SELECT NULL::text, true, SQLERRM;
+            ELSE
+                RAISE;
+            END IF;
+    END;
+END;
+$fn$ LANGUAGE plpgsql VOLATILE;
+
+COMMENT ON FUNCTION _fractalsql_agents_reason_ex(text, text) IS
+  'Shared reasoning step for the agent engines: wraps fractal_reason and '
+  'returns exactly one row (result, failed, err) -- (llm text, false, NULL) '
+  'on success, (NULL, true, <error text>) on a soft failure, and RAISES on a '
+  'hard failure. A soft failure is the transient case (the reasoning plugin '
+  'loaded but the dispatch failed) and happens only when '
+  'fractalsql.agent_partial_reasoning_fail is on (default off = raise, '
+  'identical to bare fractal_reason). A setup mistake -- SQLSTATE 55000, no '
+  'reasoning plugin loaded -- ALWAYS raises, even with the flag on: a missing '
+  'plugin is a configuration error, not a transient endpoint failure. The '
+  'engines expose a soft failure as a NULL LLM column plus a trailing '
+  'reasoning_step_failed column carrying the error text.';
+
+-- The legacy single-text wrapper, kept so any external caller of the old
+-- helper is unaffected: it still returns the single text
+-- 'reasoning_step_failed: <error>' on a soft failure and still raises
+-- otherwise. New code should call _fractalsql_agents_reason_ex directly and
+-- use the two-column (LLM column NULL + reasoning_step_failed) contract.
+CREATE FUNCTION _fractalsql_agents_reason(p_query text, p_context text DEFAULT '{}')
+RETURNS text
+AS $fn$
+DECLARE
+    v_result text;
+    v_failed boolean;
+    v_err    text;
+BEGIN
+    SELECT r.result, r.failed, r.err INTO v_result, v_failed, v_err
+      FROM _fractalsql_agents_reason_ex(p_query, p_context) AS r;
+    IF v_failed THEN
+        RETURN 'reasoning_step_failed: ' || v_err;
+    END IF;
+    RETURN v_result;
+END;
+$fn$ LANGUAGE plpgsql VOLATILE;
+
+COMMENT ON FUNCTION _fractalsql_agents_reason(text, text) IS
+  'Shared reasoning step for the agent engines: wraps fractal_reason, '
+  'returning "reasoning_step_failed: <error>" instead of raising when '
+  'fractalsql.agent_partial_reasoning_fail is on (default off = raise, '
+  'identical to bare fractal_reason). Only softens the reasoning step; '
+  'embed/search-tier failures and fractal_reason itself still raise.';
 
 -- =====================================================================
 -- Engine A: fractal_agent_anomaly_triage
@@ -58,12 +169,19 @@ CREATE FUNCTION fractal_agent_anomaly_triage(
     filter_col      text,
     filter_val      text,
     baseline_window int  DEFAULT 32
-) RETURNS TABLE(threat_score float8, anomaly_type text, triage_summary text)
+) RETURNS TABLE(threat_score float8, anomaly_type text, triage_summary text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     drift_res     jsonb;
     series        float8[];
     reasoning_res text;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -73,7 +191,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -104,25 +230,48 @@ BEGIN
     -- 2. Real Cognition: reason a human-readable triage over the drift result.
     -- fractal_reason's context arg is text (a JSON-shaped string), so cast the
     -- jsonb build_object to text.
-    reasoning_res := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO reasoning_res, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Triage this anomaly: ' || drift_res::text,
-        jsonb_build_object('table', log_table, filter_col, filter_val)::text);
+        jsonb_build_object('table', log_table, filter_col, filter_val)::text) AS r;
 
     -- 3. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_anomaly_triage', jsonb_build_object(
             'threat_score', COALESCE((drift_res->>'drift')::float8, 0.0),
             'anomaly_type', 'vector_drift', 'triage_summary', reasoning_res));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
     RETURN QUERY SELECT
         COALESCE((drift_res->>'drift')::float8, 0.0),
         'vector_drift'::text,
-        reasoning_res;
+        reasoning_res,
+        reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -130,11 +279,17 @@ COMMENT ON FUNCTION fractal_agent_anomaly_triage(text, text, text, text, text, i
   'Anomaly-triage agent engine. Reads one entity''s metric time series from '
   'log_table (filtered by filter_col = filter_val, ordered by time_col), runs '
   'fractal_dimension_drift over it, then fractal_reason to synthesize a '
-  'triage summary. Returns (threat_score, anomaly_type, triage_summary). '
-  'threat_score is the real drift exponent; triage_summary is the LLM''s read. '
+  'triage summary. Returns (threat_score, anomaly_type, triage_summary, '
+  'reasoning_step_failed). '
+  'threat_score is the real drift exponent; triage_summary is the LLM''s read '
+  '(NULL when the reasoning step failed). '
   'Raises a clean ERROR if the filter matches no rows. Generalizes the '
   'fractal_agent_threat_triage reference blueprint in demo/demo-agentic-'
-  'ops-devops.sql (which hardcoded incident_logs/latency_ms/event_ts/agent_id).';
+  'ops-devops.sql (which hardcoded incident_logs/latency_ms/event_ts/agent_id). '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine B: fractal_agent_allocate
@@ -154,12 +309,19 @@ CREATE FUNCTION fractal_agent_allocate(
     cov         float8[],
     cardinality int,
     context     text  DEFAULT NULL
-) RETURNS TABLE(allocation jsonb, sharpe float8, rationale text)
+) RETURNS TABLE(allocation jsonb, sharpe float8, rationale text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     opt_res    jsonb;
     reason_res text;
     s          float8;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -169,7 +331,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -190,24 +360,46 @@ BEGIN
 
     -- 3. Real Cognition: reason a rationale for the allocation. context is a
     -- text label (a JSON-shaped string) passed straight through to fractal_reason.
-    reason_res := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO reason_res, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Explain this cardinality-constrained allocation and its risk/return: '
         || opt_res::text,
-        COALESCE(context, '{}')::text);
+        COALESCE(context, '{}')::text) AS r;
 
     -- 4. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users. Complements
     -- fractal_optimize_portfolio's own audit entry with the agent-level
     -- decision (rationale, cardinality).
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_allocate', jsonb_build_object(
             'sharpe', s, 'cardinality', cardinality, 'rationale', reason_res));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT opt_res, s, reason_res;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT opt_res, s, reason_res, reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -215,13 +407,18 @@ COMMENT ON FUNCTION fractal_agent_allocate(float8[], float8[], int, text) IS
   'Cardinality-constrained allocation agent engine. Runs '
   'fractal_optimize_portfolio(mu, cov, cardinality) — the SFS Sharpe-ratio '
   'maximizer — then fractal_reason to synthesize a rationale. Returns '
-  '(allocation, sharpe, rationale): allocation is the optimizer''s {sharpe, '
+  '(allocation, sharpe, rationale, reasoning_step_failed): allocation is the '
+  'optimizer''s {sharpe, '
   'weights} jsonb, sharpe is the real risk-adjusted return it computed, and '
   'rationale is the LLM''s explanation. context is an optional label passed '
   'to the reason call as its context jsonb. Generalizes the '
   'fractal_agent_portfolio_rebalance reference blueprint in '
   'demo/demo-vertical-agentic-fintech-mcts.sql (which used canned mu/cov and a '
-  'hardcoded 0.042 drift_score).';
+  'hardcoded 0.042 drift_score). '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine C: fractal_agent_route_task
@@ -245,15 +442,22 @@ CREATE FUNCTION fractal_agent_route_task(
     cap_id_col     text,
     budget         int,
     cost_per_route int  DEFAULT 150
-) RETURNS TABLE(routed_to text, confidence float8, remaining_budget int, rationale text)
+) RETURNS TABLE(routed_to text, confidence float8, remaining_budget int, rationale text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     nearest_doc  text;
     nearest_dist float8;
     routed_to    text;
     confidence   float8;
     rationale    text;
     has_row      int4;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -263,7 +467,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -272,6 +484,12 @@ BEGIN
         true);
     IF cap_table IS NULL OR cap_emb_col IS NULL OR cap_id_col IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_route_task: identifier arguments must not be NULL';
+    END IF;
+    -- A NULL input vector is an argument error (22023, invalid_parameter_value)
+    -- reported here rather than as a low-level data error in the vector math.
+    IF task_emb IS NULL THEN
+        RAISE EXCEPTION 'fractal_agent_route_task: task_emb must not be NULL'
+            USING ERRCODE = 'invalid_parameter_value';
     END IF;
     -- 0. Empty-table pre-check. The C primitive (fractal_search_telemetry)
     -- raises its own "no corpus rows to search" on an empty table, which would
@@ -302,27 +520,49 @@ BEGIN
         INTO routed_to;
 
     -- 3. Real Cognition: reason a one-line routing rationale.
-    rationale := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO rationale, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Route this task to capability ' || COALESCE(routed_to, '?') ||
         ' (cosine distance ' || nearest_dist || '). Justify the routing in one sentence.',
-        jsonb_build_object('budget', budget, 'cost_per_route', cost_per_route)::text);
+        jsonb_build_object('budget', budget, 'cost_per_route', cost_per_route)::text) AS r;
 
     -- confidence is real, derived from the real nearest distance.
     confidence := 1.0 / (1.0 + nearest_dist);
 
     -- 4. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_route_task', jsonb_build_object(
             'routed_to', routed_to, 'confidence', confidence,
             'remaining_budget', budget - cost_per_route, 'rationale', rationale));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
     RETURN QUERY SELECT routed_to, confidence,
-        budget - cost_per_route, rationale;
+        budget - cost_per_route, rationale, reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -335,12 +575,17 @@ COMMENT ON FUNCTION fractal_agent_route_task(float8[], text, text, text, int, in
   'derives confidence = 1/(1+distance) from the real distance, '
   'accounts the budget (remaining_budget = budget - cost_per_route), and '
   'calls fractal_reason for a one-line routing rationale. Returns (routed_to, '
-  'confidence, remaining_budget, rationale). Raises a clean ERROR if the '
+  'confidence, remaining_budget, rationale, reasoning_step_failed). Raises a '
+  'clean ERROR if the '
   'capability table is empty. Generalizes the fractal_agent_route_task '
   'reference blueprint in demo/demo-vertical-agentic-ops-devops.sql (which returned '
   'the constant root-cause-analyzer/0.92/budget-150 and ignored its cap_map '
   'jsonb arg -- the cap_map was an inline duplicate of the real '
-  'agent_capabilities table this engine searches instead).';
+  'agent_capabilities table this engine searches instead). '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine D: fractal_agent_outlier_intercept
@@ -360,21 +605,28 @@ CREATE FUNCTION fractal_agent_outlier_intercept(
     history_table  text,
     emb_col        text,
     threshold      float8,
-    metric         text    DEFAULT 'cosine'
-) RETURNS TABLE(intercepted boolean, reason text)
+    distance_metric text   DEFAULT 'cosine'
+) RETURNS TABLE(intercepted boolean, metric text, reason text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     nearest_doc  text;
     nearest_dist float8;
     intercepted  boolean;
     reason       text;
     has_row      int4;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- The distance metric is an explicit argument. A threshold is
     -- calibrated against one metric, so the metric must be chosen by the
     -- caller. The default is 'cosine', the metric existing callers were
     -- calibrated against. Any other value, including NULL, is an error.
-    IF metric IS NULL OR metric NOT IN ('cosine', 'l2') THEN
+    IF distance_metric IS NULL OR distance_metric NOT IN ('cosine', 'l2') THEN
         RAISE EXCEPTION 'fractal_agent_outlier_intercept: metric must be ''cosine'' or ''l2''';
     END IF;
     -- Pin the base fractalsql extension's schema ahead of the caller's
@@ -385,7 +637,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -394,6 +654,12 @@ BEGIN
         true);
     IF history_table IS NULL OR emb_col IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_outlier_intercept: identifier arguments must not be NULL';
+    END IF;
+    -- A NULL input vector is an argument error (22023, invalid_parameter_value)
+    -- reported here rather than as a low-level data error in the vector math.
+    IF state_vec IS NULL THEN
+        RAISE EXCEPTION 'fractal_agent_outlier_intercept: state_vec must not be NULL'
+            USING ERRCODE = 'invalid_parameter_value';
     END IF;
     -- 0. Empty-table pre-check (same rationale and idiom as route_task: the C
     -- primitive would raise "no corpus rows to search" first; raise this
@@ -413,7 +679,7 @@ BEGIN
     -- and fractal_vector casts let both column types use the same query.
     -- Identifiers are %I quoted and the state vector is a bound
     -- parameter, so no caller data is interpolated.
-    IF metric = 'cosine' THEN
+    IF distance_metric = 'cosine' THEN
         SELECT doc_id, distance INTO nearest_doc, nearest_dist
           FROM fractal_search_telemetry(history_table, emb_col, state_vec, 1);
         IF nearest_doc IS NULL THEN
@@ -441,27 +707,49 @@ BEGIN
 
     -- 3. Real Cognition: reason a one-line justification (names the metric
     -- actually used, so the threshold's own basis is auditable).
-    reason := fractal_reason(
-        'Outlier intercept: nearest known-bad state is at ' || metric || ' distance '
+    SELECT r.result, r.failed, r.err
+      INTO reason, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
+        'Outlier intercept: nearest known-bad state is at ' || distance_metric || ' distance '
         || nearest_dist || ', threshold ' || threshold || ', so '
         || CASE WHEN intercepted THEN 'INTERCEPT' ELSE 'allow' END
         || '. Justify the decision in one sentence.',
-        jsonb_build_object('threshold', threshold, 'metric', metric,
-                           'intercepted', intercepted)::text);
+        jsonb_build_object('threshold', threshold, 'metric', distance_metric,
+                           'intercepted', intercepted)::text) AS r;
 
     -- 4. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users. High-value trail since
     -- this engine can block a proposed state/action.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_outlier_intercept', jsonb_build_object(
             'intercepted', intercepted, 'nearest_distance', nearest_dist,
-            'threshold', threshold, 'metric', metric, 'reason', reason));
+            'threshold', threshold, 'metric', distance_metric, 'reason', reason));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT intercepted, reason;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT intercepted, distance_metric, reason, reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -476,12 +764,21 @@ COMMENT ON FUNCTION fractal_agent_outlier_intercept(float8[], text, text, float8
   'metric value is an error rather than a silent fallback. Sets '
   'intercepted = (distance < threshold) and calls fractal_reason for a '
   'one-line justification naming the metric used. Returns (intercepted, '
-  'reason). Raises a clean ERROR if the history table is empty or the '
+  'metric, reason, reasoning_step_failed), where metric is the metric the '
+  'engine actually used (''cosine'' or ''l2''). The '
+  'metric INPUT parameter is named distance_metric (PostgreSQL forbids a '
+  'RETURNS TABLE column with the same name as an input parameter); '
+  'positional calls are unaffected. Raises a clean ERROR if the history table '
+  'is empty or the '
   'metric is unknown. Generalizes the fractal_agent_outlier_intercept '
   'reference blueprint in demo/demo-vertical-agentic-ops-devops.sql '
   '(which returned the constant false/''state within normal variance'' '
   'and ignored its arguments, even though its own comment described this '
-  'exact composition).';
+  'exact composition). '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine E: fractal_agent_recall_hybrid
@@ -515,6 +812,11 @@ CREATE FUNCTION fractal_agent_recall_hybrid(
 ) RETURNS TABLE(mem_id bigint, content text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     cohort       text[];
     where_clause text;
     content_sel  text;
@@ -527,7 +829,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -557,6 +867,9 @@ BEGIN
     -- predicate -- no row_number() mapping needed.
     content_sel := CASE WHEN content_col IS NULL THEN 'NULL::text'
                         ELSE format('%I', content_col) END;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
     RETURN QUERY EXECUTE format(
         'SELECT x.idv::bigint, x.cnt '
         'FROM fractal_hybrid_clinical_search(%L, %L, $1, $2, %L) r '
@@ -564,6 +877,15 @@ BEGIN
         'ON x.rid = r.doc_id ORDER BY r.distance',
         mem_table, vec_col, k, id_col, content_sel, mem_table)
         USING query_vec, cohort;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -608,6 +930,12 @@ CREATE FUNCTION fractal_agent_recommend_diverse(
     id_col         text  DEFAULT 'id'
 ) RETURNS TABLE(item_id bigint, score float8)
 AS $$
+DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -617,7 +945,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -636,6 +972,9 @@ BEGIN
     -- top-k (per the primitive's docstring). score = 1 - cosine_distance is
     -- real, from the primitive; doc_id (a real ctid) is resolved to the
     -- named item id (id_col, cast to bigint) via a direct ctid predicate.
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
     RETURN QUERY EXECUTE format(
         'SELECT x.idv::bigint, (1.0 - r.distance) '
         'FROM fractal_search_telemetry(%L, %L, $1, %L) r '
@@ -643,6 +982,15 @@ BEGIN
         'ON x.rid = r.doc_id ORDER BY r.distance',
         catalog_table, emb_col, k, id_col, catalog_table)
         USING query_vec;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -679,11 +1027,18 @@ CREATE FUNCTION fractal_agent_data_analyst(
     table_names   text[]  DEFAULT NULL,
     max_retries   int     DEFAULT 2,
     context       text    DEFAULT '{}'
-) RETURNS TABLE(analysis text, generated_sql text, result_json jsonb)
+) RETURNS TABLE(analysis text, generated_sql text, result_json jsonb, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     res      fractal_sql_agent_result;
     analysis text;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -693,7 +1048,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -709,24 +1072,46 @@ BEGIN
     SELECT * INTO res FROM fractal_sql_agent(question, table_names, max_retries, true);
 
     -- 2. Real Cognition: reason a one-paragraph read over the query result.
-    analysis := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO analysis, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Analyze this database query result and answer in one paragraph: '
         || COALESCE(res.result_json::text, 'null'),
-        context);
+        context) AS r;
 
     -- 3. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users. High-value trail since
     -- this engine auto-executes LLM-generated SQL.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_data_analyst', jsonb_build_object(
             'question', question, 'generated_sql', res.generated_sql,
             'execution_status', res.execution_status, 'analysis', analysis));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT analysis, res.generated_sql, res.result_json;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT analysis, res.generated_sql, res.result_json, reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -736,11 +1121,16 @@ COMMENT ON FUNCTION fractal_agent_data_analyst(text, text[], int, text) IS
   'its own retry loop, auto_execute=true so result_json carries the real row '
   'count (or a captured execution-failure reason) -- then fractal_reason to '
   'synthesize a one-paragraph analysis of the result. Returns (analysis, '
-  'generated_sql, result_json): analysis is the LLM''s read, generated_sql and '
+  'generated_sql, result_json, reasoning_step_failed): analysis is the LLM''s '
+  'read, generated_sql and '
   'result_json are the agent''s own real outputs (no canned constants). context '
   'is an optional label passed to the reason call. No empty-table guard (no '
   'fixed table to pre-check; fractal_sql_agent handles its own errors). This is '
-  'the horizontal catch-all -- no vertical demo is wired to it.';
+  'the horizontal catch-all -- no vertical demo is wired to it. '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine H: fractal_agent_patient_deterioration_triage
@@ -762,9 +1152,14 @@ CREATE FUNCTION fractal_agent_patient_deterioration_triage(
     cohort_doc_ids  text[]  DEFAULT NULL,
     k               int     DEFAULT 5,
     id_col          text    DEFAULT 'id'
-) RETURNS TABLE(nearest_cohort_id bigint, cohort_distance float8, drift_distance float8, rationale text, cohort_matches jsonb)
+) RETURNS TABLE(nearest_cohort_id bigint, cohort_distance float8, drift_distance float8, rationale text, cohort_matches jsonb, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     cohort         text[];
     cohort_matches jsonb;
     cohort_dist    float8;
@@ -773,6 +1168,8 @@ DECLARE
     resolved_id    bigint;
     rationale      text;
     has_row        int4;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -782,7 +1179,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -791,6 +1196,12 @@ BEGIN
         true);
     IF patient_table IS NULL OR vec_col IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_patient_deterioration_triage: identifier arguments must not be NULL';
+    END IF;
+    -- A NULL input vector is an argument error (22023, invalid_parameter_value)
+    -- reported here rather than as a low-level data error in the vector math.
+    IF query_vec IS NULL OR baseline_vec IS NULL OR current_vec IS NULL THEN
+        RAISE EXCEPTION 'fractal_agent_patient_deterioration_triage: query_vec, baseline_vec, and current_vec must not be NULL'
+            USING ERRCODE = 'invalid_parameter_value';
     END IF;
     -- 0. Empty-table pre-check (the has_row IS NULL idiom; EXECUTE ... INTO
     -- does not set FOUND -- guard on the target variable, not FOUND).
@@ -837,27 +1248,54 @@ BEGIN
     -- result; k applies only to the cohort search above.
     SELECT doc_id, distance INTO traj_doc, traj_dist
       FROM fractal_search_trajectory(patient_table, vec_col, baseline_vec, current_vec, 1);
+    -- A NULL trajectory distance means the drift search produced no distance
+    -- (no matching row); treat that as zero drift rather than letting a NULL
+    -- reach the rationale text and the drift_distance column.
+    traj_dist := COALESCE(traj_dist, 0.0);
 
     -- 4. Real Cognition: reason a triage over the nearest match and drift
     -- only, not every entry in cohort_matches.
-    rationale := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO rationale, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Triage this patient: nearest cohort match is id ' || COALESCE(resolved_id::text, '?') ||
         ' at cosine distance ' || cohort_dist || '; baseline->current drift distance is ' || traj_dist ||
         '. Justify the deterioration triage in one sentence.',
-        jsonb_build_object('cohort_distance', cohort_dist, 'drift_distance', traj_dist)::text);
+        jsonb_build_object('cohort_distance', cohort_dist, 'drift_distance', traj_dist)::text) AS r;
 
     -- 5. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_patient_deterioration_triage', jsonb_build_object(
             'nearest_cohort_id', resolved_id, 'cohort_distance', cohort_dist,
             'drift_distance', traj_dist, 'rationale', rationale, 'cohort_matches', cohort_matches));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT resolved_id, cohort_dist, traj_dist, rationale, cohort_matches;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT resolved_id, cohort_dist, traj_dist, rationale, cohort_matches,
+        reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -869,7 +1307,8 @@ COMMENT ON FUNCTION fractal_agent_patient_deterioration_triage(text, text, float
   'cohort match to its named patient id (id_col) via a direct ctid '
   'predicate, and calls fractal_reason to synthesize a triage over the '
   'nearest match and the drift. Returns (nearest_cohort_id, '
-  'cohort_distance, drift_distance, rationale, cohort_matches), where '
+  'cohort_distance, drift_distance, rationale, cohort_matches, '
+  'reasoning_step_failed), where '
   'cohort_matches is a jsonb array of up to k {"id":..,"distance":..} '
   'entries ranked ascending by distance; nearest_cohort_id/cohort_distance '
   'are always cohort_matches[0]. The cohort_doc_ids parameter lets the '
@@ -878,7 +1317,11 @@ COMMENT ON FUNCTION fractal_agent_patient_deterioration_triage(text, text, float
   'single (filter_col, filter_val) cannot express. Raises a clean ERROR if the '
   'patient table is empty or the cohort matches no rows. id_col must be '
   'bigint-castable. Generalizes the medtech-clinical demo''s hybrid-search + '
-  'trajectory sections.';
+  'trajectory sections. '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine I: fractal_agent_feedback_audit
@@ -903,6 +1346,11 @@ CREATE FUNCTION fractal_agent_feedback_audit(
 ) RETURNS TABLE(diversity_quotient float8, explanation jsonb)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     v          float8[];
     target_doc int8;
     dq         float8;
@@ -917,7 +1365,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -954,7 +1410,7 @@ BEGIN
     -- feedback on it. fractal_isolate_background/fsql_feedback_report takes
     -- a result_handle -- core's own internal per-call result position, NOT
     -- a database row -- so this uses scan_pos, not doc_id (which is now a
-    -- ctid; the two are different concepts since v2.0.25's ctid remap, see
+    -- ctid; the two are different concepts since v2.0.20's ctid remap, see
     -- fractal_search_telemetry's own doc comment).
     SELECT scan_pos INTO target_doc
       FROM fractal_search_telemetry(catalog_table, emb_col, query_vec, 1);
@@ -968,7 +1424,19 @@ BEGIN
     -- recommend_diverse, which leaves it on for the caller).
     PERFORM fractal_diversify_disable();
 
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
     RETURN QUERY SELECT dq, diag;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1005,9 +1473,14 @@ CREATE FUNCTION fractal_agent_schedule_workload(
     population    int   DEFAULT 50,
     k             int   DEFAULT 5,
     context       text  DEFAULT '{}'
-) RETURNS TABLE(assigned_node text, confidence float8, rationale text)
+) RETURNS TABLE(assigned_node text, confidence float8, rationale text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     refined      float8[];
     nearest_doc  text;
     nearest_dist float8;
@@ -1015,6 +1488,8 @@ DECLARE
     confidence   float8;
     rationale    text;
     has_row      int4;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -1024,7 +1499,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -1033,6 +1516,12 @@ BEGIN
         true);
     IF node_table IS NULL OR node_emb_col IS NULL OR node_id_col IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_schedule_workload: identifier arguments must not be NULL';
+    END IF;
+    -- A NULL input vector is an argument error (22023, invalid_parameter_value)
+    -- reported here rather than as a low-level data error in the vector math.
+    IF task_vec IS NULL THEN
+        RAISE EXCEPTION 'fractal_agent_schedule_workload: task_vec must not be NULL'
+            USING ERRCODE = 'invalid_parameter_value';
     END IF;
     EXECUTE format('SELECT 1 FROM %I LIMIT 1', node_table) INTO has_row;
     IF has_row IS NULL THEN
@@ -1056,26 +1545,48 @@ BEGIN
         node_id_col, node_table, nearest_doc) INTO assigned;
 
     -- 4. Real Cognition: reason a one-line placement rationale.
-    rationale := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO rationale, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Schedule this workload onto node ' || COALESCE(assigned, '?') ||
         ' (cosine distance ' || nearest_dist || ' after fractal_search refinement). ' ||
         'Justify the placement in one sentence.',
-        context);
+        context) AS r;
 
     -- confidence is real, derived from the real nearest distance.
     confidence := 1.0 / (1.0 + nearest_dist);
 
     -- 5. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_schedule_workload', jsonb_build_object(
             'assigned_node', assigned, 'confidence', confidence, 'rationale', rationale));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT assigned, confidence, rationale;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT assigned, confidence, rationale, reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1087,9 +1598,14 @@ COMMENT ON FUNCTION fractal_agent_schedule_workload(float8[], text, text, text, 
   '(node_id_col) via a direct ctid predicate, derives confidence = '
   '1/(1+distance) from the real distance, and calls fractal_reason for a '
   'one-line placement rationale. Returns (assigned_node, confidence, '
-  'rationale). Like fractal_agent_route_task but with the fractal_search '
+  'rationale, reasoning_step_failed). Like fractal_agent_route_task but with '
+  'the fractal_search '
   'refinement step route_task lacks. Raises a clean ERROR if the node table '
-  'is empty. Generalizes the sovereign-edge demo''s section-3 sniper search.';
+  'is empty. Generalizes the sovereign-edge demo''s section-3 sniper search. '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine K: fractal_agent_rebalance_sibling
@@ -1112,9 +1628,14 @@ CREATE FUNCTION fractal_agent_rebalance_sibling(
     k             int    DEFAULT 5,
     id_col        text   DEFAULT 'id',
     context       text   DEFAULT '{}'
-) RETURNS TABLE(sharpe float8, weights jsonb, nearest_alloc_id bigint, nearest_distance float8, rationale text)
+) RETURNS TABLE(sharpe float8, weights jsonb, nearest_alloc_id bigint, nearest_distance float8, rationale text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     opt          jsonb;
     w            float8[];
     s            float8;
@@ -1123,6 +1644,8 @@ DECLARE
     resolved_id  bigint;
     rationale    text;
     has_row      int4;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -1132,7 +1655,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -1141,6 +1672,12 @@ BEGIN
         true);
     IF alloc_table IS NULL OR alloc_emb_col IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_rebalance_sibling: identifier arguments must not be NULL';
+    END IF;
+    -- A NULL input vector is an argument error (22023, invalid_parameter_value)
+    -- reported here rather than as a low-level data error in the vector math.
+    IF mu IS NULL OR cov IS NULL OR baseline_vec IS NULL THEN
+        RAISE EXCEPTION 'fractal_agent_rebalance_sibling: mu, cov, and baseline_vec must not be NULL'
+            USING ERRCODE = 'invalid_parameter_value';
     END IF;
     EXECUTE format('SELECT 1 FROM %I LIMIT 1', alloc_table) INTO has_row;
     IF has_row IS NULL THEN
@@ -1167,24 +1704,47 @@ BEGIN
         id_col, id_col, alloc_table, nearest_doc) INTO resolved_id;
 
     -- 4. Real Cognition.
-    rationale := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO rationale, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Rebalance triage: the optimized portfolio has Sharpe ' || s ||
         ' and is nearest to historical allocation id ' || COALESCE(resolved_id::text, '?') ||
         ' (cosine distance ' || nearest_dist || '). Justify the rebalance in one sentence.',
-        context);
+        context) AS r;
 
     -- 5. Best-effort audit-chain provenance -- enterprise tier only;
     -- must not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_rebalance_sibling', jsonb_build_object(
             'sharpe', s, 'nearest_alloc_id', resolved_id,
             'nearest_distance', nearest_dist, 'rationale', rationale));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT s, opt->'weights', resolved_id, nearest_dist, rationale;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT s, opt->'weights', resolved_id, nearest_dist, rationale,
+        reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1195,12 +1755,17 @@ COMMENT ON FUNCTION fractal_agent_rebalance_sibling(float8[], float8[], int, tex
   'baseline_vec, weights, 1) to find the nearest historical allocation pattern, '
   'resolves its doc_id to the named allocation id (id_col) via a ctid-row_number '
   'mapping, and calls fractal_reason to synthesize the rebalance rationale. '
-  'Returns (sharpe, weights, nearest_alloc_id, nearest_distance, rationale). '
+  'Returns (sharpe, weights, nearest_alloc_id, nearest_distance, rationale, '
+  'reasoning_step_failed). '
   'cov must be a flattened 1-D row-major matrix. Raises a clean ERROR if the '
   'allocation table is empty. Also logs the decision to the audit chain via '
   'fractal_audit_log (enterprise tier; silently skipped on community). '
   'Generalizes the quant-finance demo''s optimize_portfolio + '
-  'search_trajectory sections (and the fintech-mcts reference blueprint).';
+  'search_trajectory sections (and the fintech-mcts reference blueprint). '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine L: fractal_agent_detour_classify
@@ -1220,15 +1785,22 @@ CREATE FUNCTION fractal_agent_detour_classify(
     k              int   DEFAULT 5,
     id_col         text  DEFAULT 'id',
     boxcount_dim   int   DEFAULT 2
-) RETURNS TABLE(nearest_fleet_id bigint, trajectory_distance float8, trace_complexity float8, rationale text)
+) RETURNS TABLE(nearest_fleet_id bigint, trajectory_distance float8, trace_complexity float8, rationale text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     nearest_doc  int8;
     nearest_dist float8;
     resolved_id  bigint;
     bc           float8;
     rationale    text;
     has_row      int4;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -1238,7 +1810,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -1247,6 +1827,12 @@ BEGIN
         true);
     IF vehicle_table IS NULL OR emb_col IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_detour_classify: identifier arguments must not be NULL';
+    END IF;
+    -- A NULL input vector is an argument error (22023, invalid_parameter_value)
+    -- reported here rather than as a low-level data error in the vector math.
+    IF baseline_vec IS NULL OR current_vec IS NULL OR gps_trace IS NULL THEN
+        RAISE EXCEPTION 'fractal_agent_detour_classify: baseline_vec, current_vec, and gps_trace must not be NULL'
+            USING ERRCODE = 'invalid_parameter_value';
     END IF;
     EXECUTE format('SELECT 1 FROM %I LIMIT 1', vehicle_table) INTO has_row;
     IF has_row IS NULL THEN
@@ -1270,25 +1856,47 @@ BEGIN
         id_col, id_col, vehicle_table, nearest_doc) INTO resolved_id;
 
     -- 4. Real Cognition.
-    rationale := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO rationale, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Detour classify: vehicle ' || COALESCE(resolved_id::text, '?') ||
         ' deviates from its baseline by cosine distance ' || nearest_dist ||
         ' (nearest fleet peer); its GPS trace has box-counting dimension ' || bc ||
         '. Classify the detour in one sentence.',
-        jsonb_build_object('trajectory_distance', nearest_dist, 'trace_complexity', bc)::text);
+        jsonb_build_object('trajectory_distance', nearest_dist, 'trace_complexity', bc)::text) AS r;
 
     -- 5. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_detour_classify', jsonb_build_object(
             'nearest_fleet_id', resolved_id, 'trajectory_distance', nearest_dist,
             'trace_complexity', bc, 'rationale', rationale));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT resolved_id, nearest_dist, bc, rationale;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT resolved_id, nearest_dist, bc, rationale, reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1299,9 +1907,14 @@ COMMENT ON FUNCTION fractal_agent_detour_classify(text, text, float8[], float8[]
   'trace complexity, resolves the nearest fleet peer''s doc_id to the named '
   'vehicle id (id_col) via a ctid-row_number mapping, and calls fractal_reason '
   'to classify the detour. Returns (nearest_fleet_id, trajectory_distance, '
-  'trace_complexity, rationale). Raises a clean ERROR if the vehicle table is '
+  'trace_complexity, rationale, reasoning_step_failed). Raises a clean ERROR '
+  'if the vehicle table is '
   'empty. id_col must be bigint-castable. Generalizes the fleet-logistics '
-  'demo''s trajectory + boxcount + reason sections.';
+  'demo''s trajectory + boxcount + reason sections. '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine M: fractal_agent_track_anomaly
@@ -1320,15 +1933,22 @@ CREATE FUNCTION fractal_agent_track_anomaly(
     heading_series float8[],
     k              int   DEFAULT 5,
     id_col         text  DEFAULT 'id'
-) RETURNS TABLE(nearest_fleet_id bigint, trajectory_distance float8, dfa_exponent float8, rationale text)
+) RETURNS TABLE(nearest_fleet_id bigint, trajectory_distance float8, dfa_exponent float8, rationale text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     nearest_doc  int8;
     nearest_dist float8;
     resolved_id  bigint;
     dfa          float8;
     rationale    text;
     has_row      int4;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -1338,7 +1958,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -1347,6 +1975,12 @@ BEGIN
         true);
     IF track_table IS NULL OR emb_col IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_track_anomaly: identifier arguments must not be NULL';
+    END IF;
+    -- A NULL input vector is an argument error (22023, invalid_parameter_value)
+    -- reported here rather than as a low-level data error in the vector math.
+    IF baseline_vec IS NULL OR current_vec IS NULL OR heading_series IS NULL THEN
+        RAISE EXCEPTION 'fractal_agent_track_anomaly: baseline_vec, current_vec, and heading_series must not be NULL'
+            USING ERRCODE = 'invalid_parameter_value';
     END IF;
     EXECUTE format('SELECT 1 FROM %I LIMIT 1', track_table) INTO has_row;
     IF has_row IS NULL THEN
@@ -1370,25 +2004,47 @@ BEGIN
         id_col, id_col, track_table, nearest_doc) INTO resolved_id;
 
     -- 4. Real Cognition.
-    rationale := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO rationale, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Track anomaly: vessel/host ' || COALESCE(resolved_id::text, '?') ||
         ' deviates from baseline by cosine distance ' || nearest_dist ||
         '; its heading-change series has DFA exponent ' || dfa ||
         ' (dfa=-1 means insufficient window). Triage the track in one sentence.',
-        jsonb_build_object('trajectory_distance', nearest_dist, 'dfa_exponent', dfa)::text);
+        jsonb_build_object('trajectory_distance', nearest_dist, 'dfa_exponent', dfa)::text) AS r;
 
     -- 5. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_track_anomaly', jsonb_build_object(
             'nearest_fleet_id', resolved_id, 'trajectory_distance', nearest_dist,
             'dfa_exponent', dfa, 'rationale', rationale));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT resolved_id, nearest_dist, dfa, rationale;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT resolved_id, nearest_dist, dfa, rationale, reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1399,10 +2055,15 @@ COMMENT ON FUNCTION fractal_agent_track_anomaly(text, text, float8[], float8[], 
   'long-range-correlation exponent, resolves the nearest fleet peer''s doc_id '
   'to the named track id (id_col) via a ctid-row_number mapping, and calls '
   'fractal_reason to triage. Returns (nearest_fleet_id, trajectory_distance, '
-  'dfa_exponent, rationale). dfa_exponent may be -1 (insufficient window) -- '
+  'dfa_exponent, rationale, reasoning_step_failed). dfa_exponent may be -1 '
+  '(insufficient window) -- '
   'passed through. Raises a clean ERROR if the track table is empty. id_col '
   'must be bigint-castable. Generalizes the maritime-defense and cybersecurity '
-  'demo sections.';
+  'demo sections. '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine N: fractal_agent_network_coverage_alert
@@ -1420,9 +2081,14 @@ CREATE FUNCTION fractal_agent_network_coverage_alert(
     drift_win        int   DEFAULT 48,
     drift_threshold  float8 DEFAULT 0.5,
     context          text  DEFAULT '{}'
-) RETURNS TABLE(morph_dimension float8, lacunarity float8, drift_detected boolean, rationale text)
+) RETURNS TABLE(morph_dimension float8, lacunarity float8, drift_detected boolean, rationale text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     morph     jsonb;
     drift     jsonb;
     md        float8;
@@ -1430,6 +2096,8 @@ DECLARE
     dv        float8;
     dd        boolean;
     rationale text;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -1439,7 +2107,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -1449,6 +2125,8 @@ BEGIN
     IF point_cloud IS NULL OR drift_series IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_network_coverage_alert: point_cloud and drift_series are required';
     END IF;
+    -- A NULL trailing optional parameter falls back to its documented default.
+    drift_threshold := COALESCE(drift_threshold, 0.5);
 
     -- 1. Real Analytics: spatial coverage morphology.
     morph := fractal_morphological_complexity(point_cloud, boxcount_dim);
@@ -1464,25 +2142,47 @@ BEGIN
     dd := abs(dv) > drift_threshold;
 
     -- 3. Real Cognition.
-    rationale := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO rationale, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Network coverage alert: the sensor grid has morphological dimension ' || md ||
         ' and lacunarity ' || lac || '; the telemetry drift is ' || dv ||
         ' (drift_detected=' || dd || ', threshold ' || drift_threshold || '). ' ||
         'Issue the coverage alert in one sentence.',
-        context);
+        context) AS r;
 
     -- 4. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_network_coverage_alert', jsonb_build_object(
             'morph_dimension', md, 'lacunarity', lac,
             'drift_detected', dd, 'rationale', rationale));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT md, lac, dd, rationale;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT md, lac, dd, rationale, reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1493,10 +2193,15 @@ COMMENT ON FUNCTION fractal_agent_network_coverage_alert(float8[], float8[], int
   'telemetry regime-change drift (the drift field is recent_alpha - '
   'baseline_alpha, a signed numeric; drift_detected = |drift| > '
   'drift_threshold, default 0.5), and calls fractal_reason to synthesize the '
-  'alert. Returns (morph_dimension, lacunarity, drift_detected, rationale). '
+  'alert. Returns (morph_dimension, lacunarity, drift_detected, rationale, '
+  'reasoning_step_failed). '
   'Raises a clean ERROR if point_cloud or drift_series is NULL. No table args '
   '-- pass the point cloud and drift series directly. Generalizes the '
-  'smart-cities demo''s morphological + drift + reason sections.';
+  'smart-cities demo''s morphological + drift + reason sections. '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine O: fractal_agent_regime_triage
@@ -1513,9 +2218,14 @@ CREATE FUNCTION fractal_agent_regime_triage(
     win              int   DEFAULT 64,
     drift_threshold  float8 DEFAULT 0.5,
     context          text  DEFAULT '{}'
-) RETURNS TABLE(dfa_exponent float8, drift_detected boolean, recent_alpha float8, baseline_alpha float8, rationale text)
+) RETURNS TABLE(dfa_exponent float8, drift_detected boolean, recent_alpha float8, baseline_alpha float8, rationale text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     dfa       float8;
     drift     jsonb;
     dv        float8;
@@ -1523,6 +2233,8 @@ DECLARE
     ra        float8;
     ba        float8;
     rationale text;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -1532,7 +2244,15 @@ BEGIN
     -- names passed as args and interpolated via %I still resolve. Resolved
     -- at runtime (not @extschema:fractalsql@, which is PG16+ only) to keep
     -- this extension portable across PG14-18. set_config(..., true) is
-    -- transaction-local, so it reverts at the call's transaction end.
+    -- transaction-local, so the pin does not outlive the call: the
+    -- caller's own search_path is restored explicitly before the engine
+    -- returns, and by this function's EXCEPTION handler on the error
+    -- path.
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -1542,6 +2262,9 @@ BEGIN
     IF series IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_regime_triage: series is required';
     END IF;
+    -- A NULL trailing optional parameter falls back to its documented default
+    -- (PostgreSQL applies a DEFAULT only to an omitted argument).
+    drift_threshold := COALESCE(drift_threshold, 0.5);
 
     -- 1. Real Analytics: DFA long-range-correlation exponent.
     dfa := fractal_dimension_dfa(series);
@@ -1555,23 +2278,45 @@ BEGIN
     ba := COALESCE((drift->>'baseline_alpha')::float8, 0.0);
 
     -- 3. Real Cognition.
-    rationale := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO rationale, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Regime triage: the series has DFA exponent ' || dfa ||
         ' and drift ' || dv || ' (drift_detected=' || dd || ', recent_alpha=' || ra ||
         ', baseline_alpha=' || ba || '). Triage the regime change in one sentence.',
-        context);
+        context) AS r;
 
     -- 4. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_regime_triage', jsonb_build_object(
             'dfa_exponent', dfa, 'drift_detected', dd, 'drift', dv, 'rationale', rationale));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
-    RETURN QUERY SELECT dfa, dd, ra, ba, rationale;
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    RETURN QUERY SELECT dfa, dd, ra, ba, rationale, reasoning_err;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1582,11 +2327,16 @@ COMMENT ON FUNCTION fractal_agent_regime_triage(float8[], int, float8, text) IS
   'baseline_alpha, a signed numeric; drift_detected = |drift| > '
   'drift_threshold, default 0.5) + recent/baseline alphas, then calls '
   'fractal_reason to synthesize the triage. Returns (dfa_exponent, '
-  'drift_detected, recent_alpha, baseline_alpha, rationale). The array-in shape '
+  'drift_detected, recent_alpha, baseline_alpha, rationale, '
+  'reasoning_step_failed). The array-in shape '
   'fits any single series (no per-row time/metric table, unlike '
   'fractal_agent_anomaly_triage). dfa_exponent may be -1 (insufficient window). '
   'Raises a clean ERROR if series is NULL. Generalizes the smart-cities, '
-  'quant-finance, and cybersecurity demos'' dfa + drift sections.';
+  'quant-finance, and cybersecurity demos'' dfa + drift sections. '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';
 
 -- =====================================================================
 -- Engine P: fractal_agent_diverse_portfolios
@@ -1606,18 +2356,35 @@ CREATE FUNCTION fractal_agent_diverse_portfolios(
     seed              bigint DEFAULT NULL,
     context           text   DEFAULT '{}',
     objective_mode    text   DEFAULT 'sharpe'
-) RETURNS TABLE(candidate_id int, sharpe float8, weights jsonb, rationale text)
+) RETURNS TABLE(candidate_id int, sharpe float8, weights jsonb, rationale text, reasoning_step_failed text)
 AS $$
 DECLARE
+    -- The caller's own search_path, saved before this engine pins the
+    -- FractalSQL schema ahead of it. The pin is transaction-scoped, so
+    -- without an explicit restore the caller would keep running with a
+    -- mutated search_path for the rest of the transaction.
+    v_caller_search_path text;
     opt       jsonb;
     n_found   int;
     rationale text;
+    reasoning_failed boolean;
+    reasoning_err    text;
 BEGIN
     IF objective_mode NOT IN ('sharpe', 'pareto') THEN
         RAISE EXCEPTION 'fractal_agent_diverse_portfolios: objective_mode must be '
             '''sharpe'' or ''pareto'' (got %)', objective_mode;
     END IF;
+    -- The trailing optional numeric parameters fall back to their documented
+    -- defaults when the caller passes NULL.
+    n_restarts := COALESCE(n_restarts, 8);
+    overlap_threshold := COALESCE(overlap_threshold, 0.15);
+    quality_frac := COALESCE(quality_frac, 0.90);
 
+    -- Remember the caller's search_path: the pin below is transaction-scoped
+    -- (set_config(..., true)), so it is restored again before this engine
+    -- returns -- and, on the error path, by this function's own EXCEPTION
+    -- handler (whose subtransaction rollback already undoes the pin).
+    v_caller_search_path := pg_catalog.current_setting('search_path');
     PERFORM pg_catalog.set_config('search_path',
         COALESCE((SELECT e.extnamespace::regnamespace::text
                     FROM pg_catalog.pg_extension e
@@ -1639,32 +2406,46 @@ BEGIN
         END IF;
 
         -- 2. Real Cognition: one rationale covering the front's return/risk tradeoffs.
-        rationale := fractal_reason(
+        SELECT r.result, r.failed, r.err
+          INTO rationale, reasoning_failed, reasoning_err
+          FROM _fractalsql_agents_reason_ex(
             'Found ' || n_found || ' Pareto-optimal (non-dominated return-vs-risk) '
             'portfolios: ' ||
             (SELECT string_agg('return=' || (c->>'return') || ' risk=' || (c->>'risk'), '; ')
                FROM jsonb_array_elements(opt->'candidates') c) ||
             '. Summarize in one paragraph the return/risk tradeoffs a portfolio '
             'manager should weigh between these options.',
-            context);
+            context) AS r;
 
         -- 3. Best-effort audit-chain provenance -- enterprise tier only;
         -- must not break this agent for community users.
+        -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+        -- failure must never abort an engine whose data half is already
+        -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+        -- still propagates.
         BEGIN
             PERFORM fractal_audit_log('agent_diverse_portfolios', jsonb_build_object(
                 'objective_mode', objective_mode, 'n_found', n_found,
                 'cardinality', cardinality, 'rationale', rationale));
         EXCEPTION
-            WHEN object_not_in_prerequisite_state THEN
+            WHEN SQLSTATE '57014' THEN
+                -- A cancelled query is not an audit failure: let it propagate.
+                RAISE;
+            WHEN OTHERS THEN
+                -- Provenance logging must never break the engine's core result.
                 NULL;
         END;
 
         -- weights carries {weights, return, risk} in this mode --
         -- machine-queryable return/risk per row without a second call.
+        -- Put the caller's search_path back before handing the row over: the
+        -- pin above is transaction-scoped and must not outlive this call.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
         RETURN QUERY
         SELECT (row_number() OVER () - 1)::int, (c->>'sharpe')::float8,
                jsonb_build_object('weights', c->'weights', 'return', c->'return', 'risk', c->'risk'),
-               rationale
+               rationale,
+               reasoning_err
         FROM jsonb_array_elements(opt->'candidates') c;
         RETURN;
     END IF;
@@ -1678,27 +2459,50 @@ BEGIN
     END IF;
 
     -- 2. Real Cognition: one rationale covering all candidates' tradeoffs.
-    rationale := fractal_reason(
+    SELECT r.result, r.failed, r.err
+      INTO rationale, reasoning_failed, reasoning_err
+      FROM _fractalsql_agents_reason_ex(
         'Found ' || n_found || ' structurally distinct portfolios with Sharpe ratios: ' ||
         (SELECT string_agg(c->>'sharpe', ', ') FROM jsonb_array_elements(opt->'candidates') c) ||
         '. Summarize in one paragraph the strategic tradeoffs a portfolio '
         'manager should weigh between these options.',
-        context);
+        context) AS r;
 
     -- 3. Best-effort audit-chain provenance -- enterprise tier only;
     -- must not break this agent for community users.
+    -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
+    -- failure must never abort an engine whose data half is already
+    -- computed). Only a client-side query cancellation (SQLSTATE 57014)
+    -- still propagates.
     BEGIN
         PERFORM fractal_audit_log('agent_diverse_portfolios', jsonb_build_object(
             'objective_mode', objective_mode, 'n_found', n_found,
             'cardinality', cardinality, 'rationale', rationale));
     EXCEPTION
-        WHEN object_not_in_prerequisite_state THEN
+        WHEN SQLSTATE '57014' THEN
+            -- A cancelled query is not an audit failure: let it propagate.
+            RAISE;
+        WHEN OTHERS THEN
+            -- Provenance logging must never break the engine's core result.
             NULL;
     END;
 
+    -- Put the caller's search_path back before handing the row over: the
+    -- pin above is transaction-scoped and must not outlive this call.
+    PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
     RETURN QUERY
-    SELECT (row_number() OVER () - 1)::int, (c->>'sharpe')::float8, c->'weights', rationale
+    SELECT (row_number() OVER () - 1)::int, (c->>'sharpe')::float8, c->'weights', rationale,
+           reasoning_err
     FROM jsonb_array_elements(opt->'candidates') c;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Restore the caller's search_path and re-raise the original error
+        -- unchanged. A cancelled query (57014) is not caught by WHEN OTHERS
+        -- and still propagates.
+        PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+        RAISE;
+
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1714,8 +2518,13 @@ COMMENT ON FUNCTION fractal_agent_diverse_portfolios(float8[], float8[], int, in
   '{weights, return, risk} so per-row return/risk are machine-queryable without '
   'a second call. Either mode then calls fractal_reason once to summarize the '
   'tradeoffs across all candidates. Returns one row per candidate: '
-  '(candidate_id, sharpe, weights, rationale) -- rationale repeats per row (one '
+  '(candidate_id, sharpe, weights, rationale, reasoning_step_failed) -- '
+  'rationale repeats per row (one '
   'reasoning call covering all candidates). cov must be a flattened row-major '
   'matrix. Errors with ''enterprise tier not loaded'' until '
   'fractalsql.enterprise_lib is set. Companion to fractal_agent_allocate '
-  '(Engine B), which returns one portfolio.';
+  '(Engine B), which returns one portfolio. '
+  'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '
+  'the LLM column is NULL and the trailing reasoning_step_failed column '
+  'carries the error text; a setup mistake (no reasoning plugin loaded) '
+  'always raises. ';

@@ -16,6 +16,17 @@
 
 set -euo pipefail
 
+# Index-counted arg walk: $1 is the arch, and everything after it must be
+# nothing (there is no --profile-style option in this build; docker build
+# inputs flow through env vars: DIST_DIR / DOCKERFILE). Silently ignoring
+# trailing junk would accept e.g. `./build.sh amd64 --profile=modern` and
+# surprise the user -- reject it (the sibling column's same-cause fix).
+if [[ $# -gt 1 ]]; then
+    echo "unexpected arguments after arch: $*" >&2
+    echo "usage: ./build.sh [amd64|arm64]" >&2
+    exit 2
+fi
+
 ARCH="${1:-amd64}"
 case "${ARCH}" in
     amd64|arm64) ;;

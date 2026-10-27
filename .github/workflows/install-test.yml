@@ -36,7 +36,12 @@ jobs:
       - name: Install fpm
         run: |
           sudo apt-get update
-          sudo apt-get install -y ruby ruby-dev build-essential rpm
+          # libpq-dev + libssl-dev: package.sh builds the bundled MCP
+          # server (mcp/Makefile, pkg-config libpq + -lssl -lcrypto) on
+          # the packaging host before fpm stages it into each package.
+          # pkg-config is needed to resolve both.
+          sudo apt-get install -y ruby ruby-dev build-essential rpm \
+              libpq-dev libssl-dev pkg-config
           sudo gem install --no-document fpm
       - name: Package per-major .deb + .rpm
         run: |
@@ -79,7 +84,7 @@ jobs:
           install -d /etc/apt/keyrings
           wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
               | gpg --dearmor > /etc/apt/keyrings/pgdg.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt \$(lsb_release -cs)-pgdg main" \
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt \$(lsb_release -cs)-pgdg main" \
               > /etc/apt/sources.list.d/pgdg.list
           apt-get update -qq
           apt-get install -qq -y postgresql-\${PG_VER} postgresql-client-\${PG_VER}
@@ -109,8 +114,20 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.19"
+          test "\$VERSION" = "2.0.20"
           echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
+
+          # --- Shipped MCP server verification ---------------------------
+          # package.sh builds and bundles fractalsql-postgresql-mcp with
+          # every per-major package (PG libdir, like the extension .so).
+          MCP=/usr/lib/postgresql/\${PG_VER}/lib/fractalsql-postgresql-mcp
+          test -f "\${MCP}" \
+              || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
+          MCP_V=\$("\${MCP}" --version)
+          echo "mcp=\${MCP} version=\${MCP_V}"
+          test "\${MCP_V}" = "2.0.20" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.20"; exit 1; }
+          echo "ok: shipped MCP server --version (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
           apt-get install -qq -y python3
@@ -223,7 +240,7 @@ jobs:
           install -d /etc/apt/keyrings
           wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
               | gpg --dearmor > /etc/apt/keyrings/pgdg.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt \$(lsb_release -cs)-pgdg main" \
+          echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt \$(lsb_release -cs)-pgdg main" \
               > /etc/apt/sources.list.d/pgdg.list
           apt-get update -qq
           apt-get install -qq -y postgresql-\${PG_VER} postgresql-client-\${PG_VER}
@@ -237,6 +254,15 @@ jobs:
           # so the script's Phase A detects it and Phase B (--no-install)
           # is never exercised, same as anyone who ran apt install first.
           apt-get install -qq -y ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.deb
+
+          # Shipped MCP server verification (same check debian-install runs).
+          MCP=/usr/lib/postgresql/\${PG_VER}/lib/fractalsql-postgresql-mcp
+          test -f "\${MCP}" \
+              || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
+          MCP_V=\$("\${MCP}" --version)
+          echo "mcp version=\${MCP_V}"
+          test "\${MCP_V}" = "2.0.20" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.20"; exit 1; }
 
           chmod +x /work/scripts/easy_install.sh
           python3 /work/scripts/ci/mock_llm.py 18080 &
@@ -351,8 +377,18 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.19"
+          test "\$VERSION" = "2.0.20"
           echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
+
+          # --- Shipped MCP server verification ---------------------------
+          MCP=/usr/pgsql-\${PG_VER}/lib/fractalsql-postgresql-mcp
+          test -f "\${MCP}" \
+              || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
+          MCP_V=\$("\${MCP}" --version)
+          echo "mcp=\${MCP} version=\${MCP_V}"
+          test "\${MCP_V}" = "2.0.20" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.20"; exit 1; }
+          echo "ok: shipped MCP server --version (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
           dnf install -qy python3
@@ -422,7 +458,10 @@ jobs:
       - name: Install PostgreSQL 17 (Homebrew)
         run: |
           set -euo pipefail
-          brew install postgresql@17
+          # openssl@3: package-darwin.sh builds the bundled MCP server
+          # (mcp/Makefile links -lssl -lcrypto) when it can resolve
+          # OpenSSL; without it the tarball ships MCP-less.
+          brew install postgresql@17 openssl@3
           echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
 
       - name: Build + package the darwin tarball (arm64 native)
@@ -443,6 +482,14 @@ jobs:
           # File landed where CREATE EXTENSION looks.
           test -f "$(pg_config --sharedir)/extension/fractalsql.control"
 
+          # Shipped MCP server verification: the tarball bundles mcp/
+          # (binary + README + locks + manifest) next to install.sh.
+          MCP_V=$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --version)
+          echo "mcp version=${MCP_V}"
+          test "${MCP_V}" = "2.0.20" \
+              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.20"; exit 1; }
+          echo "ok: shipped MCP server --version (macOS)"
+
       - name: Start PostgreSQL
         run: |
           set -euo pipefail
@@ -460,7 +507,7 @@ jobs:
           VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.19"
+          test "${VERSION}" = "2.0.20"
 
           # Search works with no further config.
           psql -d postgres -Atc \
@@ -507,7 +554,9 @@ jobs:
       - name: Install PostgreSQL 17 (Homebrew) and start it
         run: |
           set -euo pipefail
-          brew install postgresql@17
+          # openssl@3: package-darwin.sh builds the bundled MCP server
+          # (same dependency the macos-install job above carries).
+          brew install postgresql@17 openssl@3
           echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
           brew services start postgresql@17
           for i in $(seq 1 30); do
@@ -526,6 +575,10 @@ jobs:
           DIR=$(basename "${TARBALL}" .tar.gz)
           PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config" /tmp/"${DIR}"/install.sh
           test -f "$(pg_config --sharedir)/extension/fractalsql.control"
+          # Shipped MCP server verification (same check macos-install runs).
+          MCP_V=$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --version)
+          test "${MCP_V}" = "2.0.20" \
+              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.20"; exit 1; }
 
       - name: Run easy_install.sh against a mock LLM
         run: |
@@ -674,15 +727,24 @@ jobs:
           # an opaque "didn't reach the mock reply".
           $mockProc = Start-Process python -ArgumentList 'scripts\ci\mock_llm.py','18080' -WindowStyle Hidden -PassThru `
               -RedirectStandardOutput mock-stdout.txt -RedirectStandardError mock-stderr.txt
-          Start-Sleep -Seconds 2
+          # Poll for the listener (up to ~30 s) instead of a fixed sleep and a
+          # single check: Python can take longer than 2 s to start and bind on
+          # a cold Windows runner, which failed this step intermittently.
+          # Stop early if the process dies so the cause is still reported.
+          $listener = $null
+          for ($i = 0; $i -lt 150; $i++) {
+              if ($mockProc.HasExited) { break }
+              $listener = Get-NetTCPConnection -LocalPort 18080 -State Listen -ErrorAction SilentlyContinue
+              if ($listener) { break }
+              Start-Sleep -Milliseconds 200
+          }
           if ($mockProc.HasExited) {
               Write-Host "FATAL: mock_llm.py exited immediately with code $($mockProc.ExitCode):"
               Get-Content mock-stderr.txt -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
               exit 1
           }
-          $listener = Get-NetTCPConnection -LocalPort 18080 -State Listen -ErrorAction SilentlyContinue
           if (-not $listener) {
-              Write-Host "FATAL: mock LLM not listening on 127.0.0.1:18080 (python alive but never bound the port):"
+              Write-Host "FATAL: mock LLM not listening on 127.0.0.1:18080 after 30 s (python alive but never bound the port):"
               Get-Content mock-stderr.txt -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
               exit 1
           }

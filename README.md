@@ -35,9 +35,10 @@ and hands off to the next. You don't need to read everything; follow the path.
 
 1. **What is this and why do I care?**: you are here. Sovereign Data Intelligence, in one page.
 2. **How do I get the extension running in 60 seconds?** → [Getting Started](docs/getting-started.md) (Docker `compose up` or the Windows `.msi`, then your first Scout search).
-3. **How do I apply this to my industry?** → [Starter Kits](docs/starter-kits.md): runnable, industry-specific SQL scripts (SOC, FinTech, MedTech, Fleet, Smart-Cities, …).
+3. **How do I apply this to my industry?** → [Starter Kits](docs/starter-kits.md): runnable, industry-specific SQL scripts (SOC, FinTech, MedTech, Fleet, Smart-Cities, automotive, aerospace, telecom, climate tech, RF, …).
 4. **How does a specific agent work and what are its inputs?** → [Agent Recipes](docs/api-agency.md): the sixteen installable agents, each as a recipe.
-5. **How do I build a proprietary agent that isn't in the box?** → [Composition Guide](docs/composition-guide.md): the design patterns behind the recipes.
+5. **How do I use this from my AI client instead of SQL?** → [MCP Plugin](docs/mcp-plugin.md): the `fractalsql-postgresql-mcp` server exposes the whole function surface as MCP tools for Claude Desktop, Cursor, Windsurf, Claude Code, LangChain, LlamaIndex, CrewAI, or any MCP client.
+6. **How do I build a proprietary agent that isn't in the box?** → [Composition Guide](docs/composition-guide.md): the design patterns behind the recipes.
 
 > New here? Step 2 is a one-command demo. Step 3 drops you into a vertical that
 > looks like your problem. Step 4 is the reference you'll keep coming back to.
@@ -54,6 +55,11 @@ Depending on your role, you'll want to start in different places:
   → See the **[Safety & Governance guide](docs/text-to-sql-setup.md#secure-it-authorization-vs-correctness)**.
 - **Product Developer**: You want to build agentic features quickly.
   → Run the **[Docker Demo](docs/docker-demo.md)**, then pick a **[Starter Kit](docs/starter-kits.md)**.
+- **Tool Builder / Platform Engineer**: You want Claude Desktop, Cursor, Windsurf,
+  an agent framework (LangChain, LlamaIndex, CrewAI), or your own runtime
+  speaking to the database directly.
+  → Serve the **[MCP Plugin](docs/mcp-plugin.md)**; the server-side details live in
+  **[mcp/README.md](mcp/README.md)**.
 
 ---
 
@@ -72,6 +78,15 @@ ready to build your own, the [Composition Guide](docs/composition-guide.md)
 walks through the patterns the shipped agents use. See the
 **[Agent Blueprint Gallery](demo/README.md#industry-vertical-demos)** for full
 SOC, FinTech, and MedTech reference implementations.
+
+Everything above ships as a ready-made tool surface too: the bundled
+`fractalsql-postgresql-mcp` MCP server turns the function catalog into 82 typed
+tools (the same surface every release verifies against committed integrity
+locks). It speaks standard MCP over stdio or HTTP, so it drops into any client
+or framework that does the same -- Claude Desktop, Cursor, Windsurf, Claude
+Code, LangChain, LlamaIndex, CrewAI, the Vercel AI SDK. See
+[MCP Plugin](docs/mcp-plugin.md) for the client-facing quickstart and
+[mcp/README.md](mcp/README.md) for building and deploying the server binary.
 
 ---
 
@@ -144,5 +159,6 @@ For enterprise editions, licensing, and support, contact
 - **[Text-to-SQL Setup](docs/text-to-sql-setup.md)**: pipeline details and the security model.
 - **[Vectorizer Setup](docs/vectorizer-setup.md)**: automatic embedding pipelines.
 - **[Docker Demo](docs/docker-demo.md)**: a one-command end-to-end demo.
+- **[MCP Plugin](docs/mcp-plugin.md)**: use FractalSQL from Claude Desktop, Cursor, and other MCP clients.
 - **[Agent Blueprint Gallery](demo/README.md)**: the vertical demos and reference agents.
 - **[Enterprise Tier](docs/enterprise.md)**: the tamper-evident decision ledger (CISO/audit).

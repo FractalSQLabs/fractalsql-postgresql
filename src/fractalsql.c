@@ -49,6 +49,11 @@
  *   fractal_edition() -> text
  *   fractal_version() -> text
  *
+ *   fractalsql_set_config(key text, value text) -> text
+ *   fractalsql_get_config(key text) -> text
+ *     Typed, per-key-validated access to the fractalsql.* GUCs
+ *     (the SQL equivalent of the SQLite edition's fractalsql_set()/fractalsql_get()).
+ *
  * Reasoning plugin wiring (optional):
  *   Set in postgresql.conf (restart required):
  *     fractalsql.reasoning_plugin = '/abs/path/fractalsql-reasoning-http.so'
@@ -86,8 +91,8 @@
  * functions failed "could not find function ... in file ...dll" only
  * on PG14/15 Windows builds, never on PG16+. Redefine the macro to
  * match PG16's own version for exactly this gap (Windows, PG < 16) --
- * this is upstream Postgres's own fix, just backported here since we
- * can't edit an older major's installed system header. Deliberately
+ * this matches PostgreSQL 16's own definition, applied here because an
+ * older major's installed header cannot be edited. Deliberately
  * NOT decorating the function definitions themselves (below): a prior
  * declaration with PGDLLEXPORT is sufficient on MSVC, matching how
  * Postgres's own core functions rely solely on this same macro.
@@ -122,6 +127,7 @@ extern int no_such_variable
 #include "access/xact.h"
 
 #include <ctype.h>
+#include <errno.h>            /* errno/ERANGE -- the config int parser's overflow check */
 #include <stdlib.h>
 #include <unistd.h>
 #include <limits.h>           /* LONG_MAX -- ent_file_size_win32's bounds check */
@@ -158,6 +164,15 @@ extern int no_such_variable
 #include "nodes/nodes.h"       /* nodeTag, T_SelectStmt, ... */
 #include "parser/analyze.h"   /* parse_analyze_fixedparams, Query.hasModifyingCTE */
 
+#ifdef FSQL_FAULT_INJECT
+#include "fsql_fault.h"        /* test builds only: SPI/core call fault injection */
+#else
+#define FSQL_SRF_NO_MATERIALIZE(rsinfo) \
+    ((rsinfo) == NULL || !((rsinfo)->allowedModes & SFRM_Materialize))
+#define FSQL_RESULT_NOT_COMPOSITE(fcinfo, tupdesc) \
+    (get_call_result_type((fcinfo), NULL, (tupdesc)) != TYPEFUNC_COMPOSITE)
+#endif
+
 #ifndef INT8PASSBYVAL
 #define INT8PASSBYVAL true
 #endif
@@ -179,7 +194,7 @@ static T2SAllowedStmts t2s_allowed_stmts_mode(void);
 static char *fractal_text_to_sql_internal(const char *question, ArrayType *table_names, char *feedback);
 
 #define FSQL_EDITION "Community"
-#define FSQL_VERSION "2.0.19"
+#define FSQL_VERSION "2.0.20"
 
 /* B4-extended (H3) — supply-side DoS guards.
  *
@@ -300,13 +315,8 @@ PG_MODULE_MAGIC;
  * in a -shared object automatically. PG_FUNCTION_INFO_V1 bakes this in
  * for its own pg_finfo_* symbols, but _PG_init/_PG_fini are plain
  * user-declared hooks with no such macro, so they need it explicitly.
- * Confirmed on real CI hardware (2026-08): without this, PG16-18's
- * headers happened to make _PG_init exported anyway (Postgres server
- * version differences upstream, not anything in this file), but PG14/
- * 15 did not -- dumpbin /exports showed all 71 pg_finfo_* and
- * Pg_magic_func symbols present, and _PG_init/_PG_fini absent. Explicit annotation
- * here makes this correct on every PG major, not just the ones whose
- * headers happened to cover for its absence.
+ * PG16-18 headers already export _PG_init; PG14/15 did not, so the explicit
+ * annotation keeps this correct on every supported major.
  */
 PGDLLEXPORT void _PG_init(void);
 PGDLLEXPORT void _PG_fini(void);
@@ -380,6 +390,23 @@ static int   g_t2s_max_attempts     = 2;
 static char *g_t2s_allowed_stmts    = NULL;   /* "select" | "select_insert_update" */
 static bool  g_t2s_use_review       = false;
 
+/* agent_partial_reasoning_fail (per-connection, default off). When on, an
+ * agent's failure AT THE REASONING STEP no longer raises: fractal_search_agent
+ * and fractal_rag_agent return their computed data half (source_doc_ids /
+ * execution_time_ms) with the answer text carrying a "reasoning_step_failed"
+ * marker plus the plugin's own error detail, and the PL/pgSQL engines' shared
+ * _fractalsql_agents_reason() step returns the same marker into the result's
+ * summary/rationale column. Everything computed before the LLM call (embed,
+ * Scout search, cohort/drift/RAG analytics) is preserved; everything the
+ * reasoning call would have produced is gone, and the result says so.
+ * fractal_reason/fractal_text_to_sql/fractal_sql_agent keep raising even with
+ * the flag on -- the raise IS their result (or preempts their data half), the
+ * same convention the sqlite engine's da_reason/agents_rag_pipeline port
+ * established. PGC_USERSET so any session can SET it per-connection (the MCP
+ * server turns it on for its sessions; an operator can ALTER SYSTEM it for a
+ * persistent default). */
+static bool  g_agent_partial_reasoning_fail = false;
+
 /* ------------------------------------------------------------------ */
 /* Enterprise tier (QTL ledger + CISO audit) -- runtime-gated          */
 /* ------------------------------------------------------------------ */
@@ -417,6 +444,12 @@ static bool  g_enterprise_require_signature = false;
 static void *g_ent_handle       = NULL;   /* dlopen handle, NULL until loaded */
 static bool  g_ent_attempted    = false;  /* tried this backend (any outcome) */
 static bool  g_ent_loaded       = false;  /* dlopen + all 8 symbols resolved */
+/* The path the cached verdict (loaded / failed) was reached FOR, in
+ * TopMemoryContext so it survives the per-call memory contexts the
+ * attempt ran in. A verdict belongs to a path: re-pointing the GUC
+ * asks a different question, and the answer must not be silently the
+ * old one -- see ensure_enterprise_lib(). */
+static char *g_ent_path         = NULL;
 
 typedef int  (*ent_ledger_void_fn)(fsql_ctx *ctx);
 typedef int  (*ent_ledger_count_fn)(const fsql_ctx *ctx, size_t *out);
@@ -467,9 +500,53 @@ static ent_portfolio_multimodal_ex_fn g_ent_optimize_portfolio_multimodal_ex;
  * "not in this enterprise build". */
 static ent_portfolio_multimodal_pareto_fn g_ent_optimize_portfolio_multimodal_pareto;
 
+/* Check hook for fractalsql.text_to_sql_allowed_statements.
+ *
+ * The value is an ENUM, not free text: fractal_text_to_sql() compares it
+ * against "select_insert_update" and treats EVERYTHING ELSE as "select"
+ * (see t2s_allowed_stmts_mode() below). A misspelling therefore did not
+ * fail -- it silently degraded the feature to select-only while the
+ * operator believed the higher-risk mode was armed. Validating at set
+ * time makes the typo fail closed instead.
+ *
+ * The check hook runs for EVERY source (postgresql.conf at startup, an
+ * ALTER SYSTEM value at reload, a SET in a session), so the GUC can
+ * never hold a spelling the feature does not implement. PostgreSQL
+ * raises "invalid value for parameter ..." for a rejected value, and
+ * GUC_check_errdetail() attaches the allowed-value list to it -- that
+ * is the mechanism the core's own enum GUCs (e.g. synchronous_commit)
+ * use to say what the accepted spellings are.
+ *
+ * Deliberately NOT a check on fractalsql.enterprise_lib, whose
+ * post-load change is refused instead (see ensure_enterprise_lib()): a
+ * GUC check hook that REJECTS a value aborts the config reload of every
+ * backend that rejects it, and the postmaster re-reads the same file --
+ * an invalid value there is a server-wide failure, not a per-session
+ * one. */
+static bool
+check_t2s_allowed_statements(char **newval, void **extra, GucSource source)
+{
+    const char *v = *newval;
+
+    (void) extra;
+    (void) source;
+
+    if (v == NULL ||
+        strcmp(v, "select") == 0 ||
+        strcmp(v, "select_insert_update") == 0)
+        return true;
+
+    GUC_check_errdetail("Allowed values are \"select\" and "
+                        "\"select_insert_update\".");
+    return false;
+}
+
 void
 _PG_init(void)
 {
+#ifdef FSQL_FAULT_INJECT
+    fi_define_guc();
+#endif
     /* GUC context is PGC_SIGHUP so registration succeeds whether the
      * library is loaded via shared_preload_libraries (postmaster startup)
      * or on first use in a backend (CREATE EXTENSION / first SQL call).
@@ -517,7 +594,7 @@ _PG_init(void)
         &g_http_model,
         NULL,
         PGC_SIGHUP,
-        0, NULL, NULL, NULL);
+        GUC_SUPERUSER_ONLY, NULL, NULL, NULL);
 
     DefineCustomBoolVariable(
         "fractalsql.http_allow_plaintext",
@@ -558,7 +635,7 @@ _PG_init(void)
         &g_http_embed_model,
         NULL,
         PGC_SIGHUP,
-        0, NULL, NULL, NULL);
+        GUC_SUPERUSER_ONLY, NULL, NULL, NULL);
 
     DefineCustomStringVariable(
         "fractalsql.http_think",
@@ -572,7 +649,7 @@ _PG_init(void)
         &g_http_think,
         NULL,
         PGC_SIGHUP,
-        0, NULL, NULL, NULL);
+        GUC_SUPERUSER_ONLY, NULL, NULL, NULL);
 
     DefineCustomStringVariable(
         "fractalsql.http_think_provider",
@@ -588,7 +665,7 @@ _PG_init(void)
         &g_http_think_provider,
         NULL,
         PGC_SIGHUP,
-        0, NULL, NULL, NULL);
+        GUC_SUPERUSER_ONLY, NULL, NULL, NULL);
 
     DefineCustomStringVariable(
         "fractalsql.http_native_url",
@@ -601,7 +678,7 @@ _PG_init(void)
         &g_http_native_url,
         NULL,
         PGC_SIGHUP,
-        0, NULL, NULL, NULL);
+        GUC_SUPERUSER_ONLY, NULL, NULL, NULL);
 
     DefineCustomIntVariable(
         "fractalsql.http_num_ctx",
@@ -614,7 +691,7 @@ _PG_init(void)
         &g_http_num_ctx,
         0, 0, 1048576,
         PGC_SIGHUP,
-        0, NULL, NULL, NULL);
+        GUC_SUPERUSER_ONLY, NULL, NULL, NULL);
 
     DefineCustomIntVariable(
         "fractalsql.text_to_sql_max_attempts",
@@ -636,11 +713,14 @@ _PG_init(void)
         "materially higher risk -- table-scoped write grants stop an "
         "attacker touching the wrong table, they do not validate that a "
         "write is semantically correct. See docs/text-to-sql-setup.md "
-        "before enabling it.",
+        "before enabling it. Any other value is REJECTED at set time (the "
+        "GUC carries a check hook): the feature reads this as an enum, "
+        "so a typo used to degrade silently to select-only while the "
+        "operator believed the write-capable mode was armed.",
         &g_t2s_allowed_stmts,
         "select",
         PGC_SIGHUP,
-        0, NULL, NULL, NULL);
+        0, check_t2s_allowed_statements, NULL, NULL);
 
     DefineCustomBoolVariable(
         "fractalsql.text_to_sql_use_review",
@@ -653,6 +733,24 @@ _PG_init(void)
         &g_t2s_use_review,
         false,
         PGC_SIGHUP,
+        0, NULL, NULL, NULL);
+
+    DefineCustomBoolVariable(
+        "fractalsql.agent_partial_reasoning_fail",
+        "Fail agents partially instead of raising when the reasoning step fails.",
+        "When off (default) a failed LLM reasoning call raises, aborting the "
+        "whole agent like every other error. When on, the domain agents and "
+        "fractal_search_agent/fractal_rag_agent return their computed data "
+        "half with a 'reasoning_step_failed' marker (plus the plugin's own "
+        "error detail) in their summary/rationale/answer column instead -- "
+        "only the reasoning step is affected; embed/search/analytic failures "
+        "still raise, and fractal_reason/fractal_text_to_sql/fractal_sql_agent "
+        "keep raising (their raise IS their result). PGC_USERSET so any "
+        "session can SET it per-connection; the MCP server turns it on for "
+        "its own sessions (FSQL_MCP_AGENT_PARTIAL).",
+        &g_agent_partial_reasoning_fail,
+        false,
+        PGC_USERSET,
         0, NULL, NULL, NULL);
 
     DefineCustomStringVariable(
@@ -758,6 +856,11 @@ _PG_fini(void)
     }
     g_ent_attempted        = false;
     g_ent_loaded           = false;
+    if (g_ent_path)
+    {
+        pfree(g_ent_path);
+        g_ent_path = NULL;
+    }
     g_ent_ledger_flush      = NULL;
     g_ent_ledger_load       = NULL;
     g_ent_ledger_compact    = NULL;
@@ -839,13 +942,8 @@ typedef enum
  * tried and both fail identically) fail-fasts with STATUS_STACK_BUFFER_
  * OVERRUN inside its own internal invalid-parameter validation when called
  * from ent_verify_signature() in-process inside a real Postgres backend.
- * Root-caused via minidump forensics (gate 24, 2026-08-23): 100%
- * reproducible in that context, but never across five separate isolated
- * repros (standalone exe debug/release, LoadLibrary-loaded DLL, both
- * fread() and fread_s()) -- so whatever's wrong is inside the UCRT stdio
- * layer's state in this hosting context, not in the call sites or in our
- * logic. Read the two files via raw Win32 CreateFileA/ReadFile instead,
- * which shares no code path with CRT stdio at all. */
+ * The failure is specific to that hosting context, so the two files are read
+ * with raw Win32 CreateFileA/ReadFile instead, which bypasses CRT stdio. */
 #if defined(_WIN32) || defined(_MSC_VER)
 static bool
 ent_read_file_win32(const char *path, void *buf, size_t len)
@@ -1002,20 +1100,82 @@ ent_verify_signature(const char *so_path)
 }
 
 /* Lazily dlopen the enterprise core library and dlsym the eight
- * ledger/audit symbols. Cached per-backend (g_ent_attempted): a single
- * attempt, success or failure, sticks for the backend's life -- flip
- * the GUC or remove the file and start a new backend to re-evaluate.
- * Returns true when the surface is live. */
+ * ledger/audit symbols. Cached per-backend (g_ent_attempted): one
+ * attempt per PATH, and the verdict for that path sticks for the
+ * backend's life -- remove the file and start a new backend to
+ * re-evaluate it. Returns true when the surface is live.
+ *
+ * The cache is keyed by the PATH it was reached for (g_ent_path), which
+ * is what makes a mid-session re-point visible instead of silent:
+ *
+ *   - LOADED, then the GUC changes: REFUSED with a clear error. The
+ *     enterprise core is dlopen'd once per backend and its image is the
+ *     trust anchor (signature-verified, symbol-resolved) -- re-pointing
+ *     the GUC underneath an already-loaded session would swap the code
+ *     the session is running against. The refusal is raised at USE
+ *     time, not at assignment time, because the GUC is PGC_SIGHUP: a
+ *     value that arrives with a config reload cannot be rejected by a
+ *     per-GUC check hook without failing the reload of every backend
+ *     that has the library loaded (and the postmaster re-reads the same
+ *     file -- an invalid value there is a server-wide failure). The
+ *     operator gets the refusal where it matters: on the next
+ *     enterprise call, with the old and new paths named.
+ *   - FAILED, then the GUC changes: re-evaluated. Nothing is loaded, so
+ *     there is no trust anchor to protect, and the old verdict is about
+ *     a file that is no longer the one being pointed at (the operator
+ *     staged the .so, or fixed the path). The failure is still sticky
+ *     for the SAME path -- re-attempting a dlopen that just failed on
+ *     every call would turn a missing library into a busy loop. */
 static bool
 ensure_enterprise_lib(void)
 {
+    /* The GUC's current path, with "unset" normalized to NULL so it
+     * compares as a value of its own (the dormant state). */
+    const char *cur = (g_enterprise_lib != NULL && g_enterprise_lib[0] != '\0')
+                    ? g_enterprise_lib : NULL;
+    /* Re-pointed at a DIFFERENT library while one is loaded -- refused
+     * below. Unsetting the GUC is not a re-point: the loaded library
+     * stays in effect for the session either way, which is what the
+     * GUC's own documentation says ("reconnecting re-dormants it"). */
+    bool repointed = (cur != NULL && g_ent_path != NULL &&
+                      strcmp(cur, g_ent_path) != 0);
+    /* Any difference at all between the path the cached verdict was
+     * reached for and the path the GUC holds now -- including a path
+     * that was set after a dormant (unset) verdict, which the old
+     * code never re-evaluated. */
+    bool changed = (cur == NULL) ? (g_ent_path != NULL)
+                                 : (g_ent_path == NULL || strcmp(cur, g_ent_path) != 0);
+
     if (g_ent_loaded)
+    {
+        if (repointed)
+            ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg("fractalsql: fractalsql.enterprise_lib was changed "
+                            "from \"%s\" to \"%s\" after the enterprise library "
+                            "was loaded in this session",
+                            g_ent_path, cur),
+                     errhint("The enterprise core is dlopen'd once per backend "
+                             "and cannot be re-pointed underneath a session "
+                             "that already loaded it, so the loaded library "
+                             "(\"%s\") stays in effect. Start a new session to "
+                             "evaluate the new path.", g_ent_path)));
         return true;
-    if (g_ent_attempted)
+    }
+    if (g_ent_attempted && !changed)
         return false;
     g_ent_attempted = true;
 
-    if (g_enterprise_lib == NULL || g_enterprise_lib[0] == '\0')
+    /* Bind the verdict to the path it is reached for. TopMemoryContext:
+     * the value has to outlive the memory context this attempt runs
+     * in, and it is replaced (not accumulated) on a re-evaluation. */
+    if (g_ent_path != NULL)
+        pfree(g_ent_path);
+    g_ent_path = (cur != NULL)
+               ? MemoryContextStrdup(TopMemoryContext, cur)
+               : NULL;
+
+    if (cur == NULL)
         return false;
 
     ent_sig_result_t sig = ent_verify_signature(g_enterprise_lib);
@@ -1163,17 +1323,23 @@ ledger_ensure_table(void)
         "                WHERE tablename = 'fractalsql_ledger'),"
         "       EXISTS (SELECT 1 FROM information_schema.columns "
         "                WHERE table_name = 'fractalsql_ledger' "
-        "                  AND column_name = 'id')",
+        "                  AND column_name = 'id'),"
+        "       EXISTS (SELECT 1 FROM pg_catalog.pg_indexes "
+        "                WHERE indexname = 'fractalsql_ledger_kind_id_idx')"
+        ,
         true, 1);
     if (rc != SPI_OK_SELECT || SPI_processed == 0)
         return false;
 
     bool  isnull1;
     bool  isnull2;
+    bool  isnull3;
     Datum d_exists = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull1);
     Datum d_has_id = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull2);
+    Datum d_has_idx = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 3, &isnull3);
     bool  tbl_exists     = !isnull1 && DatumGetBool(d_exists);
     bool  has_new_schema = !isnull2 && DatumGetBool(d_has_id);
+    bool  idx_exists     = !isnull3 && DatumGetBool(d_has_idx);
 
     if (tbl_exists && !has_new_schema)
     {
@@ -1185,23 +1351,41 @@ ledger_ensure_table(void)
                         "preserve; starting a fresh chain")));
         if (SPI_execute("DROP TABLE fractalsql_ledger", false, 0) != SPI_OK_UTILITY)
             return false;
+        tbl_exists = false;
+        idx_exists = false;   /* the DROP cascades its index */
     }
 
-    return SPI_execute(
-        "CREATE TABLE IF NOT EXISTS fractalsql_ledger ("
-        "  id         bigserial   PRIMARY KEY,"
-        "  kind       integer     NOT NULL,"
-        "  blob       bytea       NOT NULL,"
-        "  mac        bytea,"                 /* HMAC-SHA256 tag (32B), NULL when the key is unset */
-        "  prev_hash  bytea       NOT NULL,"  /* entry_hash of the prior row for this kind; all-zero = genesis */
-        "  entry_hash bytea       NOT NULL,"  /* SHA256(prev_hash || blob || mac) -- the chain link */
-        "  sealed     boolean     NOT NULL DEFAULT false,"
-        "  updated    timestamptz NOT NULL DEFAULT now()"
-        ")", false, 0) == SPI_OK_UTILITY
-        && SPI_execute(
+    /* The IF NOT EXISTS variants do NOT make this safe on their own:
+     * postgres's CheckTableNotInUse() runs BEFORE the IF-NOT-EXISTS
+     * resolution, so a backend that already has this table marked in-use
+     * (for example inside fractal_ledger_verify's own SPI session) errors with "cannot CREATE
+     * INDEX ... because it is being used by active queries in this
+     * session" — a DDL failure inside a READ path. Probing the catalogs
+     * above (they read pg_tables/pg_indexes, not the ledger table itself)
+     * and skipping whichever DDL already stands keeps every call site
+     * working off a plain catalog read instead. */
+    if (!tbl_exists)
+    {
+        if (SPI_execute(
+            "CREATE TABLE IF NOT EXISTS fractalsql_ledger ("
+            "  id         bigserial   PRIMARY KEY,"
+            "  kind       integer     NOT NULL,"
+            "  blob       bytea       NOT NULL,"
+            "  mac        bytea,"                 /* HMAC-SHA256 tag (32B), NULL when the key is unset */
+            "  prev_hash  bytea       NOT NULL,"  /* entry_hash of the prior row for this kind; all-zero = genesis */
+            "  entry_hash bytea       NOT NULL,"  /* SHA256(prev_hash || blob || mac) -- the chain link */
+            "  sealed     boolean     NOT NULL DEFAULT false,"
+            "  updated    timestamptz NOT NULL DEFAULT now()"
+            ")", false, 0) != SPI_OK_UTILITY)
+            return false;
+    }
+    if (!idx_exists &&
+        SPI_execute(
         "CREATE INDEX IF NOT EXISTS fractalsql_ledger_kind_id_idx "
         "ON fractalsql_ledger (kind, id DESC)",
-        false, 0) == SPI_OK_UTILITY;
+        false, 0) != SPI_OK_UTILITY)
+        return false;
+    return true;
 }
 
 static int
@@ -1209,8 +1393,10 @@ ledger_write_entry(fsql_storage_user_ctx user, int kind,
                    const void *payload, size_t len)
 {
     (void) user;
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         return FSQL_ESTORAGE;
+    /* LCOV_EXCL_BR_STOP */
 
     /* Serialize concurrent writers of the SAME kind for the remainder of
      * this transaction -- acquired BEFORE anything else, including
@@ -1246,9 +1432,7 @@ ledger_write_entry(fsql_storage_user_ctx user, int kind,
      * still see the SAME pre-lock snapshot after acquiring the lock in
      * turn -- serialized in acquisition order, but each one blind to
      * what the PRIOR lock holder just committed, reconstructing the
-     * exact fork this lock exists to prevent. (Caught by gate 25 Phase
-     * C(b) during development: all 8 workers logged the identical
-     * prev_hash despite no deadlock and no error.) read_only=false forces
+     * exact fork this lock exists to prevent. read_only=false forces
      * a fresh snapshot at each of these two calls, so the head-read after
      * acquiring the lock actually observes the latest commit. */
     {
@@ -1383,8 +1567,10 @@ ledger_read_entry(fsql_storage_user_ctx user, int kind,
     *payload_out = NULL;
     *len_out     = 0;
 
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         return FSQL_ESTORAGE;
+    /* LCOV_EXCL_BR_STOP */
     if (!ledger_ensure_table())
     {
         SPI_finish();
@@ -1928,9 +2114,11 @@ spi_scan_corpus_internal(const char *table, const char *col, int dim,
                           char ***rowids_out)
 {
     bool    want_ids = (rowids_out != NULL);
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("fractalsql: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
 
     /* When the caller asks for row ids (the RAG agents, to map a search
      * result's 0-based position back to a physical row for content
@@ -2099,9 +2287,11 @@ build_retrieval_context(const char *table, const char *vector_col,
 
     MemoryContext workctx = CurrentMemoryContext;
 
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("fractalsql: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
 
     /* Build the ctid IN-list from the search-result positions. */
     StringInfoData inlist;
@@ -2169,10 +2359,12 @@ fractal_search_explore(PG_FUNCTION_ARGS)
         funcctx = SRF_FIRSTCALL_INIT();
         oldctx  = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
+        /* LCOV_EXCL_BR_START -- this function is STRICT in SQL, so a NULL argument never reaches it; defensive only */
         if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
             ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                             errmsg("fractalsql: table_name, vector_col, "
                                    "and query are required")));
+        /* LCOV_EXCL_BR_STOP */
 
         char      *table     = text_to_cstring(PG_GETARG_TEXT_PP(0));
         char      *col       = text_to_cstring(PG_GETARG_TEXT_PP(1));
@@ -2410,14 +2602,26 @@ fractal_search_agent(PG_FUNCTION_ARGS)
     fsql_ai_response_t reason_resp;
     memset(&reason_resp, 0, sizeof(reason_resp));
     int rc_ai = fsql_dispatch_ai(g_reason_ctx, query_str, strlen(query_str), ctx_json, strlen(ctx_json), &reason_resp);
+    char *answer_text = NULL;
+    bool  reason_failed = false;
     if (rc_ai != 0 || reason_resp.rc != 0) {
         int         err_rc = rc_ai != 0 ? rc_ai : reason_resp.rc;
         const char *err    = fsql_last_error(g_reason_ctx);
         fsql_ai_response_free(&reason_resp);
-        ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                        errmsg("fractalsql: search_agent reasoning failed (rc=%d): %s",
-                               err_rc, err ? err : "(no detail)")));
+        memset(&reason_resp, 0, sizeof(reason_resp));   /* the single bottom free becomes a no-op */
+        if (!g_agent_partial_reasoning_fail)
+            ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                            errmsg("fractalsql: search_agent reasoning failed (rc=%d): %s",
+                                   err_rc, err ? err : "(no detail)")));
+        /* agent_partial_reasoning_fail (fractalsql.agent_partial_reasoning_fail):
+         * the search half already ran and ctx_json/the top-k are real -- keep
+         * the computed data half, carry the failure marker in the answer. */
+        answer_text = psprintf("reasoning_step_failed: fractal_search_agent reasoning failed (rc=%d): %s",
+                               err_rc, err ? err : "(no detail)");
+        reason_failed = true;
     }
+    if (!reason_failed)
+        answer_text = pnstrdup(reason_resp.summary, reason_resp.summary_len);
 
     /* 4. Build result record. heap_form_tuple is the canonical single-row
      * composite-Datum path; a tuplestore is for SRF materialization, not
@@ -2429,7 +2633,7 @@ fractal_search_agent(PG_FUNCTION_ARGS)
 
     Datum values[3];
     bool nulls[3] = { false, false, false };
-    values[0] = CStringGetTextDatum(reason_resp.summary);
+    values[0] = CStringGetTextDatum(answer_text);
 
     Datum *doc_ids_datums = palloc(got * sizeof(Datum));
     for (int i = 0; i < got; i++)
@@ -2453,12 +2657,25 @@ PG_FUNCTION_INFO_V1(fractal_sql_agent);
 Datum
 fractal_sql_agent(PG_FUNCTION_ARGS)
 {
+    /* The function is not STRICT (table_names/max_retries/auto_execute have
+     * defaults), so a NULL question reaches here: PG_GETARG_TEXT_PP(0) on it
+     * dereferences a NULL datum and takes the backend down. */
+    if (PG_ARGISNULL(0))
+        ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                        errmsg("fractal_sql_agent: question must not be NULL")));
+
     ensure_text_to_sql_ctx();
     if (!g_t2s_loaded) ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE), errmsg("fractal_sql_agent: no reasoning plugin loaded")));
 
     const char *question = text_to_cstring(PG_GETARG_TEXT_PP(0));
     ArrayType  *table_names_arr = PG_ARGISNULL(1) ? NULL : PG_GETARG_ARRAYTYPE_P(1);
     int32      max_retries = PG_ARGISNULL(2) ? 2 : PG_GETARG_INT32(2);
+    /* max_retries <= 0 skips the generate loop entirely, leaving final_sql
+     * NULL for the CStringGetTextDatum() below -- a backend crash, not an
+     * error. At least one attempt is required. */
+    if (max_retries < 1)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("fractal_sql_agent: max_retries must be >= 1 (got %d)", max_retries)));
     bool       auto_execute = PG_ARGISNULL(3) ? false : PG_GETARG_BOOL(3);
 
     char *final_sql = NULL;
@@ -2527,9 +2744,11 @@ fractal_sql_agent(PG_FUNCTION_ARGS)
         MemoryContext oldcontext = CurrentMemoryContext;
         ResourceOwner oldowner   = CurrentResourceOwner;
 
+        /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
         if (SPI_connect() != SPI_OK_CONNECT)
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                             errmsg("fractal_sql_agent: SPI connect failed")));
+        /* LCOV_EXCL_BR_STOP */
 
         BeginInternalSubTransaction(NULL);
         MemoryContextSwitchTo(oldcontext);
@@ -2633,7 +2852,7 @@ fractal_agent_plan_explore(PG_FUNCTION_ARGS)
     if (dim <= 0) ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION), errmsg("fractal_agent_plan_explore: failed to parse embedding")));
 
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-    if (rsinfo == NULL || !(rsinfo->allowedModes & SFRM_Materialize))
+    if (FSQL_SRF_NO_MATERIALIZE(rsinfo))
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("fractalsql: set-valued function called in context "
@@ -2667,7 +2886,7 @@ fractal_agent_plan_explore(PG_FUNCTION_ARGS)
     MemoryContext oldcontext = MemoryContextSwitchTo(per_query_ctx);
 
     TupleDesc tupdesc;
-    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+    if (FSQL_RESULT_NOT_COMPOSITE(fcinfo, &tupdesc))
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                         errmsg("fractalsql: plan_explore return type is not a composite row")));
     tupdesc = BlessTupleDesc(tupdesc);
@@ -2761,9 +2980,11 @@ fractal_agent_trajectory_predict(PG_FUNCTION_ARGS)
      * switch back to it before each palloc'ing decode so baseline_vec /
      * current_vec / delta outlive SPI_finish (else use-after-free). */
     MemoryContext workctx = CurrentMemoryContext;
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("fractal_agent_trajectory_predict: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
 
     StringInfoData pkq;
     initStringInfo(&pkq);
@@ -2897,7 +3118,7 @@ fractal_agent_trajectory_predict(PG_FUNCTION_ARGS)
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
-/* fractal_agent_detect_loop (rewritten for v2.0.25): the old kernel ran
+/* fractal_agent_detect_loop (rewritten for v2.0.20): the old kernel ran
  * detect_short_period (a brute-force O(n*max_p) exact-equality scan) over a
  * caller-supplied int8[] of exact state hashes, plus a DFA-alpha>0.9
  * heuristic over those same hash values. Two real problems with that: exact
@@ -3085,14 +3306,25 @@ fractal_rag_agent(PG_FUNCTION_ARGS)
     fsql_ai_response_t reason_resp;
     memset(&reason_resp, 0, sizeof(reason_resp));
     int rc_ai = fsql_dispatch_ai(g_reason_ctx, query_str, strlen(query_str), ctx_json, strlen(ctx_json), &reason_resp);
+    char *answer_text = NULL;
+    bool  reason_failed = false;
     if (rc_ai != 0 || reason_resp.rc != 0) {
         int         err_rc = rc_ai != 0 ? rc_ai : reason_resp.rc;
         const char *err    = fsql_last_error(g_reason_ctx);
         fsql_ai_response_free(&reason_resp);
-        ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                        errmsg("fractalsql: rag_agent reasoning failed (rc=%d): %s",
-                               err_rc, err ? err : "(no detail)")));
+        memset(&reason_resp, 0, sizeof(reason_resp));   /* the single bottom free becomes a no-op */
+        if (!g_agent_partial_reasoning_fail)
+            ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                            errmsg("fractalsql: rag_agent reasoning failed (rc=%d): %s",
+                                   err_rc, err ? err : "(no detail)")));
+        /* agent_partial_reasoning_fail: keep the RAG data half's inputs and
+         * the computed analysis context; carry the failure marker back. */
+        answer_text = psprintf("reasoning_step_failed: fractal_rag_agent reasoning failed (rc=%d): %s",
+                               err_rc, err ? err : "(no detail)");
+        reason_failed = true;
     }
+    if (!reason_failed)
+        answer_text = pnstrdup(reason_resp.summary, reason_resp.summary_len);
 
     TupleDesc tupdesc;
     get_call_result_type(fcinfo, NULL, &tupdesc);
@@ -3100,7 +3332,7 @@ fractal_rag_agent(PG_FUNCTION_ARGS)
 
     Datum values[1];
     bool nulls[1] = { false };
-    values[0] = CStringGetTextDatum(reason_resp.summary);
+    values[0] = CStringGetTextDatum(answer_text);
 
     HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
 
@@ -3335,17 +3567,17 @@ build_schema_context_cstr(ArrayType *table_names_arr)
      * what the comment there used to claim. SPI_finish() destroys that
      * context outright; returning out.data directly after it (the
      * previous behavior) handed the caller a dangling pointer -- a real
-     * heap-use-after-free, caught by ASan on the auto-discovery path
-     * (multiple tables means enough allocation churn inside the SPI
-     * context to actually get reused/poisoned before the read). Fixed
-     * by explicitly copying the finished string into the caller's own
+     * heap-use-after-free on the auto-discovery path. The string is
+     * explicitly copied the finished string into the caller's own
      * context with MemoryContextStrdup right before SPI_finish() frees
      * everything else. */
     MemoryContext callercontext = CurrentMemoryContext;
 
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("fractal_schema_context: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
 
     StringInfoData out;
     initStringInfo(&out);
@@ -3679,10 +3911,12 @@ t2s_check_explain(const char *sql)
     char         *err_msg    = NULL;
     char         *explain_sql = psprintf("EXPLAIN %s", sql);
 
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("fractal_text_to_sql: SPI_connect failed for EXPLAIN")));
+    /* LCOV_EXCL_BR_STOP */
 
     BeginInternalSubTransaction(NULL);
     MemoryContextSwitchTo(oldcontext);
@@ -4077,6 +4311,38 @@ fractal_diversify_set_params(PG_FUNCTION_ARGS)
     PG_RETURN_VOID();
 }
 
+/* Scalar accessors for the two Diversify telemetry values the core
+ * exposes; fractal_explain_result() below returns the same two values in
+ * one JSON document.
+ *
+ * The core returns NaN for "no value yet" (no search has run, or
+ * diversify is disabled) and for the overhead reading while its
+ * rolling buffer is still filling. NaN is not a number a caller can
+ * act on, and a float8 'NaN' would silently poison any arithmetic it
+ * took part in, so it becomes SQL NULL instead -- matching the
+ * what fractal_explain_result() already renders as JSON null. */
+PG_FUNCTION_INFO_V1(fractal_diversify_current_dq);
+Datum
+fractal_diversify_current_dq(PG_FUNCTION_ARGS)
+{
+    ensure_search_ctx();
+    double dq = fsql_diversify_current_dq(g_ctx);
+    if (isnan(dq))
+        PG_RETURN_NULL();
+    PG_RETURN_FLOAT8(dq);
+}
+
+PG_FUNCTION_INFO_V1(fractal_diversify_overhead_p99_us);
+Datum
+fractal_diversify_overhead_p99_us(PG_FUNCTION_ARGS)
+{
+    ensure_search_ctx();
+    double us = fsql_diversify_overhead_p99_us(g_ctx);
+    if (isnan(us))
+        PG_RETURN_NULL();
+    PG_RETURN_FLOAT8(us);
+}
+
 PG_FUNCTION_INFO_V1(fractal_detect_collapse);
 Datum
 fractal_detect_collapse(PG_FUNCTION_ARGS)
@@ -4250,7 +4516,7 @@ fractal_dimension_drift(PG_FUNCTION_ARGS)
     PG_RETURN_DATUM(cstring_json_to_jsonb(buf));
 }
 
-/* ----- Change-Point Detection / Periodogram (v2.0.25) --------------- */
+/* ----- Change-Point Detection / Periodogram (v2.0.20) --------------- */
 
 PG_FUNCTION_INFO_V1(fractal_change_point_detect);
 Datum
@@ -4290,7 +4556,7 @@ static Datum
 periodogram_srf(FunctionCallInfo fcinfo, const double *series, int n, int32 max_peaks)
 {
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-    if (rsinfo == NULL || !(rsinfo->allowedModes & SFRM_Materialize))
+    if (FSQL_SRF_NO_MATERIALIZE(rsinfo))
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("fractalsql: set-valued function called in context "
@@ -4300,7 +4566,7 @@ periodogram_srf(FunctionCallInfo fcinfo, const double *series, int n, int32 max_
     MemoryContext oldcontext    = MemoryContextSwitchTo(per_query_ctx);
 
     TupleDesc tupdesc;
-    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+    if (FSQL_RESULT_NOT_COMPOSITE(fcinfo, &tupdesc))
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                         errmsg("fractalsql: function returning record called "
                                "in context that cannot accept type record")));
@@ -4347,7 +4613,47 @@ fractal_periodogram(PG_FUNCTION_ARGS)
     return periodogram_srf(fcinfo, series, n, max_peaks);
 }
 
-/* ----- State Fingerprinting / Cycle Detection (v2.0.25) -------------- */
+/* ----- Short-time spectral entropy (core v2.0.26) -------------------- */
+
+PG_FUNCTION_INFO_V1(fractal_spectrogram_entropy);
+Datum
+fractal_spectrogram_entropy(PG_FUNCTION_ARGS)
+{
+    int     n;
+    double *series     = float8_array_to_doubles(PG_GETARG_ARRAYTYPE_P(0), &n);
+    int32   win         = PG_GETARG_INT32(1);
+    int32   hop         = PG_GETARG_INT32(2);
+    int32   max_frames  = PG_GETARG_INT32(3);
+    if (win < 8 || win > 512)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: win must be in [8, 512]")));
+    if (hop <= 0)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: hop must be > 0")));
+    if (max_frames < 1 || max_frames > 4096)
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: max_frames must be in [1, 4096]")));
+
+    double *entropy = palloc((Size) max_frames * sizeof(double));
+    size_t  n_frames;
+    int rc = fsql_spectrogram_entropy(series, (size_t) n, (size_t) win,
+                                      (size_t) hop, entropy,
+                                      (size_t) max_frames, &n_frames);
+    if (rc != FSQL_OK)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("fractalsql: fractal_spectrogram_entropy rc=%d "
+                        "(need n >= win and finite samples)", rc)));
+
+    Datum *elems = palloc((Size) n_frames * sizeof(Datum));
+    for (size_t i = 0; i < n_frames; i++)
+        elems[i] = Float8GetDatum(entropy[i]);
+    ArrayType *result = construct_array(elems, (int) n_frames, FLOAT8OID,
+                                        sizeof(float8), FLOAT8PASSBYVAL, 'd');
+    PG_RETURN_ARRAYTYPE_P(result);
+}
+
+/* ----- State Fingerprinting / Cycle Detection (v2.0.20) -------------- */
 
 PG_FUNCTION_INFO_V1(fractal_state_fingerprint);
 Datum
@@ -4391,7 +4697,7 @@ fractal_cycle_detect(PG_FUNCTION_ARGS)
                         errmsg("fractalsql: hamming_threshold must be >= 0")));
 
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-    if (rsinfo == NULL || !(rsinfo->allowedModes & SFRM_Materialize))
+    if (FSQL_SRF_NO_MATERIALIZE(rsinfo))
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("fractalsql: set-valued function called in context "
@@ -4401,7 +4707,7 @@ fractal_cycle_detect(PG_FUNCTION_ARGS)
     MemoryContext oldcontext    = MemoryContextSwitchTo(per_query_ctx);
 
     TupleDesc tupdesc;
-    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+    if (FSQL_RESULT_NOT_COMPOSITE(fcinfo, &tupdesc))
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                         errmsg("fractalsql: function returning record called "
                                "in context that cannot accept type record")));
@@ -4422,6 +4728,12 @@ fractal_cycle_detect(PG_FUNCTION_ARGS)
         ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
                         errmsg("fractalsql: fingerprints array must not be empty")));
 
+    /* The first element sets the fingerprint length for the whole call, so it
+     * must be checked before it is dereferenced (the per-element NULL check
+     * in the loop below comes too late for index 0). */
+    if (fp_nulls[0])
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                        errmsg("fractalsql: fingerprints array must not contain NULLs")));
     bytea *first = DatumGetByteaPP(fp_datums[0]);
     size_t n_bytes = (size_t) VARSIZE_ANY_EXHDR(first);
 
@@ -4433,15 +4745,24 @@ fractal_cycle_detect(PG_FUNCTION_ARGS)
 
     for (int i = 0; i < fp_n; i++)
     {
+        /* fsql_cycle_detect_init() allocated native (non-palloc) state: free
+         * it before raising, or a bad element leaks it on every call. */
         if (fp_nulls[i])
+        {
+            fsql_cycle_detect_free(&cs);
             ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
                             errmsg("fractalsql: fingerprints array must not contain NULLs")));
+        }
         bytea *fp = DatumGetByteaPP(fp_datums[i]);
         if ((size_t) VARSIZE_ANY_EXHDR(fp) != n_bytes)
+        {
+            size_t got_bytes = (size_t) VARSIZE_ANY_EXHDR(fp);
+            fsql_cycle_detect_free(&cs);
             ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
                             errmsg("fractalsql: every fingerprint must be the same length "
                                    "(index 0 was %zu bytes, index %d is %d)",
-                                   n_bytes, i, (int) VARSIZE_ANY_EXHDR(fp))));
+                                   n_bytes, i, (int) got_bytes)));
+        }
 
         int    detected = 0;
         size_t cycle_len = 0;
@@ -4466,7 +4787,7 @@ fractal_cycle_detect(PG_FUNCTION_ARGS)
     return (Datum) 0;
 }
 
-/* ----- Topological Data Analysis (v2.0.25) ---------------------------
+/* ----- Topological Data Analysis (v2.0.20) ---------------------------
  *
  * SCOPE NOTE, read before using: the 0-dim persistence diagram
  * (h0_bars, birth/death) is an EXACT, complete computation -- single-
@@ -4646,10 +4967,31 @@ portfolio_multimodal_audit_log_best_effort(const double *mu, const double *cov,
     (void) ledger_write_entry(NULL, 2, js.data, js.len);
 }
 
+/* The portfolio entries are deliberately non-STRICT (their optional args
+ * use SQL-side NULL defaults), which means the REQUIRED vector args can
+ * legally arrive SQL-NULL — and PG_GETARG_ARRAYTYPE_P on a NULL detoasts
+ * to a NULL varlena that float8_array_to_doubles would deref (backend
+ * SIGSEGV, found while writing the gate-22 rejection sweep). Same clean
+ * rejection shape for all three entries. */
+static void
+portfolio_required_args_not_null(const char *fn, bool mu_null, bool cov_null)
+{
+    if (mu_null)
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("fractalsql: %s: mu must not be NULL", fn)));
+    if (cov_null)
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("fractalsql: %s: cov must not be NULL", fn)));
+}
+
 PG_FUNCTION_INFO_V1(fractal_optimize_portfolio);
 Datum
 fractal_optimize_portfolio(PG_FUNCTION_ARGS)
 {
+    portfolio_required_args_not_null("fractal_optimize_portfolio",
+                                     PG_ARGISNULL(0), PG_ARGISNULL(1));
     int     n_assets;
     double *mu  = float8_array_to_doubles(PG_GETARG_ARRAYTYPE_P(0), &n_assets);
     int     cov_n;
@@ -4707,6 +5049,8 @@ PG_FUNCTION_INFO_V1(fractal_optimize_portfolio_multimodal);
 Datum
 fractal_optimize_portfolio_multimodal(PG_FUNCTION_ARGS)
 {
+    portfolio_required_args_not_null("fractal_optimize_portfolio_multimodal",
+                                     PG_ARGISNULL(0), PG_ARGISNULL(1));
     ensure_search_ctx();
     if (!ensure_enterprise_lib())
         enterprise_not_loaded_error();
@@ -4872,6 +5216,8 @@ PG_FUNCTION_INFO_V1(fractal_optimize_portfolio_multimodal_pareto);
 Datum
 fractal_optimize_portfolio_multimodal_pareto(PG_FUNCTION_ARGS)
 {
+    portfolio_required_args_not_null("fractal_optimize_portfolio_multimodal_pareto",
+                                     PG_ARGISNULL(0), PG_ARGISNULL(1));
     ensure_search_ctx();
     if (!ensure_enterprise_lib())
         enterprise_not_loaded_error();
@@ -5215,9 +5561,11 @@ fractal_store_morphology(PG_FUNCTION_ARGS)
     int discard_n;
     (void) float8_array_to_doubles(feat_arr, &discard_n);
 
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("fractalsql: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
 
     Oid   argtypes[2] = { INT8OID, FLOAT8ARRAYOID };
     Datum argvals[2]  = { Int64GetDatum(doc_id), PointerGetDatum(feat_arr) };
@@ -5268,7 +5616,7 @@ fractal_mine_topology_negatives(PG_FUNCTION_ARGS)
     double *surrogate = float8_array_to_doubles(surrogate_arr, &dim);
 
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-    if (rsinfo == NULL || !(rsinfo->allowedModes & SFRM_Materialize))
+    if (FSQL_SRF_NO_MATERIALIZE(rsinfo))
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("fractalsql: set-valued function called in context "
@@ -5278,7 +5626,7 @@ fractal_mine_topology_negatives(PG_FUNCTION_ARGS)
     MemoryContext oldcontext    = MemoryContextSwitchTo(per_query_ctx);
 
     TupleDesc tupdesc;
-    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+    if (FSQL_RESULT_NOT_COMPOSITE(fcinfo, &tupdesc))
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                         errmsg("fractalsql: function returning record called "
                                "in context that cannot accept type record")));
@@ -5291,9 +5639,11 @@ fractal_mine_topology_negatives(PG_FUNCTION_ARGS)
 
     MemoryContextSwitchTo(oldcontext);
 
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("fractalsql: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
 
     int rc = SPI_execute(
         "SELECT doc_id, features FROM fractalsql_feature_store", true, 0);
@@ -5383,7 +5733,7 @@ telemetry_topk_srf_ctid(FunctionCallInfo fcinfo,
                         const char **rowid_map)
 {
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-    if (rsinfo == NULL || !(rsinfo->allowedModes & SFRM_Materialize))
+    if (FSQL_SRF_NO_MATERIALIZE(rsinfo))
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("fractalsql: set-valued function called in context "
@@ -5393,7 +5743,7 @@ telemetry_topk_srf_ctid(FunctionCallInfo fcinfo,
     MemoryContext oldcontext    = MemoryContextSwitchTo(per_query_ctx);
 
     TupleDesc tupdesc;
-    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+    if (FSQL_RESULT_NOT_COMPOSITE(fcinfo, &tupdesc))
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                         errmsg("fractalsql: function returning record called "
                                "in context that cannot accept type record")));
@@ -5461,15 +5811,12 @@ telemetry_topk_srf_ctid(FunctionCallInfo fcinfo,
     return (Datum) 0;
 }
 
-/* fractal_hybrid_clinical_search deliberately does NOT take a raw    */
-/* SQL predicate/filter string -- interpolating caller-supplied SQL   */
-/* text into a dynamic query is exactly the class of risk this        */
-/* extension's own text-to-sql pipeline goes to great lengths to      */
-/* guard against (allowlisted, single-SELECT-only, gate 10's          */
-/* injection-shaped-identifier tests). Instead it takes doc_ids        */
-/* int8[] -- the caller computes their cohort filter with ordinary,    */
-/* already-safe SQL ("SELECT array_agg(id) FROM patients WHERE ...")  */
-/* and passes the result in; no dynamic SQL is ever constructed here. */
+/* fractal_hybrid_clinical_search deliberately does not take a raw SQL   */
+/* predicate string: interpolating caller-supplied SQL into a dynamic    */
+/* query is the risk the text-to-sql pipeline guards against. Instead it */
+/* takes doc_ids (ctid strings); the caller computes the cohort with     */
+/* ordinary SQL ("SELECT array_agg(ctid::text) FROM patients WHERE ...") */
+/* and passes the result in, so no dynamic SQL is built from it.         */
 /* ------------------------------------------------------------------ */
 
 /* Shared SRF core: given an in-memory corpus (already scanned/built
@@ -5492,7 +5839,7 @@ telemetry_topk_srf(FunctionCallInfo fcinfo,
                    const int64 *doc_id_map)
 {
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-    if (rsinfo == NULL || !(rsinfo->allowedModes & SFRM_Materialize))
+    if (FSQL_SRF_NO_MATERIALIZE(rsinfo))
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("fractalsql: set-valued function called in context "
@@ -5502,7 +5849,7 @@ telemetry_topk_srf(FunctionCallInfo fcinfo,
     MemoryContext oldcontext    = MemoryContextSwitchTo(per_query_ctx);
 
     TupleDesc tupdesc;
-    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+    if (FSQL_RESULT_NOT_COMPOSITE(fcinfo, &tupdesc))
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                         errmsg("fractalsql: function returning record called "
                                "in context that cannot accept type record")));
@@ -5564,10 +5911,12 @@ PG_FUNCTION_INFO_V1(fractal_search_telemetry);
 Datum
 fractal_search_telemetry(PG_FUNCTION_ARGS)
 {
+    /* LCOV_EXCL_BR_START -- this function is STRICT in SQL, so a NULL argument never reaches it; defensive only */
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) || PG_ARGISNULL(3))
         ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                         errmsg("fractalsql: table_name, vector_col, query, "
                                "and k are required")));
+    /* LCOV_EXCL_BR_STOP */
 
     char      *table = text_to_cstring(PG_GETARG_TEXT_PP(0));
     char      *col   = text_to_cstring(PG_GETARG_TEXT_PP(1));
@@ -5595,11 +5944,13 @@ PG_FUNCTION_INFO_V1(fractal_hybrid_clinical_search);
 Datum
 fractal_hybrid_clinical_search(PG_FUNCTION_ARGS)
 {
+    /* LCOV_EXCL_BR_START -- this function is STRICT in SQL, so a NULL argument never reaches it; defensive only */
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
         PG_ARGISNULL(3) || PG_ARGISNULL(4))
         ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                         errmsg("fractalsql: table_name, vector_col, query, "
                                "doc_ids, and k are required")));
+    /* LCOV_EXCL_BR_STOP */
 
     char      *table    = text_to_cstring(PG_GETARG_TEXT_PP(0));
     char      *col      = text_to_cstring(PG_GETARG_TEXT_PP(1));
@@ -5629,9 +5980,11 @@ fractal_hybrid_clinical_search(PG_FUNCTION_ARGS)
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
     MemoryContext  per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
 
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("fractalsql: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
 
     /* doc_ids is a caller-supplied ctid text[] (real, stable-for-the-
      * transaction row locators -- see spi_scan_corpus_internal's want_ids
@@ -5741,12 +6094,14 @@ PG_FUNCTION_INFO_V1(fractal_search_trajectory);
 Datum
 fractal_search_trajectory(PG_FUNCTION_ARGS)
 {
+    /* LCOV_EXCL_BR_START -- this function is STRICT in SQL, so a NULL argument never reaches it; defensive only */
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
         PG_ARGISNULL(3) || PG_ARGISNULL(4))
         ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                         errmsg("fractalsql: table_name, vector_col, "
                                "baseline_vector, current_vector, and k "
                                "are required")));
+    /* LCOV_EXCL_BR_STOP */
 
     char      *table    = text_to_cstring(PG_GETARG_TEXT_PP(0));
     char      *col      = text_to_cstring(PG_GETARG_TEXT_PP(1));
@@ -5784,12 +6139,14 @@ PG_FUNCTION_INFO_V1(fractal_cross_modal_search);
 Datum
 fractal_cross_modal_search(PG_FUNCTION_ARGS)
 {
+    /* LCOV_EXCL_BR_START -- this function is STRICT in SQL, so a NULL argument never reaches it; defensive only */
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
         PG_ARGISNULL(3) || PG_ARGISNULL(4) || PG_ARGISNULL(5))
         ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                         errmsg("fractalsql: table_name, vector_col, "
                                "morphology_vector, clinical_vector, "
                                "alpha_weight, and k are required")));
+    /* LCOV_EXCL_BR_STOP */
 
     char      *table   = text_to_cstring(PG_GETARG_TEXT_PP(0));
     char      *col     = text_to_cstring(PG_GETARG_TEXT_PP(1));
@@ -5840,12 +6197,14 @@ PG_FUNCTION_INFO_V1(fractal_search_trajectory_fv);
 Datum
 fractal_search_trajectory_fv(PG_FUNCTION_ARGS)
 {
+    /* LCOV_EXCL_BR_START -- this function is STRICT in SQL, so a NULL argument never reaches it; defensive only */
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
         PG_ARGISNULL(3) || PG_ARGISNULL(4))
         ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                         errmsg("fractalsql: table_name, vector_col, "
                                "baseline_vector, current_vector, and k "
                                "are required")));
+    /* LCOV_EXCL_BR_STOP */
 
     char           *table = text_to_cstring(PG_GETARG_TEXT_PP(0));
     char           *col   = text_to_cstring(PG_GETARG_TEXT_PP(1));
@@ -5879,12 +6238,14 @@ PG_FUNCTION_INFO_V1(fractal_cross_modal_search_fv);
 Datum
 fractal_cross_modal_search_fv(PG_FUNCTION_ARGS)
 {
+    /* LCOV_EXCL_BR_START -- this function is STRICT in SQL, so a NULL argument never reaches it; defensive only */
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
         PG_ARGISNULL(3) || PG_ARGISNULL(4) || PG_ARGISNULL(5))
         ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                         errmsg("fractalsql: table_name, vector_col, "
                                "morphology_vector, clinical_vector, "
                                "alpha_weight, and k are required")));
+    /* LCOV_EXCL_BR_STOP */
 
     char          *table    = text_to_cstring(PG_GETARG_TEXT_PP(0));
     char          *col      = text_to_cstring(PG_GETARG_TEXT_PP(1));
@@ -5932,6 +6293,409 @@ Datum
 fractal_version(PG_FUNCTION_ARGS)
 {
     PG_RETURN_TEXT_P(cstring_to_text(FSQL_VERSION));
+}
+
+/* ------------------------------------------------------------------ */
+/* Typed config surface: fractalsql_set_config() / fractalsql_get_config() */
+/* ------------------------------------------------------------------ */
+/* The extension's configuration lives in PostgreSQL's GUC machinery --
+ * the DefineCustom*Variable calls in _PG_init() above. Until now the
+ * only ways to reach those GUCs were SET and ALTER SYSTEM: the right
+ * path for an operator, but it leaves a plain SQL session with no way
+ * to ask "what does this key currently hold?" and no typed way to
+ * change the one key whose GUC is session-scoped by design.
+ *
+ * These two functions are the SQL-callable, typed, privilege-aware
+ * wrapper over that machinery -- the equivalent of the SQLite edition's
+ * fractalsql_set()/fractalsql_get().
+ * They deliberately do NOT introduce a second configuration store:
+ * every value they touch IS the GUC's own value, read from and written
+ * through the GUC machinery, so current_setting(), SHOW and pg_settings
+ * always agree with them.
+ *
+ * Per key the wrapper adds what the GUC machinery cannot know:
+ *   - a TYPE (string / int / bool / enum) and the value VALIDATED
+ *     before it is applied, so a typo is an error that names what was
+ *     expected instead of a silently degraded feature;
+ *   - the privilege rule the GUC itself declares: a GUC carrying
+ *     GUC_SUPERUSER_ONLY is neither settable nor readable by an
+ *     ordinary role (the same rule PostgreSQL applies to that flag in
+ *     pg_settings -- the value is not shown to a non-superuser);
+ *   - the GUC's CONTEXT, honoured rather than reinvented: a PGC_SIGHUP
+ *     key cannot be changed by a session (that is PostgreSQL's own
+ *     rule -- a bare SET on one is refused with "cannot be changed
+ *     now"), so the wrapper refuses it with the path that does work
+ *     (ALTER SYSTEM + pg_reload_conf()) rather than letting a raw GUC
+ *     error surface or, worse, pretending the change took effect. */
+
+typedef enum
+{
+    CFG_STR = 0,      /* free text: paths, URLs, tokens */
+    CFG_INT,          /* bounded integer */
+    CFG_BOOL,         /* on/off */
+    CFG_ENUM          /* one of a fixed set of spellings */
+} FsqlCfgType;
+
+typedef struct
+{
+    const char *key;             /* bare name, no "fractalsql." prefix */
+    const char *guc;             /* the GUC's own name */
+    FsqlCfgType type;
+    int         min;             /* CFG_INT: inclusive lower bound */
+    int         max;             /* CFG_INT: inclusive upper bound */
+    const char *allowed;         /* CFG_ENUM: "|"-separated members */
+    bool        superuser_only;  /* the GUC carries GUC_SUPERUSER_ONLY */
+    bool        reload_scoped;   /* the GUC is PGC_SIGHUP */
+    char      **str_slot;        /* CFG_STR / CFG_ENUM: the GUC's storage */
+    int        *int_slot;        /* CFG_INT: the GUC's storage */
+    bool       *bool_slot;       /* CFG_BOOL: the GUC's storage */
+} FsqlCfgKey;
+
+/* One entry per GUC, in the same order as the DefineCustom*Variable
+ * calls in _PG_init() above -- the two lists must stay in sync. The
+ * type, the bounds, the superuser flag and the context are all COPIED
+ * from those definitions, not invented here: the GUC machinery stays
+ * the single source of truth for what each key is. */
+static const FsqlCfgKey fsql_cfg_keys[] = {
+    { "reasoning_plugin", "fractalsql.reasoning_plugin", CFG_STR, 0, 0, NULL,
+      true, true, &g_reasoning_plugin, NULL, NULL },
+    { "http_url", "fractalsql.http_url", CFG_STR, 0, 0, NULL,
+      true, true, &g_http_url, NULL, NULL },
+    { "http_token", "fractalsql.http_token", CFG_STR, 0, 0, NULL,
+      true, true, &g_http_token, NULL, NULL },
+    { "http_model", "fractalsql.http_model", CFG_STR, 0, 0, NULL,
+      true, true, &g_http_model, NULL, NULL },
+    { "http_allow_plaintext", "fractalsql.http_allow_plaintext", CFG_BOOL, 0, 0, NULL,
+      true, true, NULL, NULL, &g_http_allow_plain },
+    { "http_embed_url", "fractalsql.http_embed_url", CFG_STR, 0, 0, NULL,
+      true, true, &g_http_embed_url, NULL, NULL },
+    { "http_embed_model", "fractalsql.http_embed_model", CFG_STR, 0, 0, NULL,
+      true, true, &g_http_embed_model, NULL, NULL },
+    { "http_think", "fractalsql.http_think", CFG_STR, 0, 0, NULL,
+      true, true, &g_http_think, NULL, NULL },
+    { "http_think_provider", "fractalsql.http_think_provider", CFG_STR, 0, 0, NULL,
+      true, true, &g_http_think_provider, NULL, NULL },
+    { "http_native_url", "fractalsql.http_native_url", CFG_STR, 0, 0, NULL,
+      true, true, &g_http_native_url, NULL, NULL },
+    { "http_num_ctx", "fractalsql.http_num_ctx", CFG_INT, 0, 1048576, NULL,
+      true, true, NULL, &g_http_num_ctx, NULL },
+    { "text_to_sql_max_attempts", "fractalsql.text_to_sql_max_attempts", CFG_INT, 1, 10, NULL,
+      false, true, NULL, &g_t2s_max_attempts, NULL },
+    { "text_to_sql_allowed_statements", "fractalsql.text_to_sql_allowed_statements",
+      CFG_ENUM, 0, 0, "select|select_insert_update",
+      false, true, &g_t2s_allowed_stmts, NULL, NULL },
+    { "text_to_sql_use_review", "fractalsql.text_to_sql_use_review", CFG_BOOL, 0, 0, NULL,
+      false, true, NULL, NULL, &g_t2s_use_review },
+    { "agent_partial_reasoning_fail", "fractalsql.agent_partial_reasoning_fail", CFG_BOOL, 0, 0, NULL,
+      false, false, NULL, NULL, &g_agent_partial_reasoning_fail },
+    { "enterprise_lib", "fractalsql.enterprise_lib", CFG_STR, 0, 0, NULL,
+      true, true, &g_enterprise_lib, NULL, NULL },
+    { "enterprise_ledger_key", "fractalsql.enterprise_ledger_key", CFG_STR, 0, 0, NULL,
+      true, false, &g_enterprise_ledger_key, NULL, NULL },
+    { "enterprise_require_signature", "fractalsql.enterprise_require_signature", CFG_BOOL, 0, 0, NULL,
+      true, true, NULL, NULL, &g_enterprise_require_signature }
+};
+
+#define FSQL_CFG_N     (sizeof(fsql_cfg_keys) / sizeof(fsql_cfg_keys[0]))
+
+/* Longest accepted string value, so a runaway value cannot be pushed
+ * into the GUC. */
+#define FSQL_CFG_MAX_STRING  8192
+
+/* Look a key up. Both spellings are accepted -- the bare key
+ * ("http_url") and the GUC's own name ("fractalsql.http_url") -- and
+ * the comparison is case-insensitive, because GUC names are. */
+static const FsqlCfgKey *
+fsql_cfg_lookup(const char *name)
+{
+    char        lowered[NAMEDATALEN];
+    const char *bare;
+    size_t      i;
+
+    if (strlen(name) >= sizeof(lowered))
+        return NULL;
+    for (i = 0; name[i] != '\0'; i++)
+        lowered[i] = (char) pg_tolower((unsigned char) name[i]);
+    lowered[i] = '\0';
+
+    /* Both spellings are folded to lower case BEFORE the comparison:
+     * the bare key ("http_url") and the GUC's own name
+     * ("fractalsql.http_url"). Folding only the prefixed spelling
+     * left the bare one case-sensitive, which contradicted both this
+     * function's contract and the SQL COMMENT on
+     * fractalsql_get_config()/fractalsql_set_config(). */
+    bare = (strncmp(lowered, "fractalsql.", 11) == 0) ? lowered + 11 : lowered;
+
+    for (i = 0; i < FSQL_CFG_N; i++)
+        if (strcmp(fsql_cfg_keys[i].key, bare) == 0)
+            return &fsql_cfg_keys[i];
+    return NULL;
+}
+
+/* The known key names, for the "unknown key" error. A static buffer is
+ * enough: a backend is single-threaded and the string is consumed by
+ * the ereport() that formats it. */
+static const char *
+fsql_cfg_key_list(void)
+{
+    static char buf[1024];
+    size_t      off = 0;
+    size_t      i;
+
+    buf[0] = '\0';
+    for (i = 0; i < FSQL_CFG_N && off + 1 < sizeof(buf); i++)
+        off += (size_t) snprintf(buf + off, sizeof(buf) - off, "%s%s",
+                                 i ? ", " : "", fsql_cfg_keys[i].key);
+    return buf;
+}
+
+/* Validate a value against its key's type and return the CANONICAL
+ * spelling of it (the value itself for strings/ints/enums, "on"/"off"
+ * for booleans). Every rejection is an error that names what was
+ * expected -- the whole point of the typed surface: a typo must not
+ * degrade a feature silently (the same reason
+ * fractalsql.text_to_sql_allowed_statements carries a GUC check hook). */
+static const char *
+fsql_cfg_canonical_value(const FsqlCfgKey *k, const char *value)
+{
+    switch (k->type)
+    {
+    case CFG_STR:
+        if (strlen(value) > FSQL_CFG_MAX_STRING)
+            ereport(ERROR,
+                    (errcode(ERRCODE_STRING_DATA_LENGTH_MISMATCH),
+                     errmsg("fractalsql_set_config: \"%s\" is too long", k->key),
+                     errdetail("The value must be at most %d bytes.",
+                               FSQL_CFG_MAX_STRING)));
+        return value;
+
+    case CFG_INT:
+    {
+        char *end = NULL;
+        long  v;
+
+        errno = 0;
+        v = strtol(value, &end, 10);
+        if (end == value || *end != '\0' || errno == ERANGE)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("fractalsql_set_config: \"%s\" expects an integer",
+                            k->key),
+                     errdetail("Got \"%s\".", value)));
+        if (v < k->min || v > k->max)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("fractalsql_set_config: \"%s\" must be between %d and %d",
+                            k->key, k->min, k->max),
+                     errdetail("Got %ld.", v)));
+        return value;
+    }
+
+    case CFG_BOOL:
+        /* The spellings PostgreSQL's own bool GUCs accept, minus the
+         * unique-prefix forms ("tru", "fals"): a config API should take
+         * a value, not guess at one. */
+        if (pg_strcasecmp(value, "on") == 0 || strcmp(value, "1") == 0 ||
+            pg_strcasecmp(value, "true") == 0 || pg_strcasecmp(value, "yes") == 0 ||
+            pg_strcasecmp(value, "t") == 0 || pg_strcasecmp(value, "y") == 0)
+            return "on";
+        if (pg_strcasecmp(value, "off") == 0 || strcmp(value, "0") == 0 ||
+            pg_strcasecmp(value, "false") == 0 || pg_strcasecmp(value, "no") == 0 ||
+            pg_strcasecmp(value, "f") == 0 || pg_strcasecmp(value, "n") == 0)
+            return "off";
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("fractalsql_set_config: \"%s\" expects a boolean", k->key),
+                 errdetail("Accepted spellings: on, off, true, false, yes, no, "
+                           "1, 0, t, f, y, n. Got \"%s\".", value)));
+        return NULL;   /* not reached */
+
+    case CFG_ENUM:
+    {
+        const char *p = k->allowed;
+
+        while (p && *p)
+        {
+            const char *bar = strchr(p, '|');
+            size_t      len = bar ? (size_t) (bar - p) : strlen(p);
+
+            if (strlen(value) == len && strncmp(value, p, len) == 0)
+                return value;
+            p = bar ? bar + 1 : NULL;
+        }
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("fractalsql_set_config: \"%s\" must be one of: %s",
+                        k->key, k->allowed),
+                 errdetail("Got \"%s\".", value)));
+        return NULL;   /* not reached */
+    }
+    }
+    return value;
+}
+
+/* Apply a validated value through PostgreSQL's own GUC machinery.
+ * set_config(name, value, false) is exactly what a bare SET does at
+ * session scope, and it re-checks the GUC's context and privilege
+ * rules on the way in. It is invoked through SPI rather than
+ * SetConfigOption() because SetConfigOption()'s signature changed in
+ * PostgreSQL 17 (the GucAction parameter) while this extension builds
+ * against 14, 15, 16 and 17 alike -- the SQL-level set_config() has
+ * one signature across all of them. */
+static void
+fsql_cfg_apply(const char *guc, const char *value)
+{
+    Oid   argtypes[2] = { TEXTOID, TEXTOID };
+    Datum values[2];
+    char  nulls[2] = { ' ', ' ' };
+    int   rc;
+
+    values[0] = PointerGetDatum(cstring_to_text(guc));
+    values[1] = PointerGetDatum(cstring_to_text(value));
+
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
+    if (SPI_connect() != SPI_OK_CONNECT)
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("fractalsql_set_config: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
+
+    rc = SPI_execute_with_args("SELECT set_config($1::text, $2::text, false)",
+                                2, argtypes, values, nulls, false, 0);
+    SPI_finish();
+
+    if (rc != SPI_OK_SELECT)
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("fractalsql_set_config: could not apply \"%s\"", guc)));
+}
+
+PG_FUNCTION_INFO_V1(fractalsql_set_config);
+Datum
+fractalsql_set_config(PG_FUNCTION_ARGS)
+{
+    char            *name;
+    char            *value;
+    const FsqlCfgKey *k;
+    const char      *canon;
+
+    if (PG_ARGISNULL(0))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("fractalsql_set_config: the key must not be NULL")));
+    if (PG_ARGISNULL(1))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("fractalsql_set_config: the value must not be NULL")));
+
+    name  = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    value = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+    k = fsql_cfg_lookup(name);
+    if (k == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("fractalsql_set_config: unknown config key \"%s\"", name),
+                 errdetail("Known keys: %s", fsql_cfg_key_list())));
+
+    /* Validate BEFORE the privilege and scope checks: a value that is
+     * wrong is wrong whoever asks, and saying so is more useful than a
+     * privilege error for a value that was never going to be applied. */
+    canon = fsql_cfg_canonical_value(k, value);
+
+    /* Privilege: the GUC's own GUC_SUPERUSER_ONLY flag. PostgreSQL
+     * applies that flag to pg_settings (the value is not shown to a
+     * non-superuser), so this API must not become a way around it --
+     * for the write side or the read side. */
+    if (k->superuser_only && !superuser())
+        ereport(ERROR,
+                (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                 errmsg("fractalsql_set_config: \"%s\" is a superuser-only setting",
+                        k->guc),
+                 errdetail("The FractalSQL GUC %s is declared GUC_SUPERUSER_ONLY; "
+                           "only a superuser may change it.", k->guc)));
+
+    /* Scope: a PGC_SIGHUP GUC is reload-scoped by PostgreSQL's own
+     * rule -- a session cannot change it (a bare SET on one is refused
+     * with "cannot be changed now"). Refuse it here with the path that
+     * DOES work, rather than letting a raw GUC error surface or
+     * pretending the change took effect. */
+    if (k->reload_scoped)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("fractalsql_set_config: \"%s\" is reload-scoped and "
+                        "cannot be changed in a session", k->guc),
+                 errdetail("The FractalSQL GUC %s is PGC_SIGHUP: a session "
+                           "cannot change it, exactly as a bare SET cannot.",
+                           k->guc),
+                 errhint("Use ALTER SYSTEM SET %s = '...'; then SELECT "
+                         "pg_reload_conf(); -- the value is validated the same "
+                         "way before it is applied.", k->guc)));
+
+    fsql_cfg_apply(k->guc, canon);
+
+    PG_RETURN_TEXT_P(cstring_to_text(canon));
+}
+
+PG_FUNCTION_INFO_V1(fractalsql_get_config);
+Datum
+fractalsql_get_config(PG_FUNCTION_ARGS)
+{
+    char            *name;
+    const FsqlCfgKey *k;
+    const char      *val;
+
+    if (PG_ARGISNULL(0))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("fractalsql_get_config: the key must not be NULL")));
+
+    name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+    k = fsql_cfg_lookup(name);
+    if (k == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("fractalsql_get_config: unknown config key \"%s\"", name),
+                 errdetail("Known keys: %s", fsql_cfg_key_list())));
+
+    /* Privilege: the same rule as the setter -- a GUC_SUPERUSER_ONLY
+     * value is not readable by an ordinary role. The secret keys
+     * (fractalsql.http_token, fractalsql.enterprise_ledger_key) are
+     * superuser-only for exactly that reason: the MCP's own config
+     * reader refuses them outright, and this is the SQL-layer
+     * equivalent of that rule. */
+    if (k->superuser_only && !superuser())
+        ereport(ERROR,
+                (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                 errmsg("fractalsql_get_config: \"%s\" is a superuser-only setting",
+                        k->guc),
+                 errdetail("The FractalSQL GUC %s is declared GUC_SUPERUSER_ONLY; "
+                           "its value is not readable by a non-superuser.",
+                           k->guc)));
+
+    switch (k->type)
+    {
+    case CFG_STR:
+    case CFG_ENUM:
+        val = (k->str_slot != NULL && *k->str_slot != NULL) ? *k->str_slot : NULL;
+        break;
+    case CFG_INT:
+        val = (k->int_slot != NULL) ? psprintf("%d", *k->int_slot) : NULL;
+        break;
+    case CFG_BOOL:
+        /* "on"/"off" -- the same spelling current_setting() uses for a
+         * boolean GUC, so the two never disagree. */
+        val = (k->bool_slot != NULL && *k->bool_slot) ? "on" : "off";
+        break;
+    default:
+        val = NULL;
+        break;
+    }
+
+    if (val == NULL)
+        PG_RETURN_NULL();
+    PG_RETURN_TEXT_P(cstring_to_text(val));
 }
 
 /* ------------------------------------------------------------------ */
@@ -5984,10 +6748,12 @@ PG_FUNCTION_INFO_V1(fractal_ledger_load);
 static void
 ledger_verify_latest(void)
 {
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("fractalsql: ledger verify: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
     if (!ledger_ensure_table())
     {
         SPI_finish();
@@ -6305,10 +7071,12 @@ fractal_ledger_verify(PG_FUNCTION_ARGS)
     uint64      n           = 0;
     int32       kind        = PG_ARGISNULL(0) ? 1 : PG_GETARG_INT32(0);
 
+    /* LCOV_EXCL_BR_START -- SPI_connect() only fails on memory exhaustion; not reachable from SQL */
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("fractalsql: fractal_ledger_verify: SPI_connect failed")));
+    /* LCOV_EXCL_BR_STOP */
 
     if (!ledger_ensure_table())
     {
@@ -6455,6 +7223,14 @@ PG_FUNCTION_INFO_V1(fractal_audit_log);
 Datum
 fractal_audit_log(PG_FUNCTION_ARGS)
 {
+    /* Not STRICT: a NULL entry_type/payload would reach PG_GETARG_*() below
+     * and dereference a NULL datum. Checked before the tier check so a
+     * malformed call is reported the same way on every edition. */
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("fractalsql: fractal_audit_log: entry_type and payload must not be NULL")));
+
     ensure_search_ctx();
     if (!ensure_enterprise_lib())
         enterprise_not_loaded_error();
@@ -6534,3 +7310,45 @@ fractal_audit_unpack(PG_FUNCTION_ARGS)
      * {"epoch","doc_id","signal"} entries; [] for an empty ledger). */
     PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(buf)));
 }
+
+#ifdef FSQL_FAULT_INJECT
+/* Test builds only: drive the Postgres-backed ledger storage callbacks the
+ * way the enterprise core does. No enterprise library is vendored in a
+ * community checkout, so nothing else calls them.
+ *
+ *   fractal_fi_ledger_vfs('write', kind, payload) -> "rc=<n>"
+ *   fractal_fi_ledger_vfs('read',  kind)          -> "rc=<n> len=<n> hex=<payload>"
+ *   fractal_fi_ledger_vfs('seal',  kind)          -> "rc=<n>"
+ */
+PG_FUNCTION_INFO_V1(fractal_fi_ledger_vfs);
+
+Datum
+fractal_fi_ledger_vfs(PG_FUNCTION_ARGS)
+{
+    char       *op   = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    int         kind = PG_GETARG_INT32(1);
+    StringInfoData out;
+
+    initStringInfo(&out);
+    if (strcmp(op, "write") == 0)
+    {
+        bytea *b  = PG_GETARG_BYTEA_PP(2);
+        int    rc = g_ledger_vfs.write_entry(g_ledger_vfs.user_ctx, kind,
+                                             VARDATA_ANY(b), VARSIZE_ANY_EXHDR(b));
+        appendStringInfo(&out, "rc=%d", rc);
+    }
+    else if (strcmp(op, "read") == 0)
+    {
+        const void *payload = NULL;
+        size_t      len     = 0;
+        int         rc      = g_ledger_vfs.read_entry(g_ledger_vfs.user_ctx, kind, &payload, &len);
+
+        appendStringInfo(&out, "rc=%d len=%zu hex=", rc, len);
+        for (size_t i = 0; rc == FSQL_OK && i < len; i++)
+            appendStringInfo(&out, "%02x", ((const unsigned char *) payload)[i]);
+    }
+    else
+        appendStringInfo(&out, "rc=%d", g_ledger_vfs.seal_ledger(g_ledger_vfs.user_ctx));
+    PG_RETURN_TEXT_P(cstring_to_text(out.data));
+}
+#endif /* FSQL_FAULT_INJECT */

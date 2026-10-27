@@ -1,0 +1,46 @@
+# Optional override: point the demo container's reasoning GUCs at Docker
+# Desktop's built-in Docker Model Runner instead of the bundled `ollama`
+# container. Docker Desktop only (Model Runner requires Docker Desktop
+# 4.41+ and isn't available without it); see docs/docker-demo.md and
+# docs/reasoning-setup.md.
+#
+# Usage:
+#   docker model pull ai/gpt-oss:20b
+#   docker model pull ai/nomic-embed-text-v1.5
+#   docker compose -f docker-compose.yml -f docker-compose.dmr.yml up -d postgres
+#   # add `mcp` to the same `up` command if you also want the MCP demoable
+#
+# model-runner.docker.internal resolves from inside any container once
+# Model Runner is enabled (Settings > Beta features, or
+# `docker desktop enable model-runner`) -- no port, no extra_hosts entry.
+# Name the services (`postgres`, plus `mcp` if wanted): this compose
+# project's `postgres` service has no depends_on on `ollama`, so there is
+# nothing to reset here -- but a plain `up` (all services) would still
+# start ollama, since removing a base service via an override file is not
+# a Compose capability. (The profiled pull-model service stays dormant.)
+#
+# Compose merges services per key, so everything not listed below
+# (healthcheck, exposed port, POSTGRES_* env, the mcp service) is
+# inherited unchanged from docker-compose.yml. This engine sets its
+# fractalsql.* GUCs as server arguments on the postgres `command` (-c
+# name=value, the same mechanism the base compose uses for the reasoning
+# defaults), and compose replaces a service's `command` wholesale rather
+# than merging it -- so the command is restated in full with ONLY the
+# four reasoning GUC defaults flipped to the Model Runner endpoints:
+# http_url/http_model (chat) and http_embed_url/http_embed_model
+# (embeddings). `-c fractalsql.http_think=off` and
+# `-c fractalsql.http_think_provider=ollama` are kept verbatim and inert:
+# the provider shape is only consulted when think control is enabled.
+
+services:
+  postgres:
+    command: >
+      postgres
+      -c fractalsql.reasoning_plugin=/usr/lib/postgresql/18/lib/fractalsql-reasoning-http.so
+      -c fractalsql.http_url=http://model-runner.docker.internal/engines/v1/chat/completions
+      -c fractalsql.http_allow_plaintext=on
+      -c fractalsql.http_model=ai/gpt-oss:20b
+      -c fractalsql.http_embed_url=http://model-runner.docker.internal/engines/v1/embeddings
+      -c fractalsql.http_embed_model=ai/nomic-embed-text-v1.5
+      -c fractalsql.http_think=off
+      -c fractalsql.http_think_provider=ollama

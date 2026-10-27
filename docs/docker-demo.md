@@ -51,6 +51,53 @@ Run any demo (re-runnable; each recreates its own fixture tables):
 docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/<demo>.sql
 ```
 
+Or run every demo in `demo/` in one pass with the `run_demo.sh` runner.
+From the repo root — or inside the container, matching the invocation
+style above — both shapes work:
+```bash
+./demo/run_demo.sh
+# ...or the in-container form:
+docker compose exec postgres /demo/run_demo.sh
+```
+It feeds each `/demo/*.sql` through `psql -v ON_ERROR_STOP=1` against the
+demo database (DB `fractalsql_demo`, user `postgres` — the compose demo
+service's own `POSTGRES_*` env), logs per file to
+`/tmp/fractalsql_demo_run/`, applies a per-file timeout (default 300s,
+overridable via `FSQL_DEMO_RUN_TIMEOUT`), and prints a final
+`N ok, M non-zero exit` tally. A non-zero exit from one file is a "go
+read its log" signal, not proof of a bug — on this PostgreSQL column the
+most common one is the no-model-yet error a reasoning-dependent demo hits
+until step 2 is done (pull a model, then re-run it); the demos' deliberate
+error demonstrations (CHECK/dimension/metric rejections) are all caught in
+`DO ... EXCEPTION` blocks, so they complete clean under `ON_ERROR_STOP=1`,
+and the enterprise-tier demos exit successfully with the documented
+dormant-path NOTICE. `run_demo.sh --help` lists the flags
+(`--quiet`/`--only`/`--skip`) plus `--include-response-modes` for
+`response-modes.sql`, which is skipped by default — see
+[Response modes](../demo/README.md#response-modes) for why it needs
+separate treatment. On this image you should see extension version
+**2.0.20**.
+
+**Alternative: Docker Model Runner (Docker Desktop only).** Skip the
+`ollama` container and use Docker Desktop's built-in Model Runner instead:
+
+```bash
+docker model pull ai/gpt-oss:20b
+docker model pull ai/nomic-embed-text-v1.5
+docker compose -f docker-compose.yml -f docker-compose.dmr.yml up -d postgres
+```
+
+`docker-compose.dmr.yml` repoints the postgres container's reasoning GUC
+defaults (`fractalsql.http_url`/`fractalsql.http_model` for chat,
+`fractalsql.http_embed_url`/`fractalsql.http_embed_model` for embeddings) at
+`model-runner.docker.internal` — nothing else changes. Name the services on
+the `up` (`postgres`, plus `mcp` if you also want the MCP demoable) so the
+bundled `ollama` container doesn't start at all. Everything else in this
+guide — the demo commands, `run_demo.sh`, the MCP one-liners — works the
+same either way. Requires Docker Desktop 4.41+ with Model Runner enabled
+(Settings → Beta features, or `docker desktop enable model-runner`); see
+[reasoning-setup.md](reasoning-setup.md#docker-model-runner-dmr).
+
 ### 2. Cognition — pull a model (opt-in)
 
 Reasoning (`fractal_reason`, `fractal_embed`, `fractal_text_to_sql`) needs a model.
@@ -84,6 +131,54 @@ pipelines:
 ```bash
 docker compose exec postgres psql -U postgres -d fractalsql_demo -f /demo/demo-vectorizer.sql
 ```
+
+---
+
+## 🔌 Try the MCP server
+
+One of the demoables is the same thing a real MCP client talks to — the
+FractalSQL MCP plugin, built from `mcp/` **in-container on the service's
+first start** (gcc image + `make`, per the plugin's plain-Makefile build
+standard; see [docs/mcp-plugin.md](mcp-plugin.md) for
+the full tool catalog and client config). The demo's `mcp` service reuses
+the demo database and credentials and exposes exactly four pinned tools —
+`fractal_search`, `fractal_reason`, `fractal_agent_data_analyst`, and
+`fractal_agent_diverse_portfolios` (the last one deliberately so you can see
+a real enterprise-tier call's clean "enterprise tier not loaded" behavior on
+this Community-only install). The same binary speaks stdio (the
+desktop-client shape) inside the container — a zero-dependency one-liner
+pumps JSON-RPC into it:
+
+```bash
+# Discovery (no LLM required) -- the one-liner (spec 9.2):
+docker compose exec mcp /demo/mcp/call-tool.sh fractal_search '{"query":[0.6,0.8,0.0]}'
+
+# The horizontal catch-all agent (an LLM-reasoned answer over real demo data).
+# Needs a reasoning model configured first -- run step 2 "Cognition" of the
+# setup guide above or this surfaces the clean "reasoning not configured"
+# error instead (the engine's own error, verbatim).
+docker compose exec mcp /demo/mcp/call-tool.sh fractal_agent_data_analyst \
+  '{"question":"Which services have warning or critical severity alerts?","table_names":["demo_alerts"]}'
+```
+
+The Discovery result comes back as an MCP tool result (a plain JSON array of
+numbers — the converged best point). `fractal_agent_diverse_portfolios` (the
+tool is pinned in the demo's whitelist, not shown above) returns the clean
+enterprise-tier error on this Community-only install. Want a real, richer
+client against this same database? The optional interactive inspector needs
+Node on your *host* only — nothing in the demo:
+
+```bash
+npx @modelcontextprotocol/inspector docker compose exec mcp /demo/mcp/call-tool.sh
+```
+
+The `mcp` service also runs the authenticated HTTP transport on
+`http://localhost:18765/mcp` (Bearer token `fractalsql-demo-token`, set via
+`FSQL_MCP_AUTH_TOKEN` in compose) for pointing an actual MCP client at the
+demo database — see the plugin doc's client config. NOTE on credentials: the
+demo connects with the compose project's own superuser — fine for a throwaway
+demo, never the posture for the real plugin (see the plugin doc's
+least-privilege section).
 
 ---
 
@@ -149,7 +244,13 @@ does and when to use it.
 `demo-text-to-sql.sql`, the `text-to-sql-spike-*.sql` series, `demo-fractal-vector.sql`,
 `demo-vertical-biotech-genomics.sql` (TDA + L_p on a cyclic peptide and
 single-cell expression profiles, no reasoning needed),
-`benchmark.sql`, and `benchmark-api-reference.sql`. Run any the same way.
+`benchmark.sql`, and `benchmark-api-reference.sql`, plus the enterprise-tier
+`enterprise-qtl-audit.sql` / `enterprise-stress.sql` (both run cleanly on
+this Community-only install and tell you which tier they found). Run any of
+them the same way. `demo/demo-workload.sh` (the sustained concurrent-load
+tester — simulated users issuing a realistic mix of calls for a fixed wall
+time) is also in the image at `/demo/`; it is a bash script, not SQL, so run
+it with `docker compose exec postgres /demo/demo-workload.sh --help`.
 
 ---
 

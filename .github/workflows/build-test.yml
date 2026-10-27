@@ -35,21 +35,31 @@ name: build-test
 #              never previously exercised by any CI job). PG14/15/17/18
 #              share the exact same code path but have not each been
 #              individually confirmed on CI yet.
-#   linux-asan / linux-ubsan — build_test.sh --asan / --ubsan (Docker,
-#              PG16 only), same basic-sanity scope and weekly/
-#              workflow_dispatch-only cadence as windows-asan/
-#              windows-ubsan / darwin-asan/darwin-ubsan. Verified
-#              locally (all 14 gates pass under both) before being
-#              wired in here.
-#   coverage — weekly/on-demand only (see the schedule trigger below):
+#   linux-asan / linux-ubsan — build_test.sh --asan / --ubsan (PG16
+#              only, directly on the runner), running the FULL gate
+#              suite (every gate in build_test.sh's DEFAULT_GATES, the
+#              same set the per-major matrix runs) under ASan / UBSan,
+#              as do windows-asan/windows-ubsan and darwin-asan/
+#              darwin-ubsan. They fire on the weekly schedule, on
+#              workflow_dispatch, and on every push to 2.x.
+#   coverage — weekly, on-demand, and on pushes to 2.x (see the triggers below):
 #              gcov-instrumented build_test.sh --coverage run, lcov/
 #              genhtml report uploaded as a workflow artifact.
+#              Promoted to also fire on pushes to refs/heads/2.x (same
+#              promotion as the sanitizer jobs below).
+#   mcp-build-smoke — standalone Linux build + DB-less smoke of the
+#              fractalsql-postgresql-mcp server (mirror of the Windows
+#              gate33 build; the MCP server itself is NOT part of this
+#              repo's build.sh/Docker gate matrix).
 
 on:
   push:
-    branches: [main]
+    # 2.x is this repo's active development branch (main is the PR
+    # landing page): pushing there now runs the full gate matrix AND
+    # promotes the scheduled-only sanitizer/coverage jobs below.
+    branches: [main, '2.x']
   pull_request:
-    branches: [main]
+    branches: [main, '2.x']
   schedule:
     # Weekly, not per-push — coverage numbers move slowly and the
     # extra instrumented rebuild + lcov pass isn't worth paying on
@@ -69,7 +79,7 @@ jobs:
     name: build_test pg${{ matrix.pg }}
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -202,10 +212,13 @@ jobs:
 
   windows-asan:
     name: build_test.ps1 -Asan pg16 (Windows)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Promoted from schedule/dispatch-only to also fire on every push to
+    # refs/heads/2.x (the active development branch), mirroring the
+    # sibling's promotion of its weekly sanitizer legs.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: windows-latest
     timeout-minutes: 30
-    # PG16 only (not the full 14-18 matrix) -- basic-sanity scope: this
+    # PG16 only (not the full 14-18 matrix) -- PG16-only scope: this
     # rebuilds fractalsql.c with MSVC /fsanitize=address
     # into a separate dist\windows-asan\ tree and re-runs the same 12
     # gates against the instrumented DLL loaded into postgres.exe.
@@ -254,13 +267,14 @@ jobs:
 
   windows-ubsan:
     name: build_test.ps1 -Ubsan pg16 (Windows)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Same 2.x push promotion as windows-asan above.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: windows-latest
     timeout-minutes: 30
     # Same structure as windows-asan above, but via clang-cl (LLVM's
     # MSVC-ABI-compatible driver) and -fsanitize=undefined -- native
     # cl.exe has no UBSan support at all. PG16 only, matching
-    # windows-asan's own basic-sanity scope decision. -TimeoutMult left
+    # windows-asan's own PG16-only scope decision. -TimeoutMult left
     # at the same 8 windows-asan needed until a real run shows whether
     # UBSan's instrumentation overhead on gate 06's crash-recovery poll
     # is smaller, equal, or larger -- not assumed identical to ASan.
@@ -295,7 +309,8 @@ jobs:
 
   darwin-asan:
     name: build_test.sh --asan pg16 (macOS)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Same 2.x push promotion as windows-asan above.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: macos-14
     timeout-minutes: 30
     env:
@@ -317,9 +332,17 @@ jobs:
       - name: Install PostgreSQL 16 (Homebrew)
         run: |
           set -euo pipefail
-          brew install postgresql@16
+          # openssl@3: gate 33 (mcp_smoke) builds the MCP server (which
+          # links -lssl -lcrypto) when pkg-config can resolve its deps;
+          # the gate self-skips otherwise.
+          brew install postgresql@16 openssl@3 pkg-config
 
       - name: build_test.sh --asan --pg 16
+        env:
+          # --asan/--ubsan are meant to auto-bump the poll budgets to 4, but
+          # build_test.sh evaluates that before parsing its flags; set it
+          # here so crash-recovery gates have the headroom ASan needs.
+          FSQL_TEST_TIMEOUT_MULT: "4"
         run: |
           set -euo pipefail
           chmod +x build_test.sh
@@ -327,7 +350,8 @@ jobs:
 
   darwin-ubsan:
     name: build_test.sh --ubsan pg16 (macOS)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Same 2.x push promotion as windows-asan above.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: macos-14
     timeout-minutes: 30
     env:
@@ -341,9 +365,17 @@ jobs:
       - name: Install PostgreSQL 16 (Homebrew)
         run: |
           set -euo pipefail
-          brew install postgresql@16
+          # openssl@3: gate 33 (mcp_smoke) builds the MCP server (which
+          # links -lssl -lcrypto) when pkg-config can resolve its deps;
+          # the gate self-skips otherwise.
+          brew install postgresql@16 openssl@3 pkg-config
 
       - name: build_test.sh --ubsan --pg 16
+        env:
+          # --asan/--ubsan are meant to auto-bump the poll budgets to 4, but
+          # build_test.sh evaluates that before parsing its flags; set it
+          # here so crash-recovery gates have the headroom ASan needs.
+          FSQL_TEST_TIMEOUT_MULT: "4"
         run: |
           set -euo pipefail
           chmod +x build_test.sh
@@ -351,10 +383,11 @@ jobs:
 
   linux-asan:
     name: build_test.sh --asan pg16
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Same 2.x push promotion as windows-asan above.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # PG16 only, matching windows-asan's own basic-sanity scope. Runs
+    timeout-minutes: 30
+    # PG16 only, matching windows-asan's own PG16-only scope. Runs
     # DIRECTLY on the runner (PGDG apt packages, same as the coverage
     # job below), NOT via docker/Dockerfile.test -- confirmed by direct
     # reproduction (strace + LD_DEBUG=all, both with and without
@@ -377,19 +410,52 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install PostgreSQL 16
+        timeout-minutes: 15
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y wget gnupg lsb-release ca-certificates
+          export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+          # A hung apt (seen three times, always `apt-get update` right after the
+          # PGDG source is added: no output at all until the job timeout) is killed
+          # and retried instead of eating the whole job, and the retry prints what
+          # is holding apt so the next hang is diagnosable. -qq hides progress, so
+          # the timeout is the only thing that can end a stall.
+          apt_retry() {
+            local limit="$1"; shift
+            local n
+            for n in 1 2 3; do
+              if sudo timeout "$limit" apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true \
+                   -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+                   -o DPkg::Lock::Timeout=120 "$@"; then
+                return 0
+              fi
+              echo "apt-get $* failed or timed out (attempt $n/3); apt/dpkg processes:" >&2
+              ps -eo pid,etime,stat,cmd | grep -E 'apt|dpkg|unattended|esm' | grep -v grep >&2 || true
+              sleep 5
+            done
+            return 1
+          }
+          apt_retry 180 update -qq
+          apt_retry 600 install -qq -y wget gnupg lsb-release ca-certificates
+          # libpq-dev + libssl-dev: gate 33 (mcp_smoke) builds the MCP
+          # server via mcp/Makefile, which links pkg-config libpq and
+          # -lssl -lcrypto -- without them its gate self-skips.
+          apt_retry 600 install -qq -y libpq-dev libssl-dev
+          # NOTE: future mcp gates (39-42) also slot here once
+          # build_test.sh grows them; only gate 33 exists today.
           sudo install -d /etc/apt/keyrings
-          wget --max-redirect=0 -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          wget --timeout=30 --tries=3 --max-redirect=0 -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
               | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
           echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
               | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y postgresql-16 postgresql-server-dev-16
+          apt_retry 180 update -qq
+          apt_retry 600 install -qq -y postgresql-16 postgresql-server-dev-16
 
       - name: build_test.sh --asan --pg 16
+        env:
+          # --asan/--ubsan are meant to auto-bump the poll budgets to 4, but
+          # build_test.sh evaluates that before parsing its flags; set it
+          # here so crash-recovery gates have the headroom ASan needs.
+          FSQL_TEST_TIMEOUT_MULT: "4"
         run: |
           set -euo pipefail
           chmod +x build_test.sh
@@ -397,9 +463,10 @@ jobs:
 
   linux-ubsan:
     name: build_test.sh --ubsan pg16
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Same 2.x push promotion as windows-asan above.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     # Same structure and same reason for running directly on the runner
     # (not Docker) as linux-asan above -- see its comment for the full
     # Debian-Bookworm-glibc-2.36 root cause. PG16 only, matching
@@ -409,19 +476,50 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install PostgreSQL 16
+        timeout-minutes: 15
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y wget gnupg lsb-release ca-certificates
+          export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+          # A hung apt (seen three times, always `apt-get update` right after the
+          # PGDG source is added: no output at all until the job timeout) is killed
+          # and retried instead of eating the whole job, and the retry prints what
+          # is holding apt so the next hang is diagnosable. -qq hides progress, so
+          # the timeout is the only thing that can end a stall.
+          apt_retry() {
+            local limit="$1"; shift
+            local n
+            for n in 1 2 3; do
+              if sudo timeout "$limit" apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true \
+                   -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+                   -o DPkg::Lock::Timeout=120 "$@"; then
+                return 0
+              fi
+              echo "apt-get $* failed or timed out (attempt $n/3); apt/dpkg processes:" >&2
+              ps -eo pid,etime,stat,cmd | grep -E 'apt|dpkg|unattended|esm' | grep -v grep >&2 || true
+              sleep 5
+            done
+            return 1
+          }
+          apt_retry 180 update -qq
+          apt_retry 600 install -qq -y wget gnupg lsb-release ca-certificates
+          # libpq-dev + libssl-dev: gate 33 (mcp_smoke) builds the MCP
+          # server via mcp/Makefile, which links pkg-config libpq and
+          # -lssl -lcrypto -- without them its gate self-skips.
+          apt_retry 600 install -qq -y libpq-dev libssl-dev
           sudo install -d /etc/apt/keyrings
-          wget --max-redirect=0 -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          wget --timeout=30 --tries=3 --max-redirect=0 -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
               | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
           echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
               | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y postgresql-16 postgresql-server-dev-16
+          apt_retry 180 update -qq
+          apt_retry 600 install -qq -y postgresql-16 postgresql-server-dev-16
 
       - name: build_test.sh --ubsan --pg 16
+        env:
+          # --asan/--ubsan are meant to auto-bump the poll budgets to 4, but
+          # build_test.sh evaluates that before parsing its flags; set it
+          # here so crash-recovery gates have the headroom ASan needs.
+          FSQL_TEST_TIMEOUT_MULT: "4"
         run: |
           set -euo pipefail
           chmod +x build_test.sh
@@ -429,31 +527,69 @@ jobs:
 
   coverage:
     name: coverage (lcov)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Same 2.x push promotion as windows-asan above.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install PostgreSQL 16 + lcov
+        timeout-minutes: 15
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y wget gnupg lsb-release ca-certificates lcov
+          export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+          # A hung apt (seen three times, always `apt-get update` right after the
+          # PGDG source is added: no output at all until the job timeout) is killed
+          # and retried instead of eating the whole job, and the retry prints what
+          # is holding apt so the next hang is diagnosable. -qq hides progress, so
+          # the timeout is the only thing that can end a stall.
+          apt_retry() {
+            local limit="$1"; shift
+            local n
+            for n in 1 2 3; do
+              if sudo timeout "$limit" apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true \
+                   -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+                   -o DPkg::Lock::Timeout=120 "$@"; then
+                return 0
+              fi
+              echo "apt-get $* failed or timed out (attempt $n/3); apt/dpkg processes:" >&2
+              ps -eo pid,etime,stat,cmd | grep -E 'apt|dpkg|unattended|esm' | grep -v grep >&2 || true
+              sleep 5
+            done
+            return 1
+          }
+          apt_retry 180 update -qq
+          apt_retry 600 install -qq -y wget gnupg lsb-release ca-certificates lcov
+          # libpq-dev + libssl-dev: gate 33 (mcp_smoke) builds the MCP
+          # server via mcp/Makefile (pkg-config libpq + -lssl -lcrypto) --
+          # the same pin the sibling's coverage job carries for its MCP
+          # gate; without them gate 33 self-skips here.
+          apt_retry 600 install -qq -y libpq-dev libssl-dev
           sudo install -d /etc/apt/keyrings
-          wget --max-redirect=0 -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          wget --timeout=30 --tries=3 --max-redirect=0 -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
               | sudo gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
           echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
               | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y postgresql-16 postgresql-server-dev-16
+          apt_retry 180 update -qq
+          apt_retry 600 install -qq -y postgresql-16 postgresql-server-dev-16
 
       - name: build_test.sh --coverage
         run: |
           set -euo pipefail
           chmod +x build_test.sh
           ./build_test.sh --coverage --pg 16
+
+      # --coverage writes its lcov/genhtml transcripts to these fixed
+      # paths (build_test.sh's run_coverage_report), naming them in its
+      # own failure messages -- dump them before the artifact step so a
+      # red run shows the cause inline.
+      - name: Show lcov log (failure diagnostics)
+        if: failure()
+        run: |
+          cat /tmp/fractalsql_bt_lcov.log || true
+          cat /tmp/fractalsql_bt_genhtml.log || true
 
       - name: Upload coverage report
         if: always()
@@ -463,3 +599,50 @@ jobs:
           path: coverage_html/
           retention-days: 30
           if-no-files-found: warn
+
+  # Standalone Linux build + DB-less smoke of the MCP server. Mirrors the
+  # build_test.sh gate 33 dependency set locally (mcp/Makefile: C++17,
+  # pkg-config libpq + -lssl -lcrypto -lpthread), kept as its own job so
+  # the gate matrix's instrumented rebuilds don't have to carry the C++
+  # build to prove the server compiles and its wire protocol invariants
+  # hold. mcp/test/smoke.py runs its wire-level asserts only here: the
+  # DB-dependent section self-skips without PG* env (it prints
+  # "SMOKE PASS" and exits 0), and the full DB round trips run locally
+  # via build_test.sh --pg 16. Future mcp gates (39-42) also slot into
+  # this job's verification chain once build_test.sh defines them; only
+  # gate 33 exists today, so this job references nothing else.
+  mcp-build-smoke:
+    name: MCP server build + DB-less smoke (linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install toolchain (g++/make, pkg-config libpq + libssl, python3)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y build-essential pkg-config libpq-dev libssl-dev python3
+
+      - name: Build mcp (mcp/Makefile)
+        run: |
+          set -euo pipefail
+          make -C mcp -j2
+
+      - name: Verify --version and --list-tools
+        run: |
+          set -euo pipefail
+          V="$(./mcp/fractalsql-postgresql-mcp --version)"
+          echo "version: ${V}"
+          test "${V}" = "2.0.20"
+          LINES="$(./mcp/fractalsql-postgresql-mcp --list-tools | wc -l)"
+          echo "tool-catalog lines: ${LINES}"
+          test "${LINES}" = "82"
+
+      - name: DB-less smoke (mcp/test/smoke.py, wire-level asserts only)
+        run: |
+          set -euo pipefail
+          # No PG* env wired: smoke.py self-skips its DB-dependent
+          # section (fine for CI) and prints SMOKE PASS on exit 0.
+          FSQL_MCP_EXE="$PWD/mcp/fractalsql-postgresql-mcp" \
+              python3 mcp/test/smoke.py

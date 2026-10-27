@@ -90,7 +90,7 @@ SELECT fractal_dimension_boxcount(
 -- fractal_search (the "sniper search" in the abstract [-1,1]^5 space), then
 -- map that profile to a REAL node with fractal_search_telemetry. Generalized
 -- below by the shipped fractal_agent_schedule_workload preset, which folds
--- both steps together and reasons. doc_id is a real ctid (v2.0.25), so this
+-- both steps together and reasons. doc_id is a real ctid (v2.0.20), so this
 -- join is exact regardless of any UPDATE relocating a tuple.
 -- SELECT fractal_search(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], iterations => 50) AS ideal_profile;
 --

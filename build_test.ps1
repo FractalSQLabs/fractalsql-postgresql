@@ -7,7 +7,7 @@
 .DESCRIPTION
     Windows post-build validation gate runner for fractalsql-postgresql;
     PowerShell port of build_test.sh with the same gate numbering. Default
-    gates: 01-20, 22, 23 (gate 21/fuzz is opt-in via -Fuzz).
+    gates: 01-20, 22-33, 39-42 (gate 21/fuzz is opt-in via -Fuzz).
 
     Gates (see build_test.sh for the full rationale behind each):
       01  build              scripts\windows\build-windows.ps1
@@ -67,6 +67,30 @@
                              named feature store, Diversify/feedback
                              controls, telemetry/trajectory/cross-modal
                              search (see build_test.sh Gate 22)
+      38  mcp_https        the MCP server's direct-TLS mode (--https):
+                             mcp\tests\mcp_https_smoke_client.py drives
+                             the fail-fast startup modes (missing/
+                             garbage/mismatched cert-or-key -> nonzero
+                             exit), TLS-only port, bearer-under-TLS
+                             (openssl for the throwaway cert; no DB)
+      39  extract_parse   standalone C unit probe
+                             (tests\extract_parse_probe.c) linked against
+                             src\fractalsql_parse.c: best_point/
+                             embedding_array/topk malformed-input branches
+                             (mingw gcc, no cluster)
+      40  vectors_probe   standalone C++17 unit probe (mcp\tests\
+                             vectors_probe.cpp) against mcp\src\vectors.cpp
+                             + errors.cpp -- coercion/validation branches
+                             (mingw g++, no DB)
+      41  db_probe        standalone C++17 unit probe (mcp\tests\
+                             db_probe.cpp) against libpq: DB-less
+                             branches always (16 checks), then the
+                             connected branches live against the
+                             throwaway cluster (run after gate 33)
+      42  concurrency_probe  standalone C++17 unit probe (mcp\tests\
+                             concurrency_probe.cpp) for mcp\src\
+                             concurrency.h's limit/timeout/Token-release
+                             branches (mingw g++, no DB)
 
 .PARAMETER PgDir
     PostgreSQL server tree (EDB install root or unpacked binaries.zip).
@@ -169,7 +193,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoRoot
 
-$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26','27','28','29','30','31','32')
+$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26','27','28','29','30','31','32','33','38','39','40','41','42','43','44','45','46','47','48')
 $QuickGates   = @('01','02')
 $FuzzGates    = @('21')
 
@@ -220,6 +244,38 @@ if ($Ubsan -or $Fuzz) {
 }
 if ($Ubsan) {
     $env:UBSAN_OPTIONS = 'print_stacktrace=1:halt_on_error=1'
+}
+
+# --- probe toolchain (gates 39-42) ------------------------------------------
+# The standalone unit-probe gates need HOST-side C/C++ compilers, not a
+# cluster toolchain: gate 39 links this repo's postgres.h-free src\
+# fractalsql_parse.c with gcc (mingw -- the same role Strawberry mingw's
+# gcc plays for the fixture plugins in build_test.sh's host-side runs),
+# and gates 40/41/42 are C++17 probes needing g++/clang++ SPECIFICALLY --
+# gcc alone mis-links the C++ standard-library symbols for these probes
+# (the same finding the sibling SQLite column's build_test.ps1 recorded
+# for its Find-Toolchain, which this mirrors). FSQL_CC / FSQL_CXX
+# override. Resolution happens up front but is only *used* by the gates;
+# absent compilers make the gates SKIP, not the run FAIL.
+$script:Cc = $null
+$script:Cxx = $null
+if ($env:FSQL_CC) {
+    $script:Cc = $env:FSQL_CC
+}
+else {
+    foreach ($n in @('gcc', 'clang', 'cc')) {
+        $c = Get-Command $n -ErrorAction SilentlyContinue
+        if ($c) { $script:Cc = $c.Source; break }
+    }
+}
+if ($env:FSQL_CXX) {
+    $script:Cxx = $env:FSQL_CXX
+}
+else {
+    foreach ($n in @('g++', 'clang++')) {
+        $c = Get-Command $n -ErrorAction SilentlyContinue
+        if ($c) { $script:Cxx = $c.Source; break }
+    }
 }
 # Postgres's "is this library already loaded" dedup (internal_load_library)
 # compares the path STRING, not a canonicalized/resolved path -- two
@@ -422,7 +478,7 @@ function Build-AsanExtension {
 
     $commonCompileArgs = @(
         '/nologo', '/MT', '/O2', '/fsanitize=address', '/Zi', '/c',
-        '/DWIN32', '/D_WINDOWS', '/D_CRT_SECURE_NO_WARNINGS', '/DFSQL_STATIC',
+        '/DWIN32', '/D_WINDOWS', '/D_CRT_SECURE_NO_WARNINGS', '/DFSQL_STATIC', '/DFSQL_FAULT_INJECT',
         "/I$(Join-Path $pgServerInc 'port\win32_msvc')",
         "/I$(Join-Path $pgServerInc 'port\win32')",
         "/I$pgServerInc",
@@ -501,12 +557,27 @@ function Build-UbsanExtension {
     # (LNK4098-class warning/error).
     $commonCompileArgs = @(
         '/nologo', '/MD', '/O2', '-fsanitize=undefined', '/Zi', '/c',
-        '/DWIN32', '/D_WINDOWS', '/D_CRT_SECURE_NO_WARNINGS', '/DFSQL_STATIC',
+        '/DWIN32', '/D_WINDOWS', '/D_CRT_SECURE_NO_WARNINGS', '/DFSQL_STATIC', '/DFSQL_FAULT_INJECT',
         "/I$(Join-Path $pgServerInc 'port\win32_msvc')",
         "/I$(Join-Path $pgServerInc 'port\win32')",
         "/I$pgServerInc",
         "/I$(Join-Path $PgDir 'include')",
-        "/I$inc"
+        "/I$inc",
+        # PostgreSQL's own port\atomics\generic-msvc.h passes volatile uint32*
+        # into InterlockedCompareExchange/InterlockedExchangeAdd's LONG
+        # volatile* params (and uint64* into the signed LONG64*_64 versions).
+        # MSVC compiles that fine, but clang >= 16 promotes
+        # -Wincompatible-pointer-types from a warning to an ERROR by default,
+        # and C mode has no -fpermissive to fall back on -- so without this the
+        # compile dies inside PG's header (2 errors at generic-msvc.h:55/:65)
+        # before reaching a line of fractalsql.c. The mismatch is
+        # same-width-only-different-sign and the two Interlocked calls have
+        # identical semantics for both pointee types, so this is a header
+        # lint, not a real bug -- downgrade to the warning clang defaults it
+        # to and move on. Verified 2026-10-13 on PG16 + LLVM 22: with this
+        # flag fractalsql.c/fractalsql_parse.c/fractalsql_vector.c all
+        # compile clean (2 benign -Wpointer-sign warnings remain).
+        '-Wno-error=incompatible-pointer-types'
     )
 
     & $script:ClangCl @commonCompileArgs "/Fo$fractalsqlObj" $src
@@ -543,7 +614,9 @@ function Gate01Build {
     } elseif ($Ubsan) {
         Build-UbsanExtension
     } else {
-        & "$RepoRoot\scripts\windows\build-windows.ps1" -PgDir $PgDir -PgMajor $PgMajor
+        # -FaultInject: test builds only -- compiles in src\fsql_fault.h so gate 47
+        # can fail individual SPI/core calls. The shipped build never sets it.
+        & "$RepoRoot\scripts\windows\build-windows.ps1" -PgDir $PgDir -PgMajor $PgMajor -FaultInject
     }
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Dll)) {
         Fail "01 build (PG$PgMajor)"
@@ -713,8 +786,43 @@ function PgSetup {
     # that rewrite -- pg_ctl -w start's normal (success) path doesn't
     # write to stderr at all, so the risk never actually manifested,
     # unlike the pipe-EOF hang, which manifested immediately.
-    & "$Bin\pg_ctl.exe" -D $DataDir -w -l (Join-Path $DataDir 'log') start
-    if ($LASTEXITCODE -ne 0) { throw "pg_ctl start failed -- see $DataDir\log" }
+    #
+    # ...except the bare form carries a SECOND latent hang, observed
+    # twice on 2026-10-13/14 (both runs byte-identically stalled at
+    # initdb's tail with zero child processes): it only avoids the pipe
+    # when THIS script's own stdout is a terminal handle. Any caller
+    # that redirects the script in-band (a background harness doing
+    # `& build_test.ps1 ... *> log`, the exact form the first observed
+    # hang already ran under) makes PowerShell wrap even this bare
+    # pg_ctl call's stdout in a pipe it reads to EOF -- the detached
+    # postmaster keeps the inherited write end open forever (that IS
+    # the daemon's job), and the read blocks at exactly "server
+    # started" like the original bug. (A `cmd.exe /s /c "... > file"`
+    # wrapper tried first here also fails: pwsh's native-argument
+    # re-quoting mangles the embedded quotes and cmd sees '""C:\Program'
+    # as the command.)
+    #
+    # The context-independent fix is the Gate28RunPgCtlWithTimeout pattern
+    # (gate 28's own retry-loop fix): the .NET Process API with Use-
+    # ShellExecute=false and NO stream redirection -- the child gets
+    # PowerShell's raw standard handles directly, bypassing pwsh's
+    # in-band redirection plumbing entirely, so nothing ever wraps the
+    # daemon's inherited handle in a pipe. start output (the two
+    # "waiting/server started" lines) is lost to the terminal in a
+    # redirected run -- by design; failure diagnosis still points at
+    # $DataDir\log, and pg_ctl itself gets a bounded wall clock (its
+    # -w readiness wait is the piece the gate-28 comment says can block
+    # on Windows) via WaitForExit + Kill.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "$Bin\pg_ctl.exe"
+    foreach ($a in @('-D', $DataDir, '-w', '-l', (Join-Path $DataDir 'log'), 'start')) { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if (-not $proc.WaitForExit(60000)) {
+        try { $proc.Kill($true) } catch { }
+        throw "pg_ctl start did not return within 60s -- see $DataDir\log"
+    }
+    if ($proc.ExitCode -ne 0) { throw "pg_ctl start failed (exit $($proc.ExitCode)) -- see $DataDir\log" }
 
     $createSql = @"
 CREATE FUNCTION fractal_version() RETURNS text AS '$DllPath','fractal_version' LANGUAGE C IMMUTABLE STRICT;
@@ -837,7 +945,7 @@ function PgSwapPlugin($path) {
 
 function Gate02Smoke {
     $ver = Psql -Sql "SELECT fractal_version();"
-    if ($ver -eq '2.0.19') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.19)" }
+    if ($ver -eq '2.0.20') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.20)" }
     $r = Psql -Sql @"
 WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
 SELECT CASE WHEN sqrt(v[1]*v[1]+v[2]*v[2])>1e-9
@@ -867,6 +975,35 @@ CREATE TABLE bt_orders (id serial PRIMARY KEY, customer_id int NOT NULL REFERENC
     if ($ctx -match 'name text NOT NULL')     { Pass "03 schema_context: NOT NULL" } else { Fail "03 schema_context: NOT NULL" }
     if ($ctx -match 'buyers')                 { Pass "03 schema_context: comment" }  else { Fail "03 schema_context: comment" }
     if ($ctx -match 'REFERENCES bt_customers'){ Pass "03 schema_context: FK" }       else { Fail "03 schema_context: FK" }
+
+    # Composite-FK schema context: a multi-column FK with both referential
+    # actions. The FK section of append_table_context prints
+    # pg_get_constraintdef output verbatim (src\fractalsql.c), so the
+    # emitted line must carry BOTH the (pa, pb) column pair -- proving a
+    # composite FK isn't rendered as a single-column one -- and both ON
+    # DELETE / ON UPDATE actions. Child columns stay NULLable: ON UPDATE
+    # SET NULL writes NULL into them by design, so NOT NULL here would be
+    # a self-contradictory (though create-time-accepted) schema. Cleaned
+    # up at gate end. Mirrors build_test.sh's gate 03.
+    Psql -Sql @"
+DROP TABLE IF EXISTS bt_fk_child, bt_fk_parent;
+CREATE TABLE bt_fk_parent (col_a int, col_b int, id serial PRIMARY KEY);
+ALTER TABLE bt_fk_parent ADD CONSTRAINT bt_fk_parent_ab_uniq UNIQUE (col_a, col_b);
+CREATE TABLE bt_fk_child (pa int, pb int);
+ALTER TABLE bt_fk_child ADD CONSTRAINT bt_fk_child_ab_fk
+  FOREIGN KEY (pa, pb) REFERENCES bt_fk_parent (col_a, col_b)
+  ON DELETE CASCADE ON UPDATE SET NULL;
+"@ | Out-Null
+    $fkCtx = Psql -Sql "SELECT fractal_schema_context(ARRAY['bt_fk_parent','bt_fk_child']);"
+    if ($fkCtx -match [regex]::Escape('FOREIGN KEY (pa, pb)')) { Pass "03 schema_context: composite-FK multi-column (pa, pb) line rendered" }
+    else { Fail "03 schema_context: composite-FK (pa, pb) columns missing: '$fkCtx'" }
+    if ($fkCtx -match 'REFERENCES bt_fk_parent') { Pass "03 schema_context: composite-FK REFERENCES line present" }
+    else { Fail "03 schema_context: composite-FK REFERENCES missing: '$fkCtx'" }
+    if ($fkCtx -match 'ON DELETE CASCADE') { Pass "03 schema_context: composite-FK ON DELETE CASCADE rendered" }
+    else { Fail "03 schema_context: ON DELETE CASCADE missing: '$fkCtx'" }
+    if ($fkCtx -match 'ON UPDATE SET NULL') { Pass "03 schema_context: composite-FK ON UPDATE SET NULL rendered" }
+    else { Fail "03 schema_context: ON UPDATE SET NULL missing: '$fkCtx'" }
+    Psql -Sql "DROP TABLE IF EXISTS bt_fk_child, bt_fk_parent;" | Out-Null
 }
 
 function T2sExpect($Canned, $Want, $Label) {
@@ -886,6 +1023,10 @@ function Gate04TextToSql {
     T2sExpect 'DELETE FROM bt_orders' 'not permitted' '04 DELETE'
     T2sExpect 'WITH d AS (DELETE FROM bt_orders RETURNING *) SELECT * FROM d' 'data-modifying CTE' '04 modifying-CTE'
     T2sExpect 'SELECT nope FROM bt_orders' 'does not analyze' '04 bad-column'
+    # Empty-candidate contract (sibling v2.0.9 port): a zero-length SUCCESS
+    # response from the plugin is a validation failure fed back + retried,
+    # never an empty statement passed on or executed.
+    T2sExpect 'FSQL_BT_EMPTY_RESPONSE' 'found 0' '04 empty-candidate'
     $n = Psql -Sql "SELECT count(*) FROM bt_orders;"
     if ($n -eq '0') { Pass "04 never-executes (bt_orders still empty)" } else { Fail "04 never-executes: row count=$n" }
 }
@@ -1017,6 +1158,178 @@ function Gate09GucSuperuser {
     } else {
         Fail "09 guc_superuser: expected rejection, got: $r"
     }
+    # The whole fractalsql.http_* provider family (url, token, model,
+    # embed_url, embed_model, think, think_provider, native_url, num_ctx,
+    # allow_plaintext) is GUC_SUPERUSER_ONLY: a non-superuser must not be
+    # able to READ the deployment's provider configuration, while the rest
+    # of the config surface stays readable. The boundary is PER-KEY -- the
+    # positive control below proves the gate is not a blanket refusal.
+    $rRead = Psql -Sql "SELECT current_setting('fractalsql.http_model', true);" -User 'bt_lowpriv2'
+    if ($rRead -match '(?i)permission denied|must be a?n? ?superuser') {
+        Pass "09 guc_superuser: non-superuser rejected from reading http_model"
+    } else {
+        Fail "09 guc_superuser: expected a privilege error reading http_model, got: $rRead"
+    }
+    $rRead2 = Psql -Sql "SELECT current_setting('fractalsql.text_to_sql_max_attempts', true);" -User 'bt_lowpriv2'
+    if ($rRead2 -match '^\d+$') {
+        Pass "09 guc_superuser: the boundary is per-key -- a non-superuser still reads a non-superuser-only key"
+    } else {
+        Fail "09 guc_superuser: expected text_to_sql_max_attempts to stay readable, got: $rRead2"
+    }
+
+    # ---- T-G: the typed config surface (fractalsql_set_config() /
+    # fractalsql_get_config(), src\fractalsql.c's fsql_cfg_keys[] table).
+    # This is the SQL-callable wrapper over the fractalsql.* GUCs, and
+    # it is what promises typed validation, a per-key privilege
+    # boundary, a scope boundary, and an error naming the known keys.
+    # None of that was asserted anywhere before: the surface compiled
+    # and loaded, but no gate ever called it.
+    $rG = Psql -Sql "SELECT fractalsql_get_config('nope');"
+    if ($rG -match 'unknown config key "nope"' -and $rG -match 'Known keys:') {
+        Pass "09 cfg: an unknown key is an error that lists the known keys (get)"
+    } else {
+        Fail "09 cfg: expected an unknown-key error naming the known keys, got: $rG"
+    }
+    $rG2 = Psql -Sql "SELECT fractalsql_set_config('nope','x');"
+    if ($rG2 -match 'unknown config key "nope"') {
+        Pass "09 cfg: an unknown key is an error, never a silent no-op (set)"
+    } else {
+        Fail "09 cfg: expected an unknown-key error, got: $rG2"
+    }
+
+    # Both spellings of a key are accepted, case-insensitively -- the
+    # bare name ("http_url") and the GUC's own name
+    # ("fractalsql.http_url"). The bare form used to be matched
+    # case-SENSITIVELY (fsql_cfg_lookup() folded only the prefixed
+    # spelling), which contradicted both the function's own contract
+    # and the SQL COMMENT on the two functions.
+    $rG3 = Psql -Sql "SELECT fractalsql_get_config('text_to_sql_max_attempts');"
+    $rG4 = Psql -Sql "SELECT fractalsql_get_config('fractalsql.text_to_sql_max_attempts');"
+    if ($rG3 -eq $rG4 -and $rG3 -match '^\d+$') {
+        Pass "09 cfg: the bare key and the GUC spelling return the same value"
+    } else {
+        Fail "09 cfg: expected the two spellings to agree, got bare='$rG3' prefixed='$rG4'"
+    }
+    $rG5 = Psql -Sql "SELECT fractalsql_get_config('TEXT_TO_SQL_MAX_ATTEMPTS');"
+    $rG6 = Psql -Sql "SELECT fractalsql_get_config('FRACTALSQL.text_to_sql_max_attempts');"
+    if ($rG5 -eq $rG3 -and $rG6 -eq $rG3) {
+        Pass "09 cfg: both key spellings are matched case-insensitively"
+    } else {
+        Fail "09 cfg: expected case-insensitive matching, got bare-upper='$rG5' prefixed-upper='$rG6' (expected '$rG3')"
+    }
+
+    # A bool key canonicalizes to on/off and the value written IS the
+    # GUC's own value -- current_setting() has to agree with it in the
+    # SAME session. One Psql call = one backend = one session, which
+    # matters: the write is session-scoped, so a separate call would
+    # read a fresh backend's untouched default.
+    $rG7 = Psql -Sql "SELECT fractalsql_set_config('agent_partial_reasoning_fail','yes') || '=' || fractalsql_get_config('agent_partial_reasoning_fail') || '=' || current_setting('fractalsql.agent_partial_reasoning_fail');"
+    if ($rG7 -eq 'on=on=on') {
+        Pass "09 cfg: a bool key canonicalizes 'yes' to 'on' and the value lands in the GUC itself"
+    } else {
+        Fail "09 cfg: expected on=on=on, got: $rG7"
+    }
+    $rG8 = Psql -Sql "SELECT fractalsql_set_config('agent_partial_reasoning_fail','tru');"
+    if ($rG8 -match 'expects a boolean' -and $rG8 -match 'Accepted spellings') {
+        Pass "09 cfg: a bool key rejects an unrecognised spelling and names the accepted ones"
+    } else {
+        Fail "09 cfg: expected a boolean rejection, got: $rG8"
+    }
+
+    # Typed validation: int, enum, and the documented order --
+    # the VALUE is validated before the privilege and scope checks, so
+    # a bad value is reported as a bad value even for a key a session
+    # may not change.
+    $rG9 = Psql -Sql "SELECT fractalsql_set_config('http_num_ctx','notanint');"
+    if ($rG9 -match 'expects an integer') {
+        Pass "09 cfg: an int key rejects a non-integer"
+    } else {
+        Fail "09 cfg: expected an integer rejection, got: $rG9"
+    }
+    $rG10 = Psql -Sql "SELECT fractalsql_set_config('http_num_ctx','1048577');"
+    if ($rG10 -match 'must be between 0 and 1048576') {
+        Pass "09 cfg: an int key rejects a value outside its range"
+    } else {
+        Fail "09 cfg: expected a range rejection, got: $rG10"
+    }
+    $rG11 = Psql -Sql "SELECT fractalsql_set_config('text_to_sql_allowed_statements','drop');"
+    if ($rG11 -match 'must be one of: select\|select_insert_update') {
+        Pass "09 cfg: an enum key rejects a value outside its member list"
+    } else {
+        Fail "09 cfg: expected an enum rejection, got: $rG11"
+    }
+    $rG12 = Psql -Sql "SELECT fractalsql_set_config('text_to_sql_max_attempts','99');"
+    if ($rG12 -match 'must be between 1 and 10') {
+        Pass "09 cfg: an invalid value is reported BEFORE the scope check (text_to_sql_max_attempts is reload-scoped)"
+    } else {
+        Fail "09 cfg: expected the value error to win over the scope error, got: $rG12"
+    }
+
+    # The scope boundary: a reload-scoped (PGC_SIGHUP) key cannot be
+    # changed in a session, and the error names the ALTER SYSTEM +
+    # pg_reload_conf() path instead of silently doing nothing.
+    $rG13 = Psql -Sql "SELECT fractalsql_set_config('text_to_sql_max_attempts','3');"
+    if ($rG13 -match 'is reload-scoped and cannot be changed in a session' -and $rG13 -match 'ALTER SYSTEM SET' -and $rG13 -match 'pg_reload_conf') {
+        Pass "09 cfg: a reload-scoped key refuses a session change and names the ALTER SYSTEM + pg_reload_conf path"
+    } else {
+        Fail "09 cfg: expected the reload-scoped refusal with the ALTER SYSTEM hint, got: $rG13"
+    }
+    # ... while a session-settable key (PGC_USERSET / PGC_SUSET) IS
+    # writable in a session, and the canonical value comes back.
+    $rG14 = Psql -Sql "SELECT fractalsql_set_config('enterprise_ledger_key','cfgtest');"
+    if ($rG14 -eq 'cfgtest') {
+        Pass "09 cfg: a session-settable key (enterprise_ledger_key) is writable in a session"
+    } else {
+        Fail "09 cfg: expected the value to be accepted, got: $rG14"
+    }
+
+    # NULL arguments are argument faults, not "unset".
+    $rG15 = Psql -Sql "SELECT fractalsql_set_config(NULL,'x');"
+    if ($rG15 -match 'the key must not be NULL') {
+        Pass "09 cfg: set rejects a NULL key"
+    } else {
+        Fail "09 cfg: expected the NULL-key rejection, got: $rG15"
+    }
+    $rG16 = Psql -Sql "SELECT fractalsql_set_config('text_to_sql_max_attempts',NULL);"
+    if ($rG16 -match 'the value must not be NULL') {
+        Pass "09 cfg: set rejects a NULL value"
+    } else {
+        Fail "09 cfg: expected the NULL-value rejection, got: $rG16"
+    }
+    $rG17 = Psql -Sql "SELECT fractalsql_get_config(NULL);"
+    if ($rG17 -match 'the key must not be NULL') {
+        Pass "09 cfg: get rejects a NULL key"
+    } else {
+        Fail "09 cfg: expected the NULL-key rejection, got: $rG17"
+    }
+
+    # The config API enforces the SAME per-key privilege boundary the
+    # GUCs carry -- and, like the GUCs, it is per-key, not blanket.
+    $rL1 = Psql -Sql "SELECT fractalsql_set_config('http_url','http://x');" -User 'bt_lowpriv2'
+    if ($rL1 -match 'is a superuser-only setting') {
+        Pass "09 cfg: a non-superuser cannot SET a superuser-only key through the config API"
+    } else {
+        Fail "09 cfg: expected the superuser-only rejection, got: $rL1"
+    }
+    $rL2 = Psql -Sql "SELECT fractalsql_get_config('http_url');" -User 'bt_lowpriv2'
+    if ($rL2 -match 'is a superuser-only setting') {
+        Pass "09 cfg: a non-superuser cannot READ a superuser-only key through the config API"
+    } else {
+        Fail "09 cfg: expected the superuser-only rejection, got: $rL2"
+    }
+    $rL3 = Psql -Sql "SELECT fractalsql_get_config('text_to_sql_max_attempts');" -User 'bt_lowpriv2'
+    if ($rL3 -match '^\d+$') {
+        Pass "09 cfg: the config API's privilege boundary is per-key -- a non-superuser still reads a non-superuser-only key"
+    } else {
+        Fail "09 cfg: expected text_to_sql_max_attempts to stay readable, got: $rL3"
+    }
+    $rL4 = Psql -Sql "SELECT fractalsql_set_config('agent_partial_reasoning_fail','on');" -User 'bt_lowpriv2'
+    if ($rL4 -eq 'on') {
+        Pass "09 cfg: a non-superuser may set a non-superuser-only, session-settable key"
+    } else {
+        Fail "09 cfg: expected the set to be accepted, got: $rL4"
+    }
+
     Psql -Sql "DROP ROLE bt_lowpriv2;" | Out-Null
 }
 
@@ -1166,6 +1479,73 @@ function Gate13SiuMode {
     else { Fail "13 siu_mode: row count=$n" }
 
     PgSetGuc -Name 'fractalsql.text_to_sql_allowed_statements' -SetVal "'select'" -Want 'select' | Out-Null
+
+    # ---- T-I: the check hook on fractalsql.text_to_sql_allowed_statements.
+    # The GUC carries a check hook (src\fractalsql.c's
+    # check_t2s_allowed_statements), so an invalid value is rejected AT
+    # SET TIME rather than merely refused later.
+    #
+    # A session SET cannot reach the hook: the GUC is PGC_SIGHUP, so
+    # PostgreSQL refuses the SET first ("cannot be changed now") and
+    # the hook never runs. ALTER SYSTEM is the one path that validates
+    # at set time, because that is where Postgres parses and checks the
+    # value it is about to persist.
+    $rI1 = Psql -Sql "SET fractalsql.text_to_sql_allowed_statements = 'bogus';"
+    if ($rI1 -match 'cannot be changed now') {
+        Pass "13 check-hook: a session SET of the PGC_SIGHUP GUC is refused by PostgreSQL itself"
+    } else {
+        Fail "13 check-hook: expected 'cannot be changed now', got: $rI1"
+    }
+    $rI2 = Psql -Sql "ALTER SYSTEM SET fractalsql.text_to_sql_allowed_statements = 'bogus';"
+    if ($rI2 -match 'invalid value for parameter "fractalsql\.text_to_sql_allowed_statements"' -and $rI2 -match 'Allowed values are "select" and "select_insert_update"') {
+        Pass "13 check-hook: ALTER SYSTEM rejects an invalid value and names the accepted ones"
+    } else {
+        Fail "13 check-hook: expected the check hook's rejection, got: $rI2"
+    }
+    # The rejected value must not have been persisted, and the server
+    # must still be alive and serving the previous value.
+    $autoConf = Join-Path $DataDir 'postgresql.auto.conf'
+    if (Test-Path $autoConf) {
+        $confText = Get-Content $autoConf -Raw
+        if ($confText -notmatch 'bogus') {
+            Pass "13 check-hook: the rejected value never reached postgresql.auto.conf"
+        } else {
+            Fail "13 check-hook: the rejected value was persisted to postgresql.auto.conf"
+        }
+    } else {
+        Warn "13 check-hook: postgresql.auto.conf not found -- skipped the persistence check"
+    }
+    Psql -Sql "SELECT pg_reload_conf();" | Out-Null
+    Start-Sleep -Seconds 2
+    $rI3 = Psql -Sql "SELECT current_setting('fractalsql.text_to_sql_allowed_statements');"
+    if ($rI3 -eq 'select') {
+        Pass "13 check-hook: the effective value is unchanged after the rejected ALTER SYSTEM"
+    } else {
+        Fail "13 check-hook: expected the effective value to still be 'select', got: $rI3"
+    }
+    $rI4 = Psql -Sql "SELECT 1;"
+    if ($rI4 -eq '1') {
+        Pass "13 check-hook: the server survived the rejected ALTER SYSTEM"
+    } else {
+        Fail "13 check-hook: expected the server to be alive, got: $rI4"
+    }
+    Psql -Sql "ALTER SYSTEM RESET fractalsql.text_to_sql_allowed_statements;" | Out-Null
+    Psql -Sql "SELECT pg_reload_conf();" | Out-Null
+
+    # The check hook is deliberately NOT applied to
+    # fractalsql.enterprise_lib: a rejecting hook there would fail the
+    # config reload of every backend that has the library loaded (the
+    # postmaster re-reads the same file), so an arbitrary path has to be
+    # accepted there and the refusal is raised at USE time instead --
+    # which is gate 31's job. Assert the asymmetry explicitly.
+    $rI5 = Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_lib = 'C:/nonexistent/fractalsql_ent_probe.dll';"
+    if ($rI5 -notmatch '(?i)error|invalid value') {
+        Pass "13 check-hook: enterprise_lib deliberately has no check hook (an arbitrary path is accepted at set time)"
+    } else {
+        Fail "13 check-hook: expected enterprise_lib to accept any path, got: $rI5"
+    }
+    Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_lib;" | Out-Null
+    Psql -Sql "SELECT pg_reload_conf();" | Out-Null
 }
 
 # Retry-with-feedback: max_attempts>1 with a plugin (tests\windows\
@@ -1213,6 +1593,46 @@ function Gate14Retry {
     $n = Psql -Sql "SELECT count(*) FROM bt_orders;"
     if ($n -eq '0') { Pass "14 retry: never-executes held across retries" }
     else { Fail "14 retry: row count=$n" }
+
+    # --- review exhaustion: t2s_run_review's own exhausted-attempts branch
+    #     (src\fractalsql.c: "exhausted %d attempt(s), last review verdict").
+    #     Review PASSES only when the critique response starts with PASS
+    #     (pg_strncasecmp(p, "PASS", 4) in t2s_run_review) -- and the
+    #     standard MOCK plugin's REVIEW response can NEVER satisfy that, by
+    #     construction: ensure_review_ctx() loads with RESPONSE_MODE unset
+    #     (see its own comment), so mock_generate() always renders the
+    #     canned file content as a ```sql-fenced chat response beginning
+    #     "```s..." -- no sentinel content can ever produce a PASS prefix.
+    #     max_attempts=1 therefore turns the first (and only) review FAIL
+    #     directly into the exhaustion error. Mirrors build_test.sh's
+    #     gate 14.
+    if (-not (PgSetGuc -Name 'fractalsql.text_to_sql_max_attempts' -SetVal '1' -Want '1')) {
+        Fail "14 review-exhaustion: max_attempts GUC did not take effect"; return
+    }
+    if (-not (PgSetGuc -Name 'fractalsql.text_to_sql_use_review' -SetVal 'on' -Want 'on')) {
+        Fail "14 review-exhaustion: use_review GUC did not take effect"; return
+    }
+    if (-not (PgSwapPlugin $Mock)) {
+        Fail "14 review-exhaustion: plugin swap did not take effect"
+        PgSetGuc -Name 'fractalsql.text_to_sql_use_review' -SetVal 'off' -Want 'off' | Out-Null; return
+    }
+    Set-Content -Path $SqlFile -Value 'SELECT 1' -NoNewline
+    $rr = Psql -Sql "SELECT fractal_text_to_sql('q', ARRAY['bt_customers','bt_orders']);"
+    if ($rr -match 'server closed the connection|could not connect') {
+        Fail "14 review-exhaustion: backend crashed -- $rr"
+    } elseif ($rr -match 'exhausted 1 attempt\(s\), last review verdict' -and $rr -match '```sql') {
+        Pass "14 review-exhaustion: review FAIL twice over -> 'exhausted 1 attempt(s), last review verdict' with the mock's fenced critique"
+    } else {
+        Fail "14 review-exhaustion: expected the review-exhaustion rejection, got: $rr"
+    }
+    if ($rr -match 'Last candidate SQL: SELECT 1') {
+        Pass "14 review-exhaustion: errdetail carries the last candidate SQL"
+    } else {
+        Fail "14 review-exhaustion: errdetail missing: '$rr'"
+    }
+    Remove-Item -Force $SqlFile -ErrorAction SilentlyContinue
+    PgSetGuc -Name 'fractalsql.text_to_sql_use_review' -SetVal 'off' -Want 'off' | Out-Null
+    # max_attempts and the plugin are left at 1/$Mock by the restores below.
 
     PgSetGuc -Name 'fractalsql.text_to_sql_max_attempts' -SetVal '1' -Want '1' | Out-Null
     PgSwapPlugin $Mock | Out-Null
@@ -1306,6 +1726,66 @@ function Gate15Embed {
     if ($status -eq 'done') { Pass "15 embed: vectorizer status shows done, no failures" }
     else { Fail "15 embed: expected status 'done', got: $status" }
 
+    # --- vectorizer-failed-rows: the process_queue failure path
+    #     (sql\fractalsql--1.0.sql's EXCEPTION WHEN OTHERS block: every
+    #     failing row must END status='failed' with error=SQLERRM and an
+    #     updated_at, visible through fractal_vectorizer_status's
+    #     last_failure_at/last_error columns) -- plus the claim/retry logic
+    #     that decides what "recovering" means. Disrupt ONE condition: blank
+    #     fractalsql.http_embed_url the way this gate itself swaps GUCs
+    #     (PgSetGuc = ALTER SYSTEM + reload + poll; save the pinned value
+    #     and restore it below). With the URL unset, ensure_embed_ctx()
+    #     (src\fractalsql.c) raises "fractal_embed:
+    #     fractalsql.http_embed_url is not configured" before any dispatch
+    #     -- deterministic, no HTTP involved. Two new trigger-enqueued rows
+    #     exercise it. Mirrors build_test.sh's gate 15.
+    if (-not (PgSetGuc -Name 'fractalsql.http_embed_url' -SetVal "''" -Want '')) {
+        Fail "15 vectorizer-failed-rows: could not blank fractalsql.http_embed_url"; return
+    }
+    Psql -Sql "INSERT INTO bt_embed_docs (body) VALUES ('c'), ('d');" | Out-Null
+    $rfail = Psql -Sql "SELECT fractal_vectorizer_process_queue();"
+    $nfail = Psql -Sql "SELECT count(*) FROM fractal_vectorizer_queue WHERE vectorizer_id = $vzid AND status = 'failed' AND COALESCE(error, '') <> '';"
+    if ($nfail -eq '2') { Pass "15 vectorizer-failed-rows: both queued rows end status='failed' with a non-empty error" }
+    else { Fail "15 vectorizer-failed-rows: expected 2 failed rows with an error string, got: $nfail ($rfail)" }
+    $ftxt = Psql -Sql "SELECT bool_and(error LIKE '%http_embed_url is not configured%') FROM fractal_vectorizer_queue WHERE vectorizer_id = $vzid AND status = 'failed';"
+    if ($ftxt -eq 't') { Pass "15 vectorizer-failed-rows: error carries the engine's own 'http_embed_url is not configured' message" }
+    else { Fail "15 vectorizer-failed-rows: expected the ensure_embed_ctx error text in the queue rows, got: $ftxt" }
+    # The view groups BY status (one row per queued-status group for this
+    # vectorizer -- done/failed/... coexist), so assert on the failed GROUP's
+    # presence, not on any one emitted line (the docker gate caught the
+    # line-shape assumption: the done row sorts first, the failed row's
+    # display truncates, and the line-regexes were order-fragile).
+    $vstat = Psql -Sql "SELECT count(*) FROM fractal_vectorizer_status WHERE vectorizer_id = $vzid AND status = 'failed' AND last_failure_at IS NOT NULL AND last_error LIKE '%http_embed_url is not configured%';"
+    if ($vstat -eq '1') {
+        Pass "15 vectorizer-failed-rows: fractal_vectorizer_status shows the failed group with last_failure_at and last_error set"
+    } else {
+        Fail "15 vectorizer-failed-rows: expected the failed group row in fractal_vectorizer_status, got: $vstat"
+    }
+
+    # Recovery: the claim loop only ever picks status='pending' rows (the
+    # FOR r IN SELECT ... WHERE q.status = 'pending' in process_queue), so a
+    # bare re-run never retries the failed rows -- it returns 0 and leaves
+    # them failed. Restoring the embed config alone is therefore not
+    # enough; the operator path is a pending-reset UPDATE (the exact shape
+    # of process_queue's own stale_after reclaim UPDATE), after which the
+    # same rows complete with the canned embedding.
+    $nretry = Psql -Sql "SELECT fractal_vectorizer_process_queue();"
+    if ($nretry -eq '0') { Pass "15 vectorizer-failed-rows: a bare re-run does NOT retry failed rows (claim only picks 'pending'; returned 0)" }
+    else { Fail "15 vectorizer-failed-rows: expected process_queue to not retry failed rows (0), got: $nretry" }
+    # Restore the pinned embed URL FIRST: by itself it recovers nothing
+    # (asserted above), and it is what lets the pending-reset rows below
+    # actually succeed with the canned embedding.
+    if (-not (PgSetGuc -Name 'fractalsql.http_embed_url' -SetVal "'http://unused/embeddings'" -Want 'http://unused/embeddings')) {
+        Fail "15 vectorizer-failed-rows: could not restore fractalsql.http_embed_url"; return
+    }
+    Psql -Sql "UPDATE fractal_vectorizer_queue SET status = 'pending', processing_started_at = NULL WHERE vectorizer_id = $vzid AND status = 'failed';" | Out-Null
+    $nrec = Psql -Sql "SELECT fractal_vectorizer_process_queue();"
+    if ($nrec -eq '2') { Pass "15 vectorizer-failed-rows: after restoring the config + a pending-reset, the recovered rows process to done" }
+    else { Fail "15 vectorizer-failed-rows: expected 2 recovered rows after the pending-reset, got: $nrec" }
+    $ndone = Psql -Sql "SELECT count(*) FROM bt_embed_docs WHERE embedding = '{0.1,0.2,0.3}';"
+    if ($ndone -eq '4') { Pass "15 vectorizer-failed-rows: all 4 rows carry the canned embedding after recovery" }
+    else { Fail "15 vectorizer-failed-rows: expected 4 embedded rows after recovery, got: $ndone" }
+
     Psql -Sql "DELETE FROM fractal_vectorizers WHERE source_table = 'bt_embed_docs';" | Out-Null
     Psql -Sql "DROP TABLE IF EXISTS bt_embed_docs;" | Out-Null
     PgSwapPlugin $Mock | Out-Null
@@ -1380,6 +1860,130 @@ DELETE FROM fractal_vectorizers WHERE source_table = 'bt_embed_owned';
 DROP TABLE IF EXISTS bt_embed_owned;
 DROP ROLE IF EXISTS bt_embed_owner;
 DROP ROLE IF EXISTS bt_embed_outsider;
+"@ | Out-Null
+
+    # ---- the CONFUSED-DEPUTY half (the PROCESSOR's read) ----
+    #
+    # The asserts above prove the CALLER's own privileges are enforced:
+    # the dynamic SELECT runs as the caller, so an outsider gets
+    # Postgres's own "permission denied". The other half of the H fix is
+    # the read that happens with the PROCESSOR's privileges.
+    # fractal_vectorizer_process_queue() is SECURITY INVOKER, so it reads
+    # the content column with whoever ran the batch -- and in the default
+    # deployment that is the MCP server's own role, a SUPERUSER
+    # (docker-compose.yml: PGUSER: postgres), while the vectorizer row may
+    # have been registered by, and the queue row INSERTed by, a DIFFERENT
+    # unprivileged role. fractal_vectorizers and fractal_vectorizer_queue
+    # are both PUBLIC-writable, so without a gate an unprivileged role
+    # could name ANY real relation and have the superuser's
+    # process_queue() read that relation's content column and ship it to
+    # the embedding provider -- the read is UNAUTHORIZED even though the
+    # SQL that triggers it is legitimate.
+    #
+    # The gate now asks the vectorizer's CREATOR -- the role that
+    # legitimately asked for this content to be embedded -- whether IT is
+    # entitled to SELECT the content column. The creator is unforgeable
+    # (pinned by fractal_vectorizer_pin_creator) and the target is
+    # immutable (fractal_vectorizer_guard_identity), so the pair cannot be
+    # steered at a target its creator is not entitled to.
+    Psql -Sql @"
+DROP ROLE IF EXISTS bt_dep_lowpriv;
+CREATE ROLE bt_dep_lowpriv LOGIN;
+GRANT USAGE ON SCHEMA public TO bt_dep_lowpriv;
+DROP TABLE IF EXISTS bt_dep_secret;
+CREATE TABLE bt_dep_secret (id int PRIMARY KEY, body text, embedding float8[]);
+INSERT INTO bt_dep_secret(id, body) VALUES (1, 'the secret body');
+REVOKE ALL ON bt_dep_secret FROM PUBLIC;
+GRANT SELECT (id, embedding) ON bt_dep_secret TO bt_dep_lowpriv;
+"@ | Out-Null
+
+    # The registry row names a table the low-priv role does not own and
+    # cannot read the content column of -- and ASKS to be attributed to a
+    # superuser, so the pinning trigger has to refuse the attribution.
+    $depid = Psql -User 'bt_dep_lowpriv' -Sql @"
+INSERT INTO fractal_vectorizers
+       (source_table, source_pk_col, text_col, embedding_col, created_by)
+VALUES ('bt_dep_secret', 'id', 'body', 'embedding', 'postgres')
+RETURNING id;
+"@
+    # psql prints the command tag ("INSERT 0 1") after the RETURNING row,
+    # so the captured text is two lines -- take the first one only.
+    $depid = (($depid -split "`r?`n") | Where-Object { $_ -ne '' } | Select-Object -First 1)
+    $depidNum = 0
+    if ([int]::TryParse($depid, [ref]$depidNum)) {
+        $depOwner = Psql -Sql "SELECT created_by FROM fractal_vectorizers WHERE id = $depidNum;"
+        if ($depOwner -eq 'bt_dep_lowpriv') {
+            Pass "16 embed_authz: the registry row's creator is pinned to the inserting role (a forged superuser attribution is ignored)"
+        } else {
+            Fail "16 embed_authz: expected created_by=bt_dep_lowpriv (pinned), got: $depOwner"
+        }
+    } else {
+        Fail "16 embed_authz: the low-priv role could not register a vectorizer row: $depid"
+    }
+
+    if ([int]::TryParse($depid, [ref]$depidNum)) {
+        # The queue row is INSERTed by the same unprivileged role -- the
+        # registry and the queue are both PUBLIC-writable.
+        Psql -User 'bt_dep_lowpriv' -Sql "INSERT INTO fractal_vectorizer_queue (vectorizer_id, source_pk_value) VALUES ($depidNum, '1');" | Out-Null
+
+        # The PROCESSOR is the superuser: exactly the default deployment.
+        Psql -Sql "SELECT fractal_vectorizer_process_queue();" | Out-Null
+
+        $depErr = Psql -Sql @"
+SELECT last_error FROM fractal_vectorizer_status
+ WHERE vectorizer_id = $depidNum AND status = 'failed';
+"@
+        if ($depErr -match 'is not entitled to SELECT the content column') {
+            Pass "16 embed_authz: the superuser's process_queue() refuses the low-priv creator's deputy read of the content column"
+        } else {
+            Fail "16 embed_authz: expected the entitlement refusal, got: $depErr"
+        }
+
+        $depLeak = Psql -Sql "SELECT embedding FROM bt_dep_secret WHERE embedding IS NOT NULL;"
+        if ([string]::IsNullOrEmpty($depLeak)) {
+            Pass "16 embed_authz: nothing was embedded, so the secret body never left the database"
+        } else {
+            Fail "16 embed_authz: an embedding was written despite the refused deputy read: $depLeak"
+        }
+
+        # The target and the creator are immutable against UPDATE, so a
+        # privileged role cannot re-point an existing vectorizer at
+        # another relation after the fact.
+        $depRetarget = Psql -Sql "UPDATE fractal_vectorizers SET created_by = 'postgres' WHERE id = $depidNum;"
+        if ($depRetarget -match 'immutable') {
+            Pass "16 embed_authz: the registry row's creator cannot be re-attributed by an UPDATE"
+        } else {
+            Fail "16 embed_authz: expected the immutability guard to reject the re-attribution, got: $depRetarget"
+        }
+
+        # Positive control: once the creator IS entitled to the content
+        # column, the entitlement gate must stop firing -- otherwise the
+        # refusal above would prove nothing.
+        Psql -Sql "GRANT SELECT (body) ON bt_dep_secret TO bt_dep_lowpriv;" | Out-Null
+        $depEntitled = Psql -Sql "SELECT has_column_privilege('bt_dep_lowpriv', 'bt_dep_secret'::regclass, 'body', 'SELECT');"
+        if ($depEntitled -eq 't') {
+            Pass "16 embed_authz: the creator's column-level entitlement is what the gate reads"
+        } else {
+            Fail "16 embed_authz: expected has_column_privilege=true after the grant, got: $depEntitled"
+        }
+
+        Psql -User 'bt_dep_lowpriv' -Sql "UPDATE fractal_vectorizer_queue SET status = 'pending', error = NULL WHERE vectorizer_id = $depidNum;" | Out-Null
+        Psql -Sql "SELECT fractal_vectorizer_process_queue();" | Out-Null
+        $depErr2 = Psql -Sql @"
+SELECT coalesce(max(last_error), '') FROM fractal_vectorizer_status
+ WHERE vectorizer_id = $depidNum AND status = 'failed';
+"@
+        if ($depErr2 -match 'is not entitled to SELECT the content column') {
+            Fail "16 embed_authz: the entitlement gate still fired after granting the creator SELECT on the content column"
+        } else {
+            Pass "16 embed_authz: once the creator is entitled, the entitlement gate stops firing (the refusal above was the gate, not a broken batch)"
+        }
+    }
+
+    Psql -Sql @"
+DELETE FROM fractal_vectorizers WHERE source_table = 'bt_dep_secret';
+DROP TABLE IF EXISTS bt_dep_secret;
+DROP ROLE IF EXISTS bt_dep_lowpriv;
 "@ | Out-Null
 }
 
@@ -1566,6 +2170,29 @@ function Gate19SfsBounds {
     if ($r -match 'diffusion_factor 33 out of range') { Pass "19 sfs_bounds: fractal_search_debug shares the same bounds check" }
     else { Fail "19 sfs_bounds: expected fractal_search_debug to reject diffusion_factor=33, got: $r" }
 
+    # fractal_search_debug's full search-state telemetry: the result jsonb
+    # is the vendored core's raw fsql_search_ptr JSON round-tripped through
+    # jsonb_in, and its UNCONDITIONAL keys (one printf format in the core:
+    # {"dim":%d,"n_corpus":%zu,"best_fit":...,"best_point":...}) must all
+    # survive. Gate 02 only asserts best_point; this proves the debug
+    # payload is the full state, not a reduced shape. Mirrors
+    # build_test.sh's gate 19.
+    $rdbg = Psql -Sql "SELECT fractal_search_debug(ARRAY[0.6,0.8]::float8[], 30, 50, 2);"
+    if ($rdbg -match '"dim"' -and $rdbg -match '"n_corpus"' -and $rdbg -match '"best_fit"' -and $rdbg -match '"best_point"') {
+        Pass "19 sfs_bounds: fractal_search_debug returns the full search-state telemetry (dim/n_corpus/best_fit/best_point)"
+    } else {
+        Fail "19 sfs_bounds: fractal_search_debug missing telemetry keys: $rdbg"
+    }
+
+    # Wrong-typed query arg: float8[] cannot be resolved from text[] (no
+    # implicit array-element cast), so postgres's own type resolver rejects
+    # before the C function ever runs. The C-side ARR_ELEMTYPE guard in
+    # float8_array_to_doubles ("query must be float8[], got %s") is only
+    # reachable from internal callers, not SQL typing.
+    $rwt = Psql -Sql "SELECT fractal_search_debug('{0.1,0.2}'::text[], 30, 50, 2);"
+    if ($rwt -match 'does not exist') { Pass "19 sfs_bounds: fractal_search_debug rejects a wrong-typed query arg (PG type resolution)" }
+    else { Fail "19 sfs_bounds: expected a type-resolution rejection, got: $rwt" }
+
     $rinj = Psql -Sql "SELECT * FROM fractal_search_explore('bt_orders''; DROP TABLE bt_orders; --', 'vec', ARRAY[0.1,0.2]::float8[]);"
     $n = Psql -Sql "SELECT count(*) FROM bt_orders;"
     if ($n -eq '0') { Pass "19 sfs_bounds: injection-shaped table_name into fractal_search_explore did not execute (bt_orders intact)" }
@@ -1692,6 +2319,24 @@ WHERE q.vectorizer_id = $vzid ORDER BY t.body;
 DELETE FROM fractal_vectorizers WHERE source_table = 'bt_stale_reclaim';
 DROP TABLE IF EXISTS bt_stale_reclaim;
 "@ | Out-Null
+
+    # --- 6: FSQL_MAX_INPUT_BYTES over-cap rejection (src\fractalsql.c:239).
+    #     grep FSQL_MAX_INPUT_BYTES shows exactly ONE use site in this repo:
+    #     the dispatch budget in fractal_embed() itself (its strlen check)
+    #     -- fractal_text_to_sql() has NO byte cap to reject with (its
+    #     input is the question string plus in-engine-built schema context;
+    #     there is no engine-side over-cap error text to assert), so the
+    #     overload call here goes to fractal_embed() only. 4 MiB + 1 chars,
+    #     built with repeat(), and rejected BEFORE any plugin dispatch --
+    #     deterministic even though the URL/embed GUCs are still configured
+    #     for part 5 above. Mirrors build_test.sh's gate 20.
+    $rov = Psql -Sql "SELECT fractal_embed(repeat('A', 4*1024*1024 + 1));"
+    if ($rov -match 'fractal_embed: input exceeds the 4 MiB limit') {
+        Pass "20 api_func: a 4 MiB + 1 embed input is rejected with the engine's own over-cap error"
+    } else {
+        Fail "20 api_func: expected 'input exceeds the 4 MiB limit', got: $rov"
+    }
+
     PgSwapPlugin $Mock | Out-Null
 }
 
@@ -1900,6 +2545,143 @@ INSERT INTO bt_combined_docs (emb) VALUES
     else { Fail "22 v2_functions: expected an alpha_weight rejection, got: $r17" }
 
     Psql -Sql "DROP TABLE IF EXISTS bt_telemetry_docs, bt_combined_docs;" | Out-Null
+
+    # --- 7: rejection-class sweep for the v2.x primitives, extending the
+    #     happy paths gates 22/29/30 already prove. Every string asserted
+    #     here is this repo's own error text (src\fractalsql.c /
+    #     src\fractalsql_vector.c), not the SQLite sibling's wording.
+    #     Mirrors build_test.sh's gate 22 section 7.
+    $rk1 = Psql -Sql "SELECT fractal_optimize_portfolio(ARRAY[0.1,0.05]::float8[], ARRAY[0.04,0.01,0.01,0.03]::float8[], 0, 1);"
+    if ($rk1 -match 'k must satisfy 1 <= k <= n_assets') { Pass "22 rejection: optimize_portfolio rejects k<=0" }
+    else { Fail "22 rejection: expected the k<=0 rejection, got: $rk1" }
+    $rk2 = Psql -Sql "SELECT fractal_optimize_portfolio(ARRAY[0.1,0.05]::float8[], ARRAY[0.04,0.01,0.01,0.03]::float8[], 3, 1);"
+    if ($rk2 -match 'k must satisfy 1 <= k <= n_assets') { Pass "22 rejection: optimize_portfolio rejects k>n_assets" }
+    else { Fail "22 rejection: expected the k>n_assets rejection, got: $rk2" }
+
+    $rt1 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0]::float8[], 0);"
+    if ($rt1 -match 'dim must be > 0') { Pass "22 rejection: tda_persistence_diagram rejects dim<=0" }
+    else { Fail "22 rejection: expected a dim<=0 rejection, got: $rt1" }
+    $rt2 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,1.0]::float8[], 3);"
+    if ($rt2 -match [regex]::Escape('points length (2) must be a multiple of dim (3)')) { Pass "22 rejection: tda_persistence_diagram rejects a point list that is not a multiple of dim" }
+    else { Fail "22 rejection: expected a points-length rejection, got: $rt2" }
+    $rt3 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0]::float8[], 2);"
+    if ($rt3 -match '2 <= n_points') { Pass "22 rejection: tda_persistence_diagram rejects a single-point cloud (n_points >= 2)" }
+    else { Fail "22 rejection: expected a too-few-points rejection, got: $rt3" }
+    $rt4 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0,2.0,2.0]::float8[], 2, 2);"
+    if ($rt4 -match 'max_dim in \{0,1\}') { Pass "22 rejection: tda_persistence_diagram rejects max_dim=2 (core supports only {0,1})" }
+    else { Fail "22 rejection: expected a max_dim rejection, got: $rt4" }
+
+    $rp1 = Psql -Sql "SELECT fractal_periodogram(ARRAY[1.0,2.0,3.0,4.0]::float8[], 0);"
+    if ($rp1 -match 'max_peaks must be > 0') { Pass "22 rejection: periodogram rejects max_peaks<=0" }
+    else { Fail "22 rejection: expected a max_peaks rejection, got: $rp1" }
+    $rp2 = Psql -Sql "SELECT fractal_periodogram(ARRAY[1.0,2.0,3.0]::float8[], 4);"
+    if ($rp2 -match 'need n >= 4') { Pass "22 rejection: periodogram rejects a too-short series" }
+    else { Fail "22 rejection: expected a need-n>=4 rejection, got: $rp2" }
+    $rp3 = Psql -Sql "SELECT fractal_periodogram(ARRAY[[1.0,2.0],[3.0,4.0]]::float8[], 4);"
+    if ($rp3 -match 'query must be 1-D non-null float8\[\]') { Pass "22 rejection: periodogram rejects a 2-D (malformed) series" }
+    else { Fail "22 rejection: expected the 1-D-non-null rejection, got: $rp3" }
+
+    # (The negative hamming_threshold branch is gate 30's already.)
+    $rc1 = Psql -Sql "SELECT count(*) FROM fractal_cycle_detect(ARRAY[]::bytea[], 0);"
+    if ($rc1 -match 'fingerprints array must not be empty') { Pass "22 rejection: cycle_detect rejects an empty fingerprints array" }
+    else { Fail "22 rejection: expected an empty-array rejection, got: $rc1" }
+    $rc2 = Psql -Sql "SELECT count(*) FROM fractal_cycle_detect(ARRAY['ab'::bytea, NULL]::bytea[], 0);"
+    if ($rc2 -match 'fingerprints array must not contain NULLs') { Pass "22 rejection: cycle_detect rejects a NULL fingerprint element" }
+    else { Fail "22 rejection: expected a NULL-element rejection, got: $rc2" }
+    $rc3 = Psql -Sql "SELECT count(*) FROM fractal_cycle_detect(ARRAY['ab'::bytea, 'abc'::bytea]::bytea[], 0);"
+    if ($rc3 -match 'every fingerprint must be the same length') { Pass "22 rejection: cycle_detect rejects mixed-length fingerprints" }
+    else { Fail "22 rejection: expected a length-mismatch rejection, got: $rc3" }
+
+    $rs1 = Psql -Sql "SELECT fractal_state_fingerprint(ARRAY[[1.0,2.0],[3.0,4.0]]::float8[], 8, 42);"
+    if ($rs1 -match 'query must be 1-D non-null float8\[\]') { Pass "22 rejection: state_fingerprint rejects a 2-D vec" }
+    else { Fail "22 rejection: expected a 1-D-non-null rejection, got: $rs1" }
+
+    # The native vector type's dimension cap -- the REAL cap is
+    # FRACTALVEC_MAX_DIM = 32767 (src\fractalsql_vector.c). fractal_vector_
+    # add's happy path is gate 29's; this covers its input-parse rejection
+    # surface.
+    $rv1 = Psql -Sql "SELECT fractal_vector_add('[]'::fractal_vector, '[1,2,3]'::fractal_vector);"
+    if ($rv1 -match 'fractal_vector dimension must be between 1 and 32767, got 0') { Pass "22 rejection: fractal_vector rejects a zero-dimension ('[]') input" }
+    else { Fail "22 rejection: expected the zero-dim rejection, got: $rv1" }
+    $rv2 = Psql -Sql "SELECT fractal_vector_add('[1,2'::fractal_vector, '[1,2,3]'::fractal_vector);"
+    if ($rv2 -match "expected ']'") { Pass "22 rejection: fractal_vector_add rejects an unclosed vector literal" }
+    else { Fail "22 rejection: expected an unclosed-literal rejection, got: $rv2" }
+    $rv3 = Psql -Sql "SELECT fractal_vector_dims(('[' || repeat('1,', 32767) || '1]')::fractal_vector);"
+    if ($rv3 -match 'dimension exceeds maximum 32767') { Pass "22 rejection: fractal_vector rejects dim>32767 (32768-element literal)" }
+    else { Fail "22 rejection: expected the 32767-cap rejection, got: $rv3" }
+
+    # NULL required vector args: the portfolio entries are deliberately
+    # non-STRICT (their optional args use SQL-side NULL defaults), so a NULL
+    # mu/cov can legally arrive -- and the C entry used to deref it (backend
+    # SIGSEGV; the in-function guard now rejects cleanly). One case per
+    # entry: mu-null on _portfolio, cov-null on _portfolio, and mu-null on
+    # both multimodal entries.
+    $rn1 = Psql -Sql "SELECT fractal_optimize_portfolio(NULL, '{0.5,0.5,0.5,0.5}'::float8[], 1);"
+    if ($rn1 -match 'fractal_optimize_portfolio: mu must not be NULL') { Pass "22 rejection: fractal_optimize_portfolio rejects a NULL mu" }
+    else { Fail "22 rejection: expected the NULL-mu rejection, got: $rn1" }
+    $rn2 = Psql -Sql "SELECT fractal_optimize_portfolio('{0.25,0.25,0.5,0}'::float8[], NULL, 1);"
+    if ($rn2 -match 'fractal_optimize_portfolio: cov must not be NULL') { Pass "22 rejection: fractal_optimize_portfolio rejects a NULL cov" }
+    else { Fail "22 rejection: expected the NULL-cov rejection, got: $rn2" }
+    $rn3 = Psql -Sql "SELECT fractal_optimize_portfolio_multimodal(NULL, '{0.25,0.25,0.5,0}'::float8[], 2, 1, 0.25, 0.9, 42, false, 'diffusion');"
+    if ($rn3 -match 'fractal_optimize_portfolio_multimodal: mu must not be NULL') { Pass "22 rejection: fractal_optimize_portfolio_multimodal rejects a NULL mu" }
+    else { Fail "22 rejection: expected the multimodal NULL-mu rejection, got: $rn3" }
+    $rn4 = Psql -Sql "SELECT fractal_optimize_portfolio_multimodal_pareto(NULL, '{0.25,0.25,0.5,0}'::float8[], 2, 1, 8, 42, false, 'diffusion');"
+    if ($rn4 -match 'fractal_optimize_portfolio_multimodal_pareto: mu must not be NULL') { Pass "22 rejection: fractal_optimize_portfolio_multimodal_pareto rejects a NULL mu" }
+    else { Fail "22 rejection: expected the pareto NULL-mu rejection, got: $rn4" }
+
+    # ---- T-H: fractal_vector_to_json() / fractal_vector_from_text().
+    # A JSON and a text front end for the native vector type. The JSON
+    # is built on the type's OWN text rendering, deliberately NOT on a
+    # float8[] round trip (which would widen 0.1f to
+    # 0.10000000149011612) -- that difference is the point, so it is
+    # asserted rather than assumed.
+    $rh1 = Psql -Sql "SELECT fractal_vector_to_json('[1,2,3]'::fractal_vector)::text;"
+    if (($rh1 -replace '\s','') -eq '[1,2,3]') { Pass "22 vector-json: to_json renders a vector as a JSON array" }
+    else { Fail "22 vector-json: expected '[1, 2, 3]', got: $rh1" }
+    $rh2 = Psql -Sql "SELECT fractal_vector_to_json('[0.1,0.2,0.3]'::fractal_vector) = '[0.1,0.2,0.3]'::fractal_vector::text::jsonb;"
+    if ($rh2 -eq 't') { Pass "22 vector-json: to_json is exactly the type's own text rendering parsed as JSON" }
+    else { Fail "22 vector-json: expected the JSON to match the type's own text rendering, got: $rh2" }
+    $rh3 = Psql -Sql "SELECT fractal_vector_to_json('[0.1]'::fractal_vector) <> to_jsonb('[0.1]'::fractal_vector::float8[]);"
+    if ($rh3 -eq 't') { Pass "22 vector-json: the JSON is deliberately NOT the float8[] round trip (which would widen 0.1f)" }
+    else { Fail "22 vector-json: expected the JSON to differ from the float8[] round trip, got: $rh3" }
+
+    # from_text: exactly two accepted forms -- a JSON/pgvector-style
+    # array and a plain comma-separated list -- each with and without
+    # spaces after the commas.
+    $rh4 = Psql -Sql "SELECT fractal_vector_from_text('[1,2,3]')::text;"
+    if ($rh4 -eq '[1,2,3]') { Pass "22 vector-text: from_text parses the array form" }
+    else { Fail "22 vector-text: expected '[1,2,3]', got: $rh4" }
+    $rh5 = Psql -Sql "SELECT fractal_vector_from_text('1,2,3')::text;"
+    if ($rh5 -eq '[1,2,3]') { Pass "22 vector-text: from_text parses the plain list form" }
+    else { Fail "22 vector-text: expected '[1,2,3]' from the list form, got: $rh5" }
+    $rh6 = Psql -Sql "SELECT fractal_vector_from_text('[1, 2, 3]')::text;"
+    if ($rh6 -eq '[1,2,3]') { Pass "22 vector-text: from_text tolerates spaces after the commas" }
+    else { Fail "22 vector-text: expected '[1,2,3]', got: $rh6" }
+    $rh7 = Psql -Sql "SELECT fractal_vector_from_text('1, 2, 3')::text;"
+    if ($rh7 -eq '[1,2,3]') { Pass "22 vector-text: from_text tolerates spaces in the list form" }
+    else { Fail "22 vector-text: expected '[1,2,3]', got: $rh7" }
+    $rh8 = Psql -Sql "SELECT fractal_vector_from_text(NULL) IS NULL, fractal_vector_to_json(NULL::fractal_vector) IS NULL;"
+    if ($rh8 -eq 't|t') { Pass "22 vector-text: NULL in, NULL out (both helpers are STRICT)" }
+    else { Fail "22 vector-text: expected t|t, got: $rh8" }
+    $rh9 = Psql -Sql "SELECT fractal_vector_from_text('');"
+    if ($rh9 -match 'an empty string is not a vector') { Pass "22 vector-text: an empty string is rejected" }
+    else { Fail "22 vector-text: expected the empty-string rejection, got: $rh9" }
+    # The rejection has to name the offending text EXACTLY: PL/pgSQL's
+    # RAISE placeholder is a bare "%", so a "%s" in the format string
+    # used to leave a stray literal "s" inside the quoted text
+    # ("[1,2,x]s").
+    $rh10 = Psql -Sql "SELECT fractal_vector_from_text('[1,2,x]');"
+    if ($rh10 -match 'could not parse "\[1,2,x\]" as a vector array') { Pass "22 vector-text: a malformed array is rejected and the offending text is quoted exactly" }
+    else { Fail "22 vector-text: expected the array-form parse rejection, got: $rh10" }
+    $rh11 = Psql -Sql "SELECT fractal_vector_from_text('1,2,x');"
+    if ($rh11 -match 'could not parse "1,2,x" as a vector') { Pass "22 vector-text: a malformed list is rejected and the offending text is quoted exactly" }
+    else { Fail "22 vector-text: expected the list-form parse rejection, got: $rh11" }
+    # The round trip is compared on the type's own text rendering --
+    # fractal_vector has no "=" operator, and the rendering is the
+    # exact thing the round trip has to preserve.
+    $rh12 = Psql -Sql "SELECT fractal_vector_from_text(fractal_vector_to_json('[0.1,0.2,0.3]'::fractal_vector)::text)::text = '[0.1,0.2,0.3]'::fractal_vector::text;"
+    if ($rh12 -eq 't') { Pass "22 vector-text: a JSON round trip through the type's own rendering is lossless" }
+    else { Fail "22 vector-text: expected the round trip to be lossless, got: $rh12" }
 }
 
 # fractalsql_agents dependent-extension smoke gate -- the two parameterized
@@ -1951,6 +2733,61 @@ INSERT INTO bt_agents_logs VALUES (10, now(), 'host-2'), (11, now() + interval '
     $r2 = Psql -Sql "SELECT * FROM fractal_agent_anomaly_triage('bt_agents_logs','metric','ts','host','no-such-host',32);"
     if ($r2 -match 'no rows in') { Pass "23 agents: anomaly_triage raises a clean ERROR when the filter matches no rows" }
     else { Fail "23 agents: expected a no-rows ERROR, got: $r2" }
+
+    # --- 2b: agent_partial_reasoning_fail pair (PL/pgSQL engines) -------
+    # Mirror of build_test.sh's gate-23 section 2b (the sqlite repo's
+    # gate-29 pair convention). TWO DIFFERENT failure shapes, kept apart on
+    # purpose -- the drift half needs no plugin at all, so the pair isolates
+    # exactly the raise-vs-partial difference:
+    #   (a) a SETUP mistake -- the reasoning plugin does not load at all
+    #       (SQLSTATE 55000). This is NEVER softened: with the flag on the
+    #       engine still raises (a missing plugin is a configuration mistake,
+    #       not a transient endpoint failure -- the sibling sqlite engine
+    #       hard-errors on it too).
+    #   (b) a TRANSIENT endpoint failure -- the mock plugin LOADS, but its
+    #       dispatch fails (the FSQL_BT_FORCE_FAIL sentinel in $SqlFile).
+    #       This IS softened: the engine returns its computed data half with
+    #       the LLM column NULL and a SEPARATE reasoning_step_failed column
+    #       carrying the error text (the two-column contract, matching the
+    #       sibling's {"<llm>":null,"reasoning_step_failed":"<error>"} shape).
+    if (-not (PgSetGuc -Name 'fractalsql.reasoning_plugin' -SetVal "'C:\fractalsql_bt_broken.dll'" -Want 'C:\fractalsql_bt_broken.dll')) {
+        Fail "23 agents: could not point reasoning_plugin at the broken path"; PgSwapPlugin $Mock | Out-Null; return
+    }
+
+    $r2b = Psql -Sql "SELECT threat_score FROM fractal_agent_anomaly_triage('bt_agents_logs','metric','ts','host','host-1',32);"
+    if ($r2b -match 'reasoning') { Pass "23 agents: agent_partial_reasoning_fail off -- the reasoning failure raises through the engine" }
+    else { Fail "23 agents: expected the reasoning failure to raise with the flag off, got: $r2b" }
+
+    if (-not (PgSetGuc -Name 'fractalsql.agent_partial_reasoning_fail' -SetVal 'on' -Want 'on')) {
+        Fail "23 agents: could not set agent_partial_reasoning_fail=on"; PgSwapPlugin $Mock | Out-Null; return
+    }
+
+    # (a) the setup mistake is NOT softened by the flag.
+    $r2b2 = Psql -Sql "SELECT threat_score FROM fractal_agent_anomaly_triage('bt_agents_logs','metric','ts','host','host-1',32);"
+    if ($r2b2 -match 'reasoning plugin') { Pass "23 agents: a missing reasoning plugin is a setup mistake -- it still raises with the flag on" }
+    else { Fail "23 agents: expected the setup mistake to raise even with the flag on, got: $r2b2" }
+
+    # (b) the transient dispatch failure IS softened, into the two-column
+    # contract: threat_score is still the real (signed) drift float, the
+    # fixture's drift is ~(0.43-1.87) = -1.44, so a >= -1.0 threshold was a
+    # wrong first guess -- assert finiteness, not a magnitude. triage_summary
+    # is NULL and reasoning_step_failed carries the raw error text (no
+    # 'reasoning_step_failed: ' prefix -- the column name says it).
+    PgSwapPlugin $Mock | Out-Null
+    Set-Content -LiteralPath $SqlFile -Value "FSQL_BT_FORCE_FAIL" -NoNewline
+    $r2c = Psql -Sql "SELECT (threat_score IS NOT NULL), (triage_summary IS NULL), (reasoning_step_failed IS NOT NULL), (reasoning_step_failed <> ''), (reasoning_step_failed NOT LIKE 'reasoning_step_failed:%') FROM fractal_agent_anomaly_triage('bt_agents_logs','metric','ts','host','host-1',32);"
+    if ($r2c -match '^t\|t\|t\|t\|t$') { Pass "23 agents: agent_partial_reasoning_fail on -- data half (real drift float) + NULL LLM column + reasoning_step_failed error column" }
+    else { Fail "23 agents: expected the partial row (drift float + NULL triage_summary + reasoning_step_failed), got: $r2c" }
+
+    # flag off + the same transient failure: the failure propagates again.
+    PgSetGuc -Name 'fractalsql.agent_partial_reasoning_fail' -SetVal 'off' -Want 'off' | Out-Null
+    $r2d = Psql -Sql "SELECT threat_score FROM fractal_agent_anomaly_triage('bt_agents_logs','metric','ts','host','host-1',32);"
+    if ($r2d -match 'dispatch failed') { Pass "23 agents: agent_partial_reasoning_fail off -- a transient reasoning failure still raises" }
+    else { Fail "23 agents: expected the transient reasoning failure to raise with the flag off, got: $r2d" }
+
+    # Restore the resting state the rest of the gate (and gate 24+) expects.
+    PgSwapPlugin $Mock | Out-Null
+    Set-Content -LiteralPath $SqlFile -Value "gap-analysis-canary"
 
     # --- 3: fractal_agent_allocate happy path --------------------------
     # allocation is the REAL optimizer jsonb {sharpe, weights}; sharpe is the
@@ -2033,6 +2870,32 @@ INSERT INTO bt_agents_badstates VALUES (ARRAY[1,0,0]), (ARRAY[0.9,0.1,0.0]);
     $r7e = Psql -Sql "SELECT * FROM fractal_agent_outlier_intercept(ARRAY[1,0,0]::float8[], 'bt_agents_badstates','emb', 0.5, 'euclid');"
     if ($r7e -match "metric must be 'cosine' or 'l2'") { Pass "23 agents: outlier_intercept rejects an unknown metric (no silent fallback)" }
     else { Fail "23 agents: expected a metric rejection, got: $r7e" }
+
+    # --- 7b: the metric column is exposed (sibling parity) --------------
+    # The metric the engine actually used must be visible in the returned
+    # columns, not only inside the nested payload -- the sibling's shape is
+    # {"intercepted":..,"metric":..,"reason":..}.
+    $r7f = Psql -Sql "SELECT metric FROM fractal_agent_outlier_intercept(ARRAY[1,0,0]::float8[], 'bt_agents_badstates','emb', 0.5);"
+    if ($r7f -match '^cosine$') { Pass "23 agents: outlier_intercept exposes the metric it actually used (metric column)" }
+    else { Fail "23 agents: expected metric=cosine in the outlier_intercept row, got: $r7f" }
+
+    $r7g = Psql -Sql "SELECT metric FROM fractal_agent_outlier_intercept(ARRAY[0.05,0,0]::float8[], 'bt_agents_badstates','emb', 0.5, 'l2');"
+    if ($r7g -match '^l2$') { Pass "23 agents: outlier_intercept reports the caller-chosen l2 metric in the metric column" }
+    else { Fail "23 agents: expected metric=l2 in the outlier_intercept row, got: $r7g" }
+
+    # --- 7c: a NULL input vector is an ARGUMENT fault, not a data fault --
+    # The engine rejects the NULL itself with invalid_parameter_value
+    # (22023) instead of letting it reach the vector math, where it would
+    # surface as a generic low-level data error.
+    $r7h = Psql -Sql @'
+DO $$
+BEGIN
+  PERFORM * FROM fractal_agent_route_task(NULL::float8[], 'bt_agents_caps','emb','capability_name', 10);
+EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'sqlstate=%', SQLSTATE;
+END $$;
+'@
+    if ($r7h -match 'sqlstate=22023') { Pass "23 agents: a NULL input vector is an argument error (22023), not a vector-math data error" }
+    else { Fail "23 agents: expected a 22023 argument error for a NULL input vector, got: $r7h" }
 
     # --- 8: fractal_agent_recall_hybrid happy path + guard --------------
     # Real session_ids + real content (NOT the stub's generate_series 1-5 /
@@ -2415,6 +3278,28 @@ SELECT rationale FROM fractal_agent_regime_triage(
     if ($r18d -match 'series is required') { Pass "23 agents: regime_triage raises a clean ERROR when series is NULL" }
     else { Fail "23 agents: expected a series-required ERROR, got: $r18d" }
 
+    # An EXPLICIT NULL for the trailing optional numeric parameter must fall
+    # back to the documented default (0.5), like the sibling's da_opt_double.
+    # PostgreSQL substitutes a DEFAULT only for an OMITTED argument, so
+    # without the COALESCE the comparison `abs(dv) > drift_threshold` yields
+    # NULL, drift_detected comes back NULL (not true) and the prompt text is
+    # left with a hole. The series is the SAME shape as the passing
+    # assertion above -- only the third argument differs (NULL instead of
+    # 0.5) -- so the assertion isolates the COALESCE and nothing else. (A
+    # two-level step series is NOT usable here: the core drift estimator
+    # rejects a degenerate series with rc=-1 before the threshold is ever
+    # compared.)
+    $r18e = Psql -Sql @"
+SELECT drift_detected::text FROM fractal_agent_regime_triage(
+  (SELECT array_agg(v ORDER BY t) FROM (
+     SELECT t, CASE WHEN t<48 THEN 4.0+1.5*sin(t*0.31)+(random()-0.5)*0.8
+                    ELSE 4.0+3.0*sin(t*1.4)+(random()-0.5)*0.4 END AS v
+     FROM generate_series(1,96) t) s),
+  64, NULL);
+"@
+    if ($r18e -match '^true$') { Pass "23 agents: regime_triage applies the 0.5 default when drift_threshold is an explicit NULL" }
+    else { Fail "23 agents: expected drift_detected=t for an explicit-NULL drift_threshold, got: '$r18e'" }
+
     # Restore session state: diversify was enabled by recommend_diverse and
     # feedback_audit (feedback_audit self-disables, but belt-and-suspenders).
     Psql -Sql "SELECT fractal_diversify_disable();" | Out-Null
@@ -2532,7 +3417,7 @@ function Gate24Enterprise {
     # Postgres-backed storage VFS round-trip (flush -> fractalsql_ledger ->
     # audit_unpack), and the dormant-path error when the library is absent.
     $ent = Get-ChildItem -Path include -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^(lib)?fractalsql-enterprise-sovereign-c\.(dll|so|dylib)$' } |
+        Where-Object { $_.Name -match '^(lib)?fractalsql-enterprise-sovereign-c\.dll$' } |
         Select-Object -First 1
     if (-not $ent) {
         Skip "24 enterprise: skipped (community edition; no fractalsql-enterprise-sovereign-c.* shared lib in include/)"
@@ -2722,7 +3607,7 @@ function Gate25EnterpriseStress {
     # the ledger at its capacity bound, under repeated churn, against a
     # corrupted blob, and under concurrent + cross-backend access.
     $ent = Get-ChildItem -Path include -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^(lib)?fractalsql-enterprise-sovereign-c\.(dll|so|dylib)$' } |
+        Where-Object { $_.Name -match '^(lib)?fractalsql-enterprise-sovereign-c\.dll$' } |
         Select-Object -First 1
     if (-not $ent) {
         Skip "25 enterprise-stress: skipped (community edition; no fractalsql-enterprise-sovereign-c.* shared lib in include/)"
@@ -3063,7 +3948,7 @@ function Gate26EnterpriseSignature {
     # all: a missing .sig (soft unless require=on) and an invalid .sig
     # (always hard-refused, regardless of require).
     $ent = Get-ChildItem -Path include -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^(lib)?fractalsql-enterprise-sovereign-c\.(dll|so|dylib)$' } |
+        Where-Object { $_.Name -match '^(lib)?fractalsql-enterprise-sovereign-c\.dll$' } |
         Select-Object -First 1
     if (-not $ent) {
         Skip "26 enterprise-signature: skipped (community edition; no fractalsql-enterprise-sovereign-c.* shared lib in include/)"
@@ -3424,7 +4309,7 @@ function Gate29VectorOps {
     $r = Psql -Sql "SELECT fractal_vector_to_float8_array('[1,2,3]'::fractal_vector);"
     if ($r -eq '{1,2,3}') { Pass "29 vector_ops: to_float8_array canonicalizes to {1,2,3} (native array text, not fractal_vector's own [1,2,3] form)" } else { Fail "29 vector_ops: to_float8_array='$r'" }
 
-    # --- v2.0.25: Lp distance, quantization, Hamming distance -----------
+    # --- v2.0.20: Lp distance, quantization, Hamming distance -----------
     $r = Psql -Sql "SELECT fractal_vector_lp_distance('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector, 2.0);"
     if ($r -eq '5') { Pass "29 vector_ops: lp_distance p=2 ([3,4] from origin) = 5" } else { Fail "29 vector_ops: lp_distance p=2='$r'" }
     $r = Psql -Sql "SELECT fractal_vector_lp_distance('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector, 1.0);"
@@ -3469,10 +4354,148 @@ function Gate29VectorOps {
     if ($hmBad -match 'length mismatch') { Pass "29 vector_ops: hamming_distance rejects unequal byte lengths" } else { Fail "29 vector_ops: expected a length-mismatch rejection, got: $hmBad" }
 }
 
-# The 6 newest analytics/vector-math primitives (v2.0.25), known-answer
+# The 6 newest analytics/vector-math primitives (v2.0.20), known-answer
 # asserted: real float8[]/bytea[] array args, with fractal_periodogram
 # and fractal_cycle_detect set-returning (TABLE). Mirrors build_test.sh's
 # gate_30_new_primitives.
+# Gate 48: the twenty-nine newer industry kits (demo/demo-vertical-*.sql).
+# Each kit is fed to psql against the scratch cluster (fractalsql_agents
+# installed, the mock reasoning plugin answering the reasoned steps) and
+# must (a) exist, (b) raise no SQL error beyond the documented exception
+# (the scenario-planning kit's plan_explore call needs an embedding
+# endpoint: at most one error), (c) print no NaN, and (d) reproduce its
+# headline result -- the fixtures are deterministic (no random()), so the
+# claim is checked against fixed numbers.
+function KitNum { param([string]$S)
+    $d = 0.0
+    if ([double]::TryParse($S, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { return $d }
+    return [double]::NaN
+}
+
+# KitShape: the older kits print no HEADLINE line and seed random(), so only the SHAPE of their output is
+# pinned: the count of lines that are neither psql noise nor command tags. A step that silently returns
+# no rows drops them. Callers require three quarters of what a clean run prints.
+function KitShape($lines) {
+    return @($lines | Where-Object { $_ -notmatch '^(psql:|NOTICE|HINT|DETAIL|CONTEXT|LINE|DROP |CREATE |INSERT |UPDATE |DELETE |SELECT [0-9]|ALTER |SET$|Timing|Time:|\s*$)' }).Count
+}
+
+function Gate48Kits {
+    $demoDir = Join-Path $RepoRoot 'demo'
+    if (-not (Test-Path -LiteralPath $demoDir)) {
+        Skip '48 kits (demo/ not present)'
+        return
+    }
+    if (-not (PgSwapPlugin $Mock)) { Fail '48 kits: plugin swap did not take effect'; return }
+    $kits = @('ev-battery-lifecycle', 'adas-safety-validation', 'v2x-warranty-triage',
+              'critical-inventory-routing', 'heavy-industry-predictive-maintenance',
+              'climatech-grid-balancing', 'hazmat-occupational-triage',
+              'scenario-planning-simulation', 'avionics-fault-prediction',
+              'satellite-constellation-coverage', 'telecom-account-anomaly-screening',
+              'telecom-traffic-routing', 'climatech-emissions-monitoring',
+              'climatech-risk-exposure', 'rf-spectrum-sensing',
+              'event-stream-anomaly-triage', 'outlier-interception-footprint',
+              'agentic-budget-reallocation', 'stalled-process-triage',
+              'intent-matching-discovery', 'agentic-next-action-ranking',
+              'document-risk-drift', 'coordinated-record-detection',
+              'sensor-telemetry-allocation', 'simulated-economy-drift',
+              'multi-series-replenishment', 'periodicity-portfolio-selection',
+              'agentic-recall-recommendation', 'spatial-footprint-portfolio-risk',
+              'agentic-customer-support', 'agentic-edge-swarm',
+              'agentic-fintech-mcts', 'agentic-ops-devops',
+              'biotech-genomics', 'cybersecurity-threat-detection',
+              'fleet-logistics', 'maritime-defense', 'medtech-clinical',
+              'quant-finance', 'recommendation-search', 'smart-cities-iot',
+              'sovereign-edge-ai')
+    foreach ($k in $kits) {
+        $kit = Join-Path $demoDir "demo-vertical-$k.sql"
+        if (-not (Test-Path -LiteralPath $kit)) { Fail "48 kits: demo-vertical-$k.sql is missing"; continue }
+        $out = Psql -Sql ([IO.File]::ReadAllText($kit))
+        $lines = @($out -split "`r?`n")
+        $nerr = @($lines | Where-Object { $_ -match 'ERROR:' }).Count
+        $maxerr = 0
+        if ($k -eq 'scenario-planning-simulation') { $maxerr = 1 }
+        if ($k -eq 'periodicity-portfolio-selection') { $maxerr = 1 }
+        if ($k -eq 'agentic-fintech-mcts') { $maxerr = 1 }
+        if ($k -eq 'agentic-ops-devops') { $maxerr = 2 }
+        if ($nerr -gt $maxerr) {
+            $first = (@($lines | Where-Object { $_ -match 'ERROR:' }) | Select-Object -First 2) -join ' '
+            Fail "48 kits: $k raised $nerr SQL error(s), at most ${maxerr} expected: $first"
+            continue
+        }
+        if (@($lines | Where-Object { $_ -match '(^|\|)-?(nan|NaN|inf|Infinity)(\||$)' }).Count -gt 0) { Fail "48 kits: $k printed a NaN/inf cell"; continue }
+        $rows = @($lines | ForEach-Object { ,($_ -split '\|') })
+        $ok = $false
+        switch ($k) {
+            { $_ -in @('event-stream-anomaly-triage', 'outlier-interception-footprint', 'agentic-budget-reallocation', 'stalled-process-triage', 'intent-matching-discovery', 'agentic-next-action-ranking', 'document-risk-drift', 'coordinated-record-detection', 'sensor-telemetry-allocation', 'simulated-economy-drift', 'multi-series-replenishment', 'periodicity-portfolio-selection', 'agentic-recall-recommendation', 'spatial-footprint-portfolio-risk') } {
+                $ok = [bool]($out -match ("HEADLINE kit=" + $k + " ok")) }
+            'agentic-customer-support' { $ok = (KitShape $lines) -ge 11 }
+            'agentic-edge-swarm' { $ok = (KitShape $lines) -ge 22 }
+            'agentic-fintech-mcts' { $ok = (KitShape $lines) -ge 3 }
+            'agentic-ops-devops' { $ok = (KitShape $lines) -ge 6 }
+            'biotech-genomics' { $ok = (KitShape $lines) -ge 12 }
+            'cybersecurity-threat-detection' { $ok = (KitShape $lines) -ge 25 }
+            'fleet-logistics' { $ok = (KitShape $lines) -ge 19 }
+            'maritime-defense' { $ok = (KitShape $lines) -ge 22 }
+            'medtech-clinical' { $ok = (KitShape $lines) -ge 18 }
+            'quant-finance' { $ok = (KitShape $lines) -ge 15 }
+            'recommendation-search' { $ok = (KitShape $lines) -ge 24 }
+            'smart-cities-iot' { $ok = (KitShape $lines) -ge 18 }
+            'sovereign-edge-ai' { $ok = (KitShape $lines) -ge 21 }
+            'ev-battery-lifecycle' {
+                $a = @($rows | Where-Object { $_[0] -eq 'EV-203' -and $_.Count -eq 4 -and (KitNum $_[1]) -gt 0.5 -and (KitNum $_[2]) -gt 1.5 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'EV-101' -and $_.Count -eq 4 -and (KitNum $_[1]) -lt 0 -and (KitNum $_[2]) -lt 1 }).Count -gt 0
+                $ok = $a -and $b }
+            'adas-safety-validation' {
+                $a = @($rows | Where-Object { $_[0] -like 'P1 firm*' -and $_.Count -eq 4 -and $_[3] -eq 't' }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -like 'P2 steady*' -and $_.Count -eq 4 -and $_[3] -eq 'f' }).Count -gt 0
+                $c = @($rows | Where-Object { $_[0] -like 'P3 gentle*' -and $_.Count -eq 4 -and $_[3] -eq 't' }).Count -gt 0
+                $ok = $a -and $b -and $c }
+            'v2x-warranty-triage' { $ok = $out -match '(?m)^battery-thermal-service\|0\.99' }
+            'critical-inventory-routing' {
+                $ok = @($rows | Where-Object { $_[0] -eq '4' -and $_.Count -ge 5 -and $_[1] -eq 'west' -and (KitNum $_[4]) -gt 1.2 }).Count -gt 0 }
+            'heavy-industry-predictive-maintenance' {
+                $a = @($rows | Where-Object { $_[0] -eq 'PUMP-07' -and $_.Count -eq 4 -and (KitNum $_[1]) -gt 0.5 -and (KitNum $_[2]) -gt 1.5 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'PUMP-03' -and $_.Count -eq 4 -and (KitNum $_[1]) -lt 0 }).Count -gt 0
+                $ok = $a -and $b }
+            'climatech-grid-balancing' {
+                $a = @($rows | Where-Object { $_[0] -eq 'AREA-C' -and $_.Count -eq 4 -and (KitNum $_[1]) -gt 0.5 -and (KitNum $_[2]) -gt 1.2 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'AREA-A' -and $_.Count -eq 4 -and (KitNum $_[1]) -lt 0 }).Count -gt 0
+                $ok = $a -and $b }
+            'hazmat-occupational-triage' {
+                $n = @($rows | Where-Object { @('7', '15', '31') -contains $_[0] -and $_.Count -eq 4 -and $_[1] -eq 'reactor-bay' -and $_[2] -eq 'night' -and (KitNum $_[3]) -lt 0.001 }).Count
+                $ok = $n -ge 3 }
+            'scenario-planning-simulation' {
+                $ok = @($lines | Where-Object { $_ -match 'variant' }).Count -ge 6 }
+            'avionics-fault-prediction' { $ok = $out -match '(?m)^AC-09\|0\.2' }
+            'satellite-constellation-coverage' {
+                $h = @($rows | Where-Object { $_[0] -eq 'healthy' -and $_.Count -eq 3 } | Select-Object -First 1)
+                $d = @($rows | Where-Object { $_[0] -eq 'degraded' -and $_.Count -eq 3 } | Select-Object -First 1)
+                $ok = ($h.Count -eq 1) -and ($d.Count -eq 1) -and ((KitNum $h[0][2]) -gt 0) -and ((KitNum $d[0][2]) -gt (KitNum $h[0][2])) }
+            'telecom-account-anomaly-screening' {
+                $a = @($rows | Where-Object { $_[0] -like 'E1 swap*' -and $_.Count -eq 4 -and $_[3] -eq 't' }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -like 'E2 routine*' -and $_.Count -eq 4 -and $_[3] -eq 'f' }).Count -gt 0
+                $c = @($rows | Where-Object { $_[0] -like 'E4 faint*' -and $_.Count -eq 4 -and $_[3] -eq 't' }).Count -gt 0
+                $ok = $a -and $b -and $c }
+            'telecom-traffic-routing' {
+                $ok = ($out -match '(?m)^R3 mobile handover burst\|edge-mobile-hub\|') -and ($out -match '(?m)^R3 mobile handover burst\|edge-backup-west\s*$') }
+            'climatech-emissions-monitoring' {
+                $a = @($rows | Where-Object { $_[0] -eq 'CH4-02' -and $_.Count -eq 4 -and (KitNum $_[1]) -gt 0.5 -and (KitNum $_[2]) -gt 1.5 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'CH4-01' -and $_.Count -eq 4 -and (KitNum $_[1]) -lt 0 }).Count -gt 0
+                $ok = $a -and $b }
+            'climatech-risk-exposure' {
+                $a = @($rows | Where-Object { $_[0] -eq 'dry season' -and $_.Count -eq 3 }).Count -gt 0
+                $b = @($rows | Where-Object { $_[0] -eq 'wet season' -and $_.Count -eq 3 }).Count -gt 0
+                $ok = $a -and $b }
+            'rf-spectrum-sensing' {
+                $ok = ($out -match '(?m)^CH-A\|\{9\}\s*$') -and ($out -match '(?m)^CH-B\|\{\}\s*$') -and ($out -match '(?m)^CH-C\|\{\}\s*$') }
+        }
+        if ($ok) { Pass "48 kits: demo-vertical-$k.sql runs clean and reproduces its headline result" }
+        else { Fail "48 kits: demo-vertical-$k.sql did not reproduce its headline result" }
+    }
+    # The kits leave their tables behind for inspection; this gate does not.
+    $null = Psql -Sql 'DROP TABLE IF EXISTS ebl_telemetry, asv_known_bad, asv_proposed, asv_routes, v2x_capabilities, v2x_claims, cir_depots, cir_consumption, cir_profile, cir_result, hpm_readings, cgb_freq, cgb_resources, cgb_result, hot_workers, sps_scenarios, sps_scout, afp_flights, scc_footprints, scc_slots, taa_known_anomalous, taa_proposed, ttr_nodes, ttr_requests, cem_readings, cre_grid, rfs_capture, rfs_entropy, esa_latency, esa_rate, esa_lprof, esa_rprof, esa_health, esa_traj, oif_known, oif_proposed, oif_screen, oif_screen_l2, oif_clicks, oif_dim, abr_outcome, abr_prof, abr_result, abr_models, abr_events, abr_routed, spt_items, spt_traj, spt_triage, imd_entities, imd_picks, imd_scout, imd_content, imd_rec, anr_candidates, anr_recall, anr_actions, anr_rec, drd_risk, drd_prof, drd_clauses, drd_picks, drd_scout, drd_approved, drd_rec, crd_known, crd_proposed, crd_screen, crd_records, crd_traj, crd_locations, crd_dim, sta_demand, sta_prof, sta_result, sed_price, sed_prof, sed_result, sed_loop, msr_units, msr_prof, msr_result, pps_sales, pps_prof, pps_result, pps_catalog, pps_rec, arr_offers, arr_picks, arr_scout, arr_sessions, arr_recall, sfp_parcels, sfp_dim, sfp_index, sfp_prof, sfp_result, sfp_comps, sfp_picks, sfp_scout CASCADE;'
+}
+
 function Gate30NewPrimitives {
     # --- fractal_change_point_detect: step up at t=50 in a 100-sample
     # series with a non-degenerate (sine) wobble, win=16, threshold=2.0.
@@ -3606,6 +4629,85 @@ SELECT fractal_optimize_subset(
 "@
     if ($r -match 'fractal_optimize_subset rc=') { Pass "30 new_primitives: optimize_subset infeasible instance (caps 0.4x5 < 1.0 at k=2) rejected cleanly" }
     else { Fail "30 new_primitives: infeasible optimize_subset='$r' (expected a clean rc= rejection)" }
+
+    # --- fractal_spectrogram_entropy (core v2.0.26): short-time spectral
+    # entropy. Series = 256 samples of a pure tone (period 8) then 256 of
+    # deterministic pseudo-noise; win=64, hop=32 -> 15 frames, frames 0-6
+    # entirely tone, frames 8-14 entirely noise (frame 7 straddles).
+    # Measured against the core directly: tone frames read 0.250, noise
+    # frames 0.78-0.92, so the 0.40 / 0.70 cut-offs have wide margins.
+    $specSeries = @"
+(SELECT array_agg(CASE WHEN i < 256 THEN 0.5*sin(2*pi()*i/8.0)
+                       ELSE (x - floor(x)) - 0.5 END ORDER BY i)
+   FROM (SELECT i, sin(i::float8 * 12.9898::float8) * 43758.5453::float8 AS x
+           FROM generate_series(0, 511) i) q)
+"@
+    $r = Psql -Sql "SELECT array_length(fractal_spectrogram_entropy($specSeries, 64, 32), 1);"
+    if ($r -eq '15') { Pass "30 new_primitives: spectrogram_entropy frame count = floor((512-64)/32)+1 = 15" }
+    else { Fail "30 new_primitives: spectrogram_entropy frames='$r' (expected 15)" }
+
+    $r = Psql -Sql @"
+WITH h AS (SELECT fractal_spectrogram_entropy($specSeries, 64, 32) e)
+SELECT (SELECT avg(x) FROM unnest(e[1:7])  x) < 0.40
+   AND (SELECT avg(x) FROM unnest(e[9:15]) x) > 0.70
+   AND (SELECT bool_and(x BETWEEN 0 AND 1) FROM unnest(e) x)
+  FROM h;
+"@
+    if ($r -eq 't') { Pass "30 new_primitives: spectrogram_entropy separates a tone (<0.40) from noise (>0.70), all frames in [0,1]" }
+    else { Fail "30 new_primitives: spectrogram_entropy tone/noise separation='$r'" }
+
+    # The point of returning float8[]: it composes with change_point_detect.
+    # The tone->noise transition is at frame ~7; a boundary must land in [5,11].
+    $r = Psql -Sql "SELECT fractal_change_point_detect(fractal_spectrogram_entropy($specSeries, 64, 32), 4, 2.0, 8);"
+    $spOk = $false
+    foreach ($v in (($r -replace '[{}]', '') -split ',')) {
+        if ($v -ne '' -and [double]$v -ge 5 -and [double]$v -le 11) { $spOk = $true }
+    }
+    if ($spOk) { Pass "30 new_primitives: change_point_detect over spectrogram_entropy flags the tone->noise transition ($r)" }
+    else { Fail "30 new_primitives: change_point_detect(spectrogram_entropy)='$r' (no boundary in [5,11])" }
+
+    # A constant signal has no spectral energy: every frame reports exactly
+    # 0.0 (never NaN), and max_frames truncates to the first frames.
+    $r = Psql -Sql "SELECT bool_and(x = 0.0) AND count(*) = 5 FROM unnest(fractal_spectrogram_entropy(array_fill(3.0::float8, ARRAY[200]), 64, 32)) x;"
+    if ($r -eq 't') { Pass "30 new_primitives: spectrogram_entropy of a constant signal is 0.0 in all 5 frames (no NaN)" }
+    else { Fail "30 new_primitives: spectrogram_entropy constant='$r'" }
+
+    $r = Psql -Sql "SELECT array_length(fractal_spectrogram_entropy($specSeries, 64, 32, 4), 1);"
+    if ($r -eq '4') { Pass "30 new_primitives: spectrogram_entropy max_frames=4 truncates to the first 4 frames" }
+    else { Fail "30 new_primitives: spectrogram_entropy max_frames='$r' (expected 4)" }
+
+    # Defaults (win=64, hop=32) match the explicit call.
+    $r = Psql -Sql "SELECT fractal_spectrogram_entropy($specSeries) = fractal_spectrogram_entropy($specSeries, 64, 32);"
+    if ($r -eq 't') { Pass "30 new_primitives: spectrogram_entropy defaults are win=64, hop=32" }
+    else { Fail "30 new_primitives: spectrogram_entropy defaults='$r'" }
+
+    $r = Psql -Sql "SELECT fractal_spectrogram_entropy(ARRAY[1,2,3,4,5,6,7,8,9,10]::float8[], 4, 2);"
+    if ($r -match 'win must be in \[8, 512\]') { Pass "30 new_primitives: spectrogram_entropy rejects win < 8" }
+    else { Fail "30 new_primitives: expected a win range rejection, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_spectrogram_entropy(array_fill(1.0::float8, ARRAY[64]), 513, 32);"
+    if ($r -match 'win must be in \[8, 512\]') { Pass "30 new_primitives: spectrogram_entropy rejects win > 512" }
+    else { Fail "30 new_primitives: expected a win range rejection, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_spectrogram_entropy(array_fill(1.0::float8, ARRAY[64]), 16, 0);"
+    if ($r -match 'hop must be > 0') { Pass "30 new_primitives: spectrogram_entropy rejects hop <= 0" }
+    else { Fail "30 new_primitives: expected a hop rejection, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_spectrogram_entropy(array_fill(1.0::float8, ARRAY[64]), 16, 8, 0);"
+    if ($r -match 'max_frames must be in') { Pass "30 new_primitives: spectrogram_entropy rejects max_frames < 1" }
+    else { Fail "30 new_primitives: expected a max_frames rejection, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_spectrogram_entropy(array_fill(1.0::float8, ARRAY[10]), 16, 8);"
+    if ($r -match 'fractal_spectrogram_entropy rc=') { Pass "30 new_primitives: spectrogram_entropy rejects a series shorter than win (clean rc= error)" }
+    else { Fail "30 new_primitives: expected a short-series rejection, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_spectrogram_entropy(array_fill('NaN'::float8, ARRAY[64]), 16, 8);"
+    if ($r -match 'fractal_spectrogram_entropy rc=') { Pass "30 new_primitives: spectrogram_entropy rejects a non-finite sample (clean rc= error)" }
+    else { Fail "30 new_primitives: expected a NaN rejection, got: $r" }
+
+    $r = Psql -Sql "SELECT fractal_spectrogram_entropy(NULL::float8[], 16, 8);"
+    if ([string]::IsNullOrEmpty($r)) { Pass "30 new_primitives: spectrogram_entropy(NULL, ...) -> NULL (STRICT)" }
+    else { Fail "30 new_primitives: spectrogram_entropy NULL series='$r' (expected NULL / empty)" }
 }
 
 # Enterprise activation/signature-verification wiring, exercised via a
@@ -3708,6 +4810,26 @@ function Gate31EnterpriseMock {
     if ($pre -match 'enterprise tier not loaded') { Pass "31 enterprise_mock: truth_count refuses cleanly before enterprise_lib is set" }
     else { Fail "31 enterprise_mock: expected 'enterprise tier not loaded', got: $pre" }
 
+    # g_ent_attempted short-circuit (src\fractalsql.c:1049-1051): the
+    # dormant dlopen attempt is cached per backend, so the SECOND
+    # enterprise call in the SAME session takes the short-circuit return
+    # instead of re-reading the GUC and re-attempting. Both statements
+    # below run in one backend (one Psql call = one connection; psql -f -
+    # executes each statement as its own batch, so it continues past the
+    # first ERROR), and both must report the engine's own dormant error,
+    # identically, with no crash. Mirrors build_test.sh's gate 31.
+    $rsc = Psql -Sql @"
+SELECT fractal_ledger_flush();
+SELECT fractal_ledger_flush();
+"@
+    if ($rsc -match 'server closed the connection|could not connect') {
+        Fail "31 ent-attempted: backend crashed -- $rsc"
+    } elseif (([regex]::Matches($rsc, 'fractalsql: enterprise tier not loaded')).Count -eq 2) {
+        Pass "31 ent-attempted: two dormant enterprise calls in ONE backend both report the same dormant error (2nd via the g_ent_attempted short-circuit)"
+    } else {
+        Fail "31 ent-attempted: expected 2 dormant errors, got: $rsc"
+    }
+
     # Path 1: a corrupt/wrong .sig is ALWAYS fatal -- no real signing
     # key needed. ensure_enterprise_lib() only WARNs on this (src\
     # fractalsql.c) and returns false, so the caller's own "enterprise
@@ -3807,6 +4929,116 @@ RESET fractalsql.enterprise_ledger_key;
     if ($rg -match '"ok": false') { Pass "31 enterprise_mock: ledger_verify detects a byte-level HMAC tamper (no real .so needed)" }
     else { Fail "31 enterprise_mock: expected a tamper-detected report after the byte-flip, got: $rg" }
 
+    # ---- ledger-verify per-row error report: the malformed-row branches
+    # and a pure chain-LINK break, each asserted through verify()'s own
+    # jsonb report ({ok, first_failure_id, reason}). Fixture: the chain
+    # table is first swapped for a CONSTRAINT-FREE copy of the same shape.
+    # Rationale: ledger_ensure_table's own DDL declares prev_hash/entry_hash
+    # NOT NULL, so verify()'s "malformed row (unexpected NULL)" branch is
+    # unreachable through normal writes -- it defends storage the extension
+    # does not control (externally replaced / lenient tables, the same
+    # premise as gate 25's migration case). No HMAC key is set here, so
+    # rows carry NULL mac exactly as ledger_write_entry wrote them.
+    #
+    # Tamper shape implemented for the link case ("31 ledger-tamper-link"):
+    # UPDATE the MIDDLE row's prev_hash to a fake 32B value. This repo's
+    # verify() (src\fractalsql.c, fractal_ledger_verify) recomputes a row's
+    # entry_hash over expect_prev = the PREVIOUS row's STORED entry_hash --
+    # not the row's own stored prev_hash -- but the chain-LINK check
+    # (row.prev_hash vs expect_prev) runs BEFORE the structural recompute,
+    # so a fake prev_hash fails THAT row's own link check while its
+    # untouched entry_hash stays fully self-consistent. The SQLite
+    # sibling's "blob + recomputed entry_hash" shape is deliberately NOT
+    # implemented: in pg it would only make the NEXT row's link check fire,
+    # and it needs a SQL-side sha256 (pgcrypto) this harness avoids.
+    # Mirrors build_test.sh's gate 31.
+    # The lenient fixture must carry ledger_ensure_table's OWN index (by
+    # name and shape) — with the index missing, every audit_log/verify's
+    # ensure step runs a CREATE INDEX inside the session's active query and
+    # postgres rejects it ("used by active queries in this session") — the
+    # docker gate caught the Linux twin of this. Mirrors build_test.sh's
+    # _31_reset_lenient_ledger.
+    Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;" | Out-Null
+    Psql -Sql @"
+CREATE TABLE fractalsql_ledger (
+  id         bigserial   PRIMARY KEY,
+  kind       integer     NOT NULL,
+  blob       bytea       NOT NULL,
+  mac        bytea,
+  prev_hash  bytea,
+  entry_hash bytea,
+  sealed     boolean     NOT NULL DEFAULT false,
+  updated    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS fractalsql_ledger_kind_id_idx
+  ON fractalsql_ledger (kind, id DESC);
+"@ | Out-Null
+    # The "ok" verdict is ONE line among several: psql also prints the
+    # command tags of the DELETE/UPDATE above it, so the verdict is
+    # picked by matching a line that is exactly "ok" -- the same
+    # grep -q "^ok$" the POSIX twin does. Taking the FIRST line of the
+    # output (the "DELETE 0" tag) never matched.
+    $rf = Psql -Sql @"
+DELETE FROM fractalsql_ledger WHERE kind = 2;
+SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":2}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":3}'::jsonb);
+UPDATE fractalsql_ledger SET entry_hash = NULL
+ WHERE kind = 2 AND id = (SELECT min(id) + 1 FROM fractalsql_ledger WHERE kind = 2);
+SELECT CASE WHEN v->>'ok' = 'false'
+             AND v->>'reason' = 'malformed row (unexpected NULL)'
+             AND (v->>'first_failure_id')::bigint = m.mid
+       THEN 'ok' ELSE 'FAIL: ' || v::text END
+  FROM (SELECT fractal_ledger_verify(2) AS v) s,
+       (SELECT min(id) + 1 AS mid FROM fractalsql_ledger WHERE kind = 2) m;
+"@
+    $rfOut = ($rf -split "`r?`n") | Where-Object { $_.Trim() -eq 'ok' } | Select-Object -First 1
+    if ($rfOut -eq 'ok') { Pass "31 ledger-verify-malformed-null: entry_hash=NULL hits verify()'s 'malformed row (unexpected NULL)' branch at the middle row id" }
+    else { Fail "31 ledger-verify-malformed-null: expected the strict ok report, got: $rf" }
+
+    $rf = Psql -Sql @"
+DELETE FROM fractalsql_ledger WHERE kind = 2;
+SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":2}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":3}'::jsonb);
+UPDATE fractalsql_ledger SET mac = decode(repeat('cd', 16), 'hex')
+ WHERE kind = 2 AND id = (SELECT min(id) + 1 FROM fractalsql_ledger WHERE kind = 2);
+SELECT CASE WHEN v->>'ok' = 'false'
+             AND v->>'reason' = 'malformed row (bad hash/mac length)'
+             AND (v->>'first_failure_id')::bigint = m.mid
+       THEN 'ok' ELSE 'FAIL: ' || v::text END
+  FROM (SELECT fractal_ledger_verify(2) AS v) s,
+       (SELECT min(id) + 1 AS mid FROM fractalsql_ledger WHERE kind = 2) m;
+"@
+    $rfOut = ($rf -split "`r?`n") | Where-Object { $_.Trim() -eq 'ok' } | Select-Object -First 1
+    if ($rfOut -eq 'ok') { Pass "31 ledger-verify-malformed-length: a 16-byte mac (expects 32) hits verify()'s 'malformed row (bad hash/mac length)' branch at the middle row id" }
+    else { Fail "31 ledger-verify-malformed-length: expected the strict ok report, got: $rf" }
+
+    $rf = Psql -Sql @"
+DELETE FROM fractalsql_ledger WHERE kind = 2;
+SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":2}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":3}'::jsonb);
+UPDATE fractalsql_ledger SET prev_hash = decode(repeat('ab', 32), 'hex')
+ WHERE kind = 2 AND id = (SELECT min(id) + 1 FROM fractalsql_ledger WHERE kind = 2);
+SELECT CASE WHEN v->>'ok' = 'false'
+             AND v->>'reason' = 'chain-link break (prev_hash mismatch)'
+             AND (v->>'first_failure_id')::bigint = m.mid
+       THEN 'ok' ELSE 'FAIL: ' || v::text END
+  FROM (SELECT fractal_ledger_verify(2) AS v) s,
+       (SELECT min(id) + 1 AS mid FROM fractalsql_ledger WHERE kind = 2) m;
+"@
+    $rfOut = ($rf -split "`r?`n") | Where-Object { $_.Trim() -eq 'ok' } | Select-Object -First 1
+    if ($rfOut -eq 'ok') { Pass "31 ledger-tamper-link: a self-consistent row whose prev_hash no longer matches the previous row's entry_hash fails its OWN link check ('chain-link break (prev_hash mismatch)')" }
+    else { Fail "31 ledger-tamper-link: expected the strict ok report, got: $rf" }
+
+    # Restore the CANONICAL chain shape (NOT NULL on prev_hash/entry_hash)
+    # for the rest of the run: drop the lenient fixture and let
+    # ledger_ensure_table re-create its own DDL on the next write (the
+    # audit_log call below does exactly that and seeds a fresh genesis row).
+    Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;" | Out-Null
+    Psql -Sql 'SELECT fractal_audit_log(''test.reset'', ''{"n":0}''::jsonb);' | Out-Null
+
     # fractal_audit_unpack: a direct decode call -- distinct from the
     # audit_log+ledger_verify round-trip above, which never calls this
     # function at all (confirmed 0% coverage via gcov before this). The
@@ -3850,6 +5082,75 @@ RESET fractalsql.enterprise_ledger_key;
     if ($portfolioAudit -eq 'portfolio_optimize') { Pass "31 enterprise_mock: fractal_optimize_portfolio logs a portfolio_optimize provenance record when enterprise is loaded" }
     else { Fail "31 enterprise_mock: expected the latest kind=2 row to be type=portfolio_optimize, got: $portfolioAudit" }
 
+    # ---- T-J: the enterprise_lib verdict cache (ensure_enterprise_lib).
+    # The dlopen verdict is cached PER BACKEND and keyed by the PATH it
+    # was reached for. Two consequences, and they are opposites:
+    #   - LOADED, then the GUC changes: REFUSED, with the old and new
+    #     paths named. The core is dlopen'd once per backend and its
+    #     image is the trust anchor, so it cannot be re-pointed under a
+    #     session that already loaded it. The refusal is raised at USE
+    #     time (the GUC is PGC_SIGHUP, so a value that arrives with a
+    #     config reload cannot be rejected by a check hook without
+    #     failing the reload of every backend).
+    #   - FAILED, then the GUC changes: re-evaluated. Nothing is
+    #     loaded, so there is no trust anchor to protect.
+    #
+    # The re-point can only arrive through a config RELOAD, so the test
+    # has to hold ONE session open across the reload -- every Psql call
+    # is a new backend, and a new backend starts with an empty verdict
+    # cache. Hence the multi-statement, single-Psql-call blocks below.
+    $repointPath = "$mockSo.repoint.dll"
+    $rj1 = Psql -Sql @"
+SELECT 'LOAD:' || fractal_ledger_truth_count()::text;
+ALTER SYSTEM SET fractalsql.enterprise_lib = '$repointPath';
+SELECT pg_reload_conf();
+SELECT pg_sleep(3);
+SELECT 'SEEN:' || current_setting('fractalsql.enterprise_lib');
+SELECT 'USE:' || fractal_ledger_truth_count()::text;
+"@
+    if ($rj1 -match 'LOAD:0') {
+        Pass "31 ent-repoint: the enterprise core loads from the configured path"
+    } else {
+        Fail "31 ent-repoint: expected the mock to load, got: $rj1"
+    }
+    if ($rj1 -match ('SEEN:' + [regex]::Escape($repointPath))) {
+        Pass "31 ent-repoint: the reload delivered the new path to the open session"
+    } else {
+        Fail "31 ent-repoint: expected the session to see '$repointPath' after the reload, got: $rj1"
+    }
+    if ($rj1 -match 'was changed from' -and $rj1 -match [regex]::Escape($mockSo) -and $rj1 -match [regex]::Escape($repointPath)) {
+        Pass "31 ent-repoint: a LOADED library refuses a mid-session re-point, naming the old and the new path"
+    } else {
+        Fail "31 ent-repoint: expected the re-point refusal, got: $rj1"
+    }
+
+    # The FAILED half: a load that failed is re-evaluated when the path
+    # changes, so a bad path does not poison the session forever. The
+    # first call must FAIL (the file is not there) and the second must
+    # SUCCEED -- after the path was changed back, in the SAME session.
+    $missingPath = "$mockSo.missing.dll"
+    if (PgSetGuc -Name 'fractalsql.enterprise_lib' -SetVal "'$missingPath'" -Want $missingPath) {
+        $rj2 = Psql -Sql @"
+SELECT 'F1:' || fractal_ledger_truth_count()::text;
+ALTER SYSTEM SET fractalsql.enterprise_lib = '$mockSo';
+SELECT pg_reload_conf();
+SELECT pg_sleep(3);
+SELECT 'F2:' || fractal_ledger_truth_count()::text;
+"@
+        if ($rj2 -match 'enterprise tier not loaded' -and $rj2 -notmatch 'F1:') {
+            Pass "31 ent-repoint: a load that failed refuses cleanly (the dormant error)"
+        } else {
+            Fail "31 ent-repoint: expected the dormant error for the missing library, got: $rj2"
+        }
+        if ($rj2 -match 'F2:0') {
+            Pass "31 ent-repoint: a FAILED verdict is re-evaluated when the path changes (the same session then loads the good library)"
+        } else {
+            Fail "31 ent-repoint: expected the second call to succeed after the path changed, got: $rj2"
+        }
+    } else {
+        Fail "31 ent-repoint: could not point enterprise_lib at the missing path"
+    }
+
     Remove-Item Env:\FSQL_MOCK_ENT_FAIL -ErrorAction SilentlyContinue
     Remove-Item -Force $mockSo, $badsigSo, $badsigSig, $failSentinel -ErrorAction SilentlyContinue
     Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_lib; ALTER SYSTEM RESET fractalsql.enterprise_require_signature;" | Out-Null
@@ -3869,6 +5170,18 @@ RESET fractalsql.enterprise_ledger_key;
 # the reason step.
 function Gate32SovereignAgents {
     if (-not (PgSwapPlugin $Embed)) { Fail "32 sovereign_agents: plugin swap did not take effect"; return }
+
+    # Standalone-scoped gate runs never execute gate 15 (the embed gate), and
+    # that gate is what normally leaves fractalsql.http_embed_url pinned in a
+    # full-run invocation. Without the pin the engine refuses every embed
+    # dispatch outright -- "fractalsql.http_embed_url is not configured" --
+    # BEFORE the plugin is even consulted, which took out search_agent,
+    # plan_explore, rag_agent AND the new section-6 pair in the first
+    # standalone validation. Pin it here (ALTER SYSTEM; persisted harmlessly
+    # into the full run since gates 15/17/20/27 re-set the same value).
+    if (-not (PgSetGuc -Name 'fractalsql.http_embed_url' -SetVal "'http://unused/embeddings'" -Want 'http://unused/embeddings')) {
+        Fail "32 sovereign_agents: http_embed_url GUC did not take effect"; return
+    }
 
     Psql -Sql @"
 DROP TABLE IF EXISTS bt_agent_vec, bt_agent_fvec, bt_agent_nopk, bt_agent_empty;
@@ -3989,8 +5302,1657 @@ CREATE TABLE bt_agent_empty (id int PRIMARY KEY, emb float8[]);
     if ($raEmpty -match 'no rows found in bt_agent_empty\.emb') { Pass "32 sovereign_agents: fractal_rag_agent rejects an empty table" }
     else { Fail "32 sovereign_agents: expected a no-rows rejection, got: $raEmpty" }
 
+    # --- 6: agent_partial_reasoning_fail pair (C agents) ---------------
+    # Mirror of build_test.sh's gate-32 section 6 (the sqlite repo's gate-29
+    # pair convention): the embed mock (tests\mock_embed_plugin.c) fails its
+    # generate() when the dispatched CONTEXT carries FSQL_BT_FAIL_REASON --
+    # context is real content ONLY for the reasoning call (embed always
+    # dispatches "{}"), so the embed half stays healthy and the forced failure
+    # lands exactly on the reasoning flip point. Flag off -> raise; flag on ->
+    # computed data half + reasoning_step_failed marker.
+    Psql -Sql @"
+ALTER TABLE bt_agent_vec ADD COLUMN IF NOT EXISTS note text;
+INSERT INTO bt_agent_vec (emb, note) VALUES (ARRAY[0.5,0.5,0.0]::float8[], 'FSQL_BT_FAIL_REASON');
+"@ | Out-Null
+
+    $srf = Psql -Sql "SELECT fractal_search_agent('q', 'bt_agent_vec', 'emb');"
+    if ($srf -match 'search_agent reasoning failed') { Pass "32 sovereign_agents: agent_partial_reasoning_fail off -- the reasoning failure still raises" }
+    else { Fail "32 sovereign_agents: expected the reasoning raise with the flag off, got: $srf" }
+
+    if (-not (PgSetGuc -Name 'fractalsql.agent_partial_reasoning_fail' -SetVal 'on' -Want 'on')) {
+        Fail "32 sovereign_agents: could not set agent_partial_reasoning_fail=on"; PgSwapPlugin $Mock | Out-Null; return
+    }
+    $srp = Psql -Sql @"
+SELECT (answer LIKE 'reasoning_step_failed:%') AND (answer LIKE '%rc=%'), array_length(source_doc_ids, 1), execution_time_ms
+  FROM fractal_search_agent('q', 'bt_agent_vec', 'emb');
+"@
+    if ($srp -match '^t\|[1-9][0-9]*\|') { Pass "32 sovereign_agents: agent_partial_reasoning_fail on -- search_agent returns data half + reasoning_step_failed" }
+    else { Fail "32 sovereign_agents: expected a partial result (data half + reasoning_step_failed), got: $srp" }
+
+    $rap = Psql -Sql "SELECT answer LIKE 'reasoning_step_failed:%' FROM fractal_rag_agent('q', 'bt_agent_vec', 'emb');"
+    if ($rap -eq 't') { Pass "32 sovereign_agents: agent_partial_reasoning_fail on -- rag_agent returns the partial answer" }
+    else { Fail "32 sovereign_agents: expected the rag_agent partial answer, got: $rap" }
+
+    if (-not (PgSetGuc -Name 'fractalsql.agent_partial_reasoning_fail' -SetVal 'off' -Want 'off')) {
+        Fail "32 sovereign_agents: could not reset agent_partial_reasoning_fail=off"; PgSwapPlugin $Mock | Out-Null; return
+    }
+
     Psql -Sql "DROP TABLE IF EXISTS bt_agent_vec, bt_agent_fvec, bt_agent_nopk, bt_agent_empty;" | Out-Null
     PgSwapPlugin $Mock | Out-Null
+}
+
+# Shared by gates 33 (smoke) and 38 (https): the cl.exe build of mcp/ once,
+# in ONE place. Never tests a stale exe or relinks stale objects (both
+# burned an E2E run: old obj + old exe passing existence checks) -- rebuilds
+# every call; make it cheap by keeping the two gates adjacent to each other.
+# Returns the exe path, or $null after the caller-visible Fail.
+function BuildMcpServerMsvc([string]$GateLabel) {
+    $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+    if (-not $cl) { Skip "$GateLabel (cl.exe not on PATH -- activate MSVC first)"; return $null }
+    $vcpkgRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot '..\vcpkg'))
+    $vcpkgInc = Join-Path $vcpkgRoot 'installed\x64-windows-static\include'
+    $vcpkgLib = Join-Path $vcpkgRoot 'installed\x64-windows-static\lib'
+    if (-not (Test-Path (Join-Path $vcpkgInc 'openssl\evp.h')) -or -not (Test-Path (Join-Path $vcpkgLib 'libssl.lib'))) {
+        Skip "$GateLabel (vcpkg x64-windows-static OpenSSL not found at $vcpkgRoot)"; return $null
+    }
+    Write-Host "         [$($GateLabel.Split(' ')[0])] building mcp server (cl.exe + vcpkg openssl + PgDir libpq)..."
+    $objDir = Join-Path $RepoRoot 'mcp\obj\msvc'
+    New-Item -ItemType Directory -Force $objDir | Out-Null
+    $exePath = Join-Path $RepoRoot 'mcp\fractalsql-postgresql-mcp.exe'
+    Remove-Item $exePath -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $objDir '*.obj') -ErrorAction SilentlyContinue
+    $srcSources = @(Get-ChildItem (Join-Path $RepoRoot 'mcp\src\*.cpp') | ForEach-Object { $_.FullName })
+    $adapterSources = @(Get-ChildItem (Join-Path $RepoRoot 'mcp\src\adapters\*.cpp') | ForEach-Object { $_.FullName })
+    $common = @('/nologo', '/std:c++17', '/EHsc', '/O1', '/MT', '/DNOMINMAX', '/nologo',   # /O1: /O2 exhausts the MSVC heap on the json.hpp-heavy TUs (C1060, E2E-caught)
+        "/I$(Join-Path $RepoRoot 'mcp\vendor')",
+        "/I$(Join-Path $RepoRoot 'mcp\src')",
+        "/I$vcpkgInc",
+        "/I$(Join-Path $PgDir 'include')")
+    foreach ($src in ($srcSources + $adapterSources)) {
+        $obj = Join-Path $objDir ((Split-Path $src -Leaf) -replace '\.cpp$', '.obj')
+        $cLog = & cl.exe @common '/c' $src "/Fo$obj" 2>&1
+        if (-not (Test-Path $obj)) {
+            ($cLog | Select-Object -Last 12) | ForEach-Object { Write-Host "         [cl] $_" }
+            Fail "$GateLabel (cl.exe failed compiling $(Split-Path $src -Leaf))"; return $null
+        }
+    }
+    # Link via a response file -- pwsh's native-arg passing re-splits every
+    # argument containing spaces (the user profile has one), so BOTH the
+    # .obj list and the option/paths live in the rsp, quote-wrapped.
+    $objs = Get-ChildItem (Join-Path $objDir '*.obj') | ForEach-Object { '"' + $_.FullName + '"' }
+    $rsp = Join-Path $objDir 'link.rsp'
+    @('/OUT:"' + $exePath + '"', '/nologo',
+        '/LIBPATH:"' + $vcpkgLib + '"',
+        '/LIBPATH:"' + (Join-Path $PgDir 'lib') + '"',
+        'libpq.lib', 'libssl.lib', 'libcrypto.lib', 'ws2_32.lib', 'advapi32.lib', 'crypt32.lib', 'user32.lib') +
+      $objs | Set-Content -LiteralPath $rsp
+    $linkLog = & link.exe ('@' + $rsp) 2>&1
+    if (-not (Test-Path $exePath)) {
+        ($linkLog | Select-Object -Last 15) | ForEach-Object { Write-Host "         [link] $_" }
+        Fail "$GateLabel (link.exe failed)"; return $null
+    }
+    return $exePath
+}
+
+function Gate33McpSmoke {
+    # The FractalSQL MCP plugin (mcp/, docs/mcp-plugin.md) end
+    # to end over stdio, via the shared BuildMcpServerMsvc builder + the
+    # mcp\test\smoke.py driver. Skips (not fails) when cl/vcpkg-OpenSSL/
+    # python are absent -- the plugin's gates are additive.
+    $exePath = BuildMcpServerMsvc "33 mcp_smoke"
+    if (-not $exePath) { return }
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $py) { Skip "33 mcp_smoke (python not on PATH -- the smoke driver is a zero-dep python script)"; return }
+
+    # Fixture for the row-locator/truncation/vectorizer calls (single-column
+    # PK for the vectorizer lifecycle; label col for text registration; empty
+    # emb_auto as the vectorizer's target column -- create() needs it to exist).
+    Psql -Sql @"
+DROP TABLE IF EXISTS mcpsmoke_items;
+CREATE TABLE mcpsmoke_items (id serial PRIMARY KEY, name text, label text, emb float8[], emb_auto float8[]);
+INSERT INTO mcpsmoke_items (name, label, emb) SELECT 'i' || g, 'l' || g, ARRAY[0.1*g, 0.2, 0.0]::float8[] FROM generate_series(1, 5) g;
+DROP TABLE IF EXISTS mcpsw_logs;
+CREATE TABLE mcpsw_logs (metric float8, ts timestamptz, host text);
+INSERT INTO mcpsw_logs SELECT 50.0 + (g % 8) * 1.3 + CASE WHEN g > 48 THEN 30.0 ELSE 0.0 END,
+       now() - (96 - g) * interval '1 second', 'h1' FROM generate_series(1, 96) g;
+"@ | Out-Null
+
+    # The mock reasoning plugin is usually still active in this cluster (the
+    # initial postgresql.conf write and every gate's own swap-back), but gates
+    # 14/27 leave the retry/think plugins behind -- and earlier cognition
+    # gates overwrite $SqlFile. Pin BOTH fresh so smoke.py's Cognition round
+    # trip against $Mock is deterministic no matter which gates ran before
+    # this one. $SqlFile is inside $DataDir by design -- the Windows mock
+    # plugins open it by bare relative filename resolved against the
+    # backend's CWD (its own data dir), see the $SqlFile comment at top.
+    Set-Content -LiteralPath $SqlFile -Value "SELECT 'mcp-cognition-ok'::text;" -NoNewline
+    if (-not (PgSwapPlugin $Mock)) {
+        Fail "33 mcp_smoke: could not pin the mock reasoning plugin for the Cognition round trip"; return
+    }
+
+    # Point the MCP server's libpq env at THIS gate run's throwaway cluster;
+    # save+restore so later gates are unaffected. PgDir\bin goes on PATH so
+    # libpq.dll (and its crypto deps) resolve for the child process.
+    $saved = @{}
+    foreach ($k in @('PGHOST','PGPORT','PGUSER','PGDATABASE','PGPASSWORD','FSQL_MCP_LOG_LEVEL','FSQL_MCP_EXE','FSQL_MCP_MOCK_SQL_FILE','PATH')) {
+        $saved[$k] = [System.Environment]::GetEnvironmentVariable($k, 'Process')
+    }
+    $env:PGHOST = '127.0.0.1'
+    $env:PGPORT = "$Port"
+    $env:PGUSER = 'postgres'
+    $env:PGDATABASE = 'postgres'
+    $env:FSQL_MCP_LOG_LEVEL = 'normal'
+    # smoke.py's agent_partial_reasoning_fail case writes the FSQL_BT_FORCE_FAIL
+    # sentinel into the mock plugin's response file, then restores it; the path is
+    # $SqlFile ($DataDir-relative, backend-CWD-resolved -- see the pin comment above).
+    $env:FSQL_MCP_MOCK_SQL_FILE = $SqlFile
+    $env:FSQL_MCP_DEBUG_SQL = '1'
+    $env:FSQL_MCP_EXE = $exePath
+    Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+    $env:PATH = (Join-Path $PgDir 'bin') + ';' + $env:PATH
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $py.Source
+    foreach ($a in @((Join-Path $RepoRoot 'mcp\test\smoke.py'))) { $psi.ArgumentList.Add($a) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    if (-not $proc.WaitForExit(180000)) {
+        try { $proc.Kill() } catch { }
+        Fail "33 mcp_smoke: smoke driver timed out after 180s"
+    }
+    $out = ($outTask.Result + $errTask.Result)
+    # The server's stderr ([srv] audit/debug lines, plus engine NOTICEs that echo
+    # the robustness sweep's oversized identifiers) is thousands of lines. Keep it
+    # all in a log file; show only the driver's own lines on success, everything
+    # on failure/skip so a red gate is still fully diagnosable.
+    $gateLog = Join-Path ([System.IO.Path]::GetTempPath()) 'fsql_gate33_mcp_smoke.log'
+    Set-Content -Path $gateLog -Value $out -Encoding UTF8
+    $allLines = @($out -split "`n" | Where-Object { $_.Trim() })
+    if ($proc.ExitCode -eq 0) {
+        $shown = @($allLines | Where-Object { $_ -match '^\s*(PASS|FAIL|SKIP|SMOKE|robustness|sanitize_probe|differential|large inputs|offender)' })
+        foreach ($line in $shown) { Write-Host "         $line" }
+        Write-Host "         ($($allLines.Count) lines total, $($allLines.Count - $shown.Count) server-log lines hidden; full log: $gateLog)"
+    } else {
+        foreach ($line in $allLines) { Write-Host "         $line" }
+        Write-Host "         (full log: $gateLog)"
+    }
+    if ($proc.ExitCode -eq 0) {
+        Pass "33 mcp_smoke: handshake + tools/list invariants + per-tier tools/call round trips (C++17 server)"
+    } elseif ($proc.ExitCode -eq 77) {
+        Skip "33 mcp_smoke (smoke driver reported self-skip)"
+    } else {
+        Fail "33 mcp_smoke (see assert lines above)"
+    }
+
+    foreach ($k in $saved.Keys) {
+        if ($null -eq $saved[$k]) { Remove-Item ("Env:\" + $k) -ErrorAction SilentlyContinue }
+        else { [System.Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+    }
+    Psql -Sql "DROP TABLE IF EXISTS mcpsmoke_items, mcpsw_logs;" | Out-Null
+}
+
+function Gate38McpHttps {
+    # The MCP server's direct-TLS mode (--https): mcp\tests\
+    # mcp_https_smoke_client.py drives the three fail-fast startup modes
+    # (missing cert/key, garbage key, mismatched key -> nonzero exit), proves
+    # the port speaks TLS not plaintext, and round-trips an authenticated
+    # session under the Bearer-token check. The DB-dependent live-leg checks
+    # self-skip without PG* env (this gate stays cluster-free; plaintext
+    # HTTP behavior is gate 33's/smoke.py's). Needs the exe (the shared
+    # BuildMcpServerMsvc builder), python, and an openssl CLI for the
+    # throwaway self-signed pair.
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $py) { Skip "38 mcp_https (python not on PATH)"; return }
+    $ossl = Get-Command openssl.exe -ErrorAction SilentlyContinue
+    if (-not $ossl) { Skip "38 mcp_https (openssl not on PATH -- the throwaway self-signed cert needs it)"; return }
+    $exePath = BuildMcpServerMsvc "38 mcp_https"
+    if (-not $exePath) { return }
+
+    Write-Host "         [38] generating throwaway self-signed cert/key..."
+    $work = Join-Path $env:TEMP "fsql_mcp38_https"
+    New-Item -ItemType Directory -Force $work | Out-Null
+    $cert = Join-Path $work 'mcp_https_cert.pem'
+    $key  = Join-Path $work 'mcp_https_key.pem'
+    # Strawberry/other openssl builds may reach for a broken external config
+    # (the psqlODBC dir's openssl.cnf is the observed failure); an EMPTY
+    # config file sidesteps it without affecting the generated key pair.
+    $emptyCnf = Join-Path $work 'mcp_https_openssl.cnf'
+    if (-not (Test-Path $emptyCnf)) { Set-Content -LiteralPath $emptyCnf -Value '' -NoNewline }
+    $env:OPENSSL_CONF = $emptyCnf
+    & $ossl.Source req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=127.0.0.1" `
+        -config $emptyCnf -keyout $key -out $cert 2>&1 | Out-Null
+    if (-not ((Test-Path $cert) -and (Test-Path $key))) {
+        Skip "38 mcp_https (openssl self-signed generation failed)"; return
+    }
+
+    Write-Host "         [38] driving mcp_https_smoke_client.py..."
+    # PgDir\bin on PATH: every subprocess the client spawns (cli_run's
+    # startup-fail probes and the served leg) loads libpq.dll from the
+    # loader, whose search only sees the inherited PATH -- the same
+    # prepend gate 33 does for smoke.py's server. The client passes
+    # os.environ down, so setting it here covers the whole tree.
+    $env:PATH = (Join-Path $PgDir 'bin') + ';' + $env:PATH
+    $outLog = & {
+        $env:MCP_SERVER_EXE = $exePath
+        $env:MCP_SERVER_CWD = $RepoRoot
+        $env:MCP_HTTPS_PORT = '18953'
+        $env:MCP_HTTPS_CERT = $cert
+        $env:MCP_HTTPS_KEY  = $key
+        & $py.Source (Join-Path $RepoRoot 'mcp\tests\mcp_https_smoke_client.py')
+    } 2>&1
+    foreach ($line in ($outLog | Where-Object { $_ })) { Write-Host "         $line" }
+    if ($LASTEXITCODE -eq 0) {
+        Pass "38 mcp_https: --https fail-fast modes + TLS-only port + bearer-under-TLS round trip"
+    } else {
+        Fail "38 mcp_https (see client output above)"
+    }
+}
+
+# Gates 39-42: standalone host-side unit probes, no cluster needed for
+# the probe binaries themselves (gate 41's live half runs inside the db
+# block, after gate 33). Probes build into dist\windows-probes\ -- the
+# established throwaway-outside-the-source-tree convention gate 21's
+# fuzz targets (dist\windows-fuzz) already set. Object names carry the
+# _*_probe_* prefix (mirroring build_test.sh's gate 39-42; on the POSIX
+# side they are what keeps a --coverage lcov merge from overwriting the
+# main build's objects -- the .ps1 has no coverage legs, but the names
+# keep the two harnesses' artifacts shaped alike).
+
+function Gate39ExtractParse {
+    # fsql_extract_best_point / fsql_parse_embedding_array /
+    # fsql_extract_topk (src\fractalsql_parse.c -- the SAME postgres.h-
+    # free TU gate 21's fuzz drivers link) parse JSON text that through
+    # any real SQL-level call only ever comes back well-formed, so
+    # their error branches are otherwise dead. Same standalone-probe /
+    # separately-named-object treatment as build_test.sh's gate 39 and
+    # the SQLite column's (tests\extract_parse_probe.c is THIS repo's
+    # adapted copy of the sibling's probe -- the two parse TUs declare
+    # the identical fsql_* APIs).
+    $srcProbe = Join-Path $RepoRoot 'tests\extract_parse_probe.c'
+    $srcParse = Join-Path $RepoRoot 'src\fractalsql_parse.c'
+    if (-not (Test-Path -LiteralPath $srcProbe)) { Skip '39 extract_parse (tests\extract_parse_probe.c not present)'; return }
+    if (-not (Test-Path -LiteralPath $srcParse)) { Skip '39 extract_parse (src\fractalsql_parse.c not present)'; return }
+    if (-not $script:Cc) { Skip '39 extract_parse (no gcc/clang on PATH -- set FSQL_CC)'; return }
+
+    $outDir = Join-Path $RepoRoot 'dist\windows-probes'
+    New-Item -ItemType Directory -Force $outDir | Out-Null
+    $mainObj    = Join-Path $outDir '_extract_parse_main.o'
+    $supportObj = Join-Path $outDir '_extract_parse_support.o'
+    $buildLog   = Join-Path $outDir 'extract_parse_build.log'
+    & $script:Cc -std=c11 -O1 -g -Isrc -c $srcProbe -o $mainObj 1>$buildLog 2>&1
+    $rc1 = $LASTEXITCODE
+    & $script:Cc -std=c11 -O1 -g -Isrc -c $srcParse -o $supportObj 1>>$buildLog 2>&1
+    $rc2 = $LASTEXITCODE
+    if ($rc1 -ne 0 -or $rc2 -ne 0 -or -not (Test-Path -LiteralPath $mainObj) -or -not (Test-Path -LiteralPath $supportObj)) {
+        Get-Content -LiteralPath $buildLog -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+        Fail "39 extract_parse: probe failed to build (see $buildLog)"
+        return
+    }
+    $bin = Join-Path $outDir 'extract_parse_probe.exe'
+    $linkLog = Join-Path $outDir 'extract_parse_link.log'
+    & $script:Cc $mainObj $supportObj -o $bin 1>$linkLog 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bin)) {
+        Get-Content -LiteralPath $linkLog -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+        Fail "39 extract_parse: probe failed to link (see $linkLog)"
+        return
+    }
+    $out = & $bin 2>&1
+    $rc = $LASTEXITCODE
+    $nOk = @($out | Where-Object { $_ -match '^OK:' }).Count
+    if ($rc -eq 0) {
+        Pass "39 extract_parse: best_point/embedding_array/topk malformed-input branches ($nOk checks OK)"
+    }
+    else {
+        $out | ForEach-Object { Write-Host "         $_" }
+        Fail "39 extract_parse: see driver output above"
+    }
+}
+
+function Gate40VectorsProbe {
+    # mcp\src\vectors.cpp's own coercion/validation branches are
+    # reachable through a real tools/call round trip only indirectly (a
+    # tool whose schema lets a deliberately-malformed element through);
+    # the unit probe hits each branch with certainty. errors.cpp is
+    # linked too -- the probe's ToolError/ErrorClass assertions live
+    # there (same shape as build_test.sh's gate 40, which compiles the
+    # same sources with the same _vectors_probe_* object names for its
+    # --coverage merge).
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'mcp\tests\vectors_probe.cpp'))) {
+        Skip '40 vectors_probe (mcp\tests\vectors_probe.cpp not present)'
+        return
+    }
+    if (-not $script:Cxx) { Skip '40 vectors_probe (no g++/clang++ on PATH -- set FSQL_CXX)'; return }
+
+    $outDir = Join-Path $RepoRoot 'dist\windows-probes'
+    New-Item -ItemType Directory -Force $outDir | Out-Null
+    $mainObj  = Join-Path $outDir '_vectors_probe_main.o'
+    $vecObj   = Join-Path $outDir '_vectors_probe_vectors.o'
+    $errObj   = Join-Path $outDir '_vectors_probe_errors.o'
+    $buildLog = Join-Path $outDir 'vectors_probe_build.log'
+    Push-Location (Join-Path $RepoRoot 'mcp')
+    try {
+        & $script:Cxx -std=c++17 -O1 -g -Ivendor -Isrc -c 'tests\vectors_probe.cpp' -o $mainObj 1>$buildLog 2>&1
+        $rc1 = $LASTEXITCODE
+        & $script:Cxx -std=c++17 -O1 -g -Ivendor -Isrc -c 'src\vectors.cpp' -o $vecObj 1>>$buildLog 2>&1
+        $rc2 = $LASTEXITCODE
+        & $script:Cxx -std=c++17 -O1 -g -Ivendor -Isrc -c 'src\errors.cpp' -o $errObj 1>>$buildLog 2>&1
+        $rc3 = $LASTEXITCODE
+    }
+    finally { Pop-Location }
+    if ($rc1 -ne 0 -or $rc2 -ne 0 -or $rc3 -ne 0 -or -not (Test-Path -LiteralPath $mainObj) `
+            -or -not (Test-Path -LiteralPath $vecObj) -or -not (Test-Path -LiteralPath $errObj)) {
+        Get-Content -LiteralPath $buildLog -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+        Fail "40 vectors_probe: probe failed to build (see $buildLog)"
+        return
+    }
+    $bin = Join-Path $outDir 'vectors_probe.exe'
+    $linkLog = Join-Path $outDir 'vectors_probe_link.log'
+    & $script:Cxx $mainObj $vecObj $errObj -o $bin 1>$linkLog 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bin)) {
+        Get-Content -LiteralPath $linkLog -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+        Fail "40 vectors_probe: probe failed to link (see $linkLog)"
+        return
+    }
+    $out = & $bin 2>&1
+    $rc = $LASTEXITCODE
+    $nOk = @($out | Where-Object { $_ -match '^OK:' }).Count
+    if ($rc -eq 0) {
+        Pass "40 vectors_probe: mcp\src\vectors.cpp coercion/validation branches ($nOk checks OK)"
+    }
+    else {
+        $out | ForEach-Object { Write-Host "         $_" }
+        Fail "40 vectors_probe: see driver output above"
+    }
+}
+
+function Gate41DbProbe {
+    # mcp\src\db.h's unconnected/refused-connection and
+    # SQLSTATE-classification branches DB-less (16 checks, no PG* env --
+    # the probe's live section self-skips, mirroring smoke.py's exit-77
+    # posture), then -- this being the db block, after gate 33 in gate
+    # order -- the same binary run LIVE against the throwaway cluster
+    # with the same PG* env gate 33 exports, exercising the connected/
+    # version-skew/agent-partial branches against the real engine.
+    #
+    # Toolchain: PRIMARY is the mingw $script:Cxx the sibling probes use
+    # (verified against this PG install's own libpq: -L <PgDir>\lib -lpq
+    # imports PG's own libpq.dll, with <PgDir>\bin prepended to PATH at
+    # run time for libpq.dll + its crypto/intl deps). The FALLBACK
+    # mirrors gate 33's established cl.exe/PgDir layout for hosts
+    # without a mingw g++ -- db_probe needs no OpenSSL and no
+    # amalgamation (unlike the sibling column's db_probe), so it is
+    # libpq-only there.
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'mcp\tests\db_probe.cpp'))) {
+        Skip '41 db_probe (mcp\tests\db_probe.cpp not present)'
+        return
+    }
+    # Verify the resolution with a trivial PQlibVersion() compile+run
+    # before trusting it (test-compile-before-trusting convention as in
+    # build_test.sh's gate 41 / gate 21).
+    $mcpDir  = Join-Path $RepoRoot 'mcp'
+    $outDir  = Join-Path $RepoRoot 'dist\windows-probes'
+    New-Item -ItemType Directory -Force $outDir | Out-Null
+    $pqProbeC  = Join-Path $outDir 'db_probe_toolchain.c'
+    $pqProbeExe = Join-Path $outDir 'db_probe_toolchain.exe'
+    Set-Content -LiteralPath $pqProbeC -Value @('#include <libpq-fe.h>', 'int main(void) { return PQlibVersion() >= 0 ? 0 : 1; }') -ErrorAction SilentlyContinue
+    function Test-Pq([string]$PqInclude, [string]$PqLibDir, [string]$PqBinDir) {
+        & $script:Cxx -O1 -g "-I$PqInclude" $pqProbeC "-L$PqLibDir" -lpq -o $pqProbeExe 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pqProbeExe)) { return $false }
+        # libpq is a DLL here too (PgDir\bin, with its own crypto/intl
+        # deps) -- PATH must carry it for the run half of this probe.
+        $savedPath = $env:PATH
+        try {
+            $env:PATH = "$PqBinDir;$env:PATH"
+            & $pqProbeExe *> $null
+            return ($LASTEXITCODE -eq 0)
+        }
+        finally { $env:PATH = $savedPath }
+    }
+
+    if ($script:Cxx) {
+        $pqOk = Test-Pq (Join-Path $PgDir 'include') (Join-Path $PgDir 'lib') (Join-Path $PgDir 'bin')
+        if (-not $pqOk) {
+            Skip "41 db_probe (no working libpq against PgDir ($PgDir) -- -I/-L/-lpq probe compile+run failed)"
+            return
+        }
+        Remove-Item $pqProbeC, $pqProbeExe -ErrorAction SilentlyContinue
+
+        $mainObj  = Join-Path $outDir '_db_probe_main.o'
+        $errObj   = Join-Path $outDir '_db_probe_errors.o'
+        $buildLog = Join-Path $outDir 'db_probe_build.log'
+        # Absolute, resolved BEFORE Push-Location: CI passes a relative -PgDir
+        # (deps\pg\root), which would not resolve from inside mcp\.
+        $pgIncAbs = (Resolve-Path -LiteralPath (Join-Path $PgDir 'include')).Path
+        Push-Location $mcpDir
+        try {
+            & $script:Cxx -std=c++17 -O1 -g '-Ivendor' '-Isrc' "-I$pgIncAbs" `
+                -c 'tests\db_probe.cpp' -o $mainObj 1>$buildLog 2>&1
+            $rc1 = $LASTEXITCODE
+            & $script:Cxx -std=c++17 -O1 -g '-Ivendor' '-Isrc' "-I$pgIncAbs" `
+                -c 'src\errors.cpp' -o $errObj 1>>$buildLog 2>&1
+            $rc2 = $LASTEXITCODE
+        }
+        finally { Pop-Location }
+        if ($rc1 -ne 0 -or $rc2 -ne 0 -or -not (Test-Path -LiteralPath $mainObj) -or -not (Test-Path -LiteralPath $errObj)) {
+            Get-Content -LiteralPath $buildLog -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+            Fail "41 db_probe: probe failed to build (see $buildLog)"
+            return
+        }
+        $bin = Join-Path $outDir 'db_probe.exe'
+        $linkLog = Join-Path $outDir 'db_probe_link.log'
+        & $script:Cxx $mainObj $errObj -o $bin "-L$(Join-Path $PgDir 'lib')" -lpq 1>$linkLog 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bin)) {
+            Get-Content -LiteralPath $linkLog -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+            Fail "41 db_probe: probe failed to link (see $linkLog)"
+            return
+        }
+    }
+    else {
+        # MSVC fallback -- gate 33's cl.exe/PgDir layout (libpq only).
+        $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+        if (-not $cl) { Skip "41 db_probe (no g++ and no cl.exe on PATH -- activate MSVC or set FSQL_CXX)"; return }
+        $pqOk = Test-Pq (Join-Path $PgDir 'include') (Join-Path $PgDir 'lib') (Join-Path $PgDir 'bin')
+        if (-not $pqOk) {
+            Skip "41 db_probe (no working libpq against PgDir ($PgDir) for the cl.exe path either)"
+            return
+        }
+        Remove-Item $pqProbeC, $pqProbeExe -ErrorAction SilentlyContinue
+        Write-Host "         [41] building db_probe (cl.exe + PgDir libpq)..."
+        $srcProbe = Join-Path $mcpDir 'tests\db_probe.cpp'
+        $srcErr   = Join-Path $mcpDir 'src\errors.cpp'
+        $common = @('/nologo', '/std:c++17', '/EHsc', '/MT', '/O1', '/DNOMINMAX',
+            "/I$(Join-Path $mcpDir 'vendor')",
+            "/I$(Join-Path $mcpDir 'src')",
+            "/I$(Join-Path $PgDir 'include')")
+        $mainObj = Join-Path $outDir '_db_probe_main.obj'
+        $errObj  = Join-Path $outDir '_db_probe_errors.obj'
+        $cLog = & cl.exe @common '/c' $srcProbe "/Fo$mainObj" 2>&1
+        if (-not (Test-Path -LiteralPath $mainObj)) {
+            ($cLog | Select-Object -Last 12) | ForEach-Object { Write-Host "         [41 cl] $_" }
+            Fail "41 db_probe (cl.exe failed compiling db_probe.cpp)"; return
+        }
+        $cLog = & cl.exe @common '/c' $srcErr "/Fo$errObj" 2>&1
+        if (-not (Test-Path -LiteralPath $errObj)) {
+            ($cLog | Select-Object -Last 12) | ForEach-Object { Write-Host "         [41 cl] $_" }
+            Fail "41 db_probe (cl.exe failed compiling errors.cpp)"; return
+        }
+        $bin = Join-Path $outDir 'db_probe.exe'
+        $rsp = Join-Path $outDir 'db_probe_link.rsp'
+        @('/OUT:"' + $bin + '"', '/nologo',
+            '/LIBPATH:"' + (Join-Path $PgDir 'lib') + '"',
+            'libpq.lib', 'ws2_32.lib', 'advapi32.lib', 'user32.lib',
+            '"' + $mainObj + '"', '"' + $errObj + '"') | Set-Content -LiteralPath $rsp
+        $linkLog = & link.exe ('@' + $rsp) 2>&1
+        if (-not (Test-Path -LiteralPath $bin)) {
+            ($linkLog | Select-Object -Last 15) | ForEach-Object { Write-Host "         [41 link] $_" }
+            Fail "41 db_probe (link.exe failed)"; return
+        }
+    }
+
+    # The MinGW runtime DLLs the probe needs, copied next to the exe: the Windows
+    # loader searches the exe's own directory BEFORE PATH, and PATH below puts
+    # PgDir\bin first. A PostgreSQL package that ships its own (different)
+    # libgcc/libstdc++/libwinpthread would otherwise win and the probe would die
+    # at load with no output (seen on the PG 14-16 packages, not 17/18).
+    if ($script:Cxx) {
+        $cxxDir = Split-Path -Parent $script:Cxx
+        if ($cxxDir) {
+            foreach ($dll in 'libstdc++-6.dll', 'libgcc_s_seh-1.dll', 'libwinpthread-1.dll') {
+                $dllSrc = Join-Path $cxxDir $dll
+                if (Test-Path -LiteralPath $dllSrc) { Copy-Item -LiteralPath $dllSrc -Destination $outDir -Force }
+            }
+        }
+    }
+
+    # --- run: DB-less leg, then the live leg (cluster is up inside the
+    # db block; single -Gate 41 runs go through PgSetup for the same
+    # reason gate 33 does). Save/clear the PG* env for the DB-less leg,
+    # then wire gate 33's PG* for the live leg, restoring everything.
+    $saved = @{}
+    foreach ($k in @('PGHOST','PGPORT','PGUSER','PGDATABASE','PGPASSWORD','FSQL_MCP_TEST_CONNINFO','PATH')) {
+        $saved[$k] = [System.Environment]::GetEnvironmentVariable($k, 'Process')
+    }
+    foreach ($k in @('PGHOST','PGPORT','PGUSER','PGDATABASE','PGPASSWORD','FSQL_MCP_TEST_CONNINFO')) {
+        Remove-Item ("Env:\" + $k) -ErrorAction SilentlyContinue
+    }
+    # libpq.dll (and its crypto/intl deps) resolve from PgDir\bin for
+    # BOTH legs -- the DB-less one included, since even the
+    # unconnected branches' link-time import needs the DLL at load.
+    $env:PATH = (Join-Path $PgDir 'bin') + ';' + $env:PATH
+    try {
+        $out = & $bin 2>&1   # DB-less: no PG* env; probe self-skips its live section
+        $rc = $LASTEXITCODE
+        $nOk = @($out | Where-Object { $_ -match '^OK:' }).Count
+        if ($rc -eq 0) {
+            Pass "41 db_probe: unconnected/refused-connection + SQLSTATE-classification branches, DB-less ($nOk checks OK; live checks self-skipped without PG* env)"
+        }
+        else {
+            $out | ForEach-Object { Write-Host "         $_" }
+            Write-Host ("         [41] exit code {0} (0x{1:X8}); 0xC0000135 = DLL not found at load, 0xC0000005 = access violation" -f $rc, [uint32]([int64]$rc -band 0xFFFFFFFF))
+            Write-Host ("         [41] runtime DLLs in PgDir\bin: " + ((Get-ChildItem -LiteralPath (Join-Path $PgDir 'bin') -Filter 'lib*.dll' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'gcc|stdc|winpthread' } | ForEach-Object { $_.Name }) -join ', '))
+            Fail "41 db_probe: see driver output above (DB-less leg)"
+            return
+        }
+        # LIVE leg -- mirror gate 33's PG* wiring exactly.
+        $env:PGHOST = '127.0.0.1'
+        $env:PGPORT = "$Port"
+        $env:PGUSER = 'postgres'
+        $env:PGDATABASE = 'postgres'
+        $out = & $bin 2>&1
+        $rc = $LASTEXITCODE
+        $nOk = @($out | Where-Object { $_ -match '^OK:' }).Count
+        if ($rc -eq 0) {
+            Pass "41 db_probe live leg: connected callScalar/callRow/callRows, engine-failure classification, version-skew warning and agent-partial wiring on the live cluster ($nOk checks OK)"
+        }
+        else {
+            $out | ForEach-Object { Write-Host "         $_" }
+            Write-Host ("         [41] exit code {0} (0x{1:X8}); 0xC0000135 = DLL not found at load, 0xC0000005 = access violation" -f $rc, [uint32]([int64]$rc -band 0xFFFFFFFF))
+            Write-Host ("         [41] runtime DLLs in PgDir\bin: " + ((Get-ChildItem -LiteralPath (Join-Path $PgDir 'bin') -Filter 'lib*.dll' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'gcc|stdc|winpthread' } | ForEach-Object { $_.Name }) -join ', '))
+            Fail "41 db_probe live leg: see driver output above"
+        }
+    }
+    finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item ("Env:\" + $k) -ErrorAction SilentlyContinue }
+            else { [System.Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+        }
+    }
+}
+
+function Gate42ConcurrencyProbe {
+    # mcp\src\concurrency.h's per-client-limit-reached and global-timeout
+    # throw branches (and the Token-destructor release paths each throw
+    # takes on its way out) are never hit by any live-protocol test: a
+    # synchronous request/response round trip always releases its Token
+    # before the next request is read. concurrency.h is header-only (no
+    # concurrency.cpp of its own), so -- like gate 41's db_probe sibling --
+    # this probe's own translation unit is the only place its coverage
+    # data exists at all, and no other object needs to be separately
+    # compiled alongside it.
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'mcp\tests\concurrency_probe.cpp'))) {
+        Skip '42 concurrency_probe (mcp\tests\concurrency_probe.cpp not present)'
+        return
+    }
+    if (-not $script:Cxx) { Skip '42 concurrency_probe (no g++/clang++ on PATH -- set FSQL_CXX)'; return }
+
+    $outDir = Join-Path $RepoRoot 'dist\windows-probes'
+    New-Item -ItemType Directory -Force $outDir | Out-Null
+    $obj = Join-Path $outDir '_concurrency_probe.o'
+    $buildLog = Join-Path $outDir 'concurrency_probe_build.log'
+    Push-Location (Join-Path $RepoRoot 'mcp')
+    try {
+        & $script:Cxx -std=c++17 -O1 -g -pthread -Ivendor -Isrc -c 'tests\concurrency_probe.cpp' -o $obj 1>$buildLog 2>&1
+        $rc1 = $LASTEXITCODE
+    }
+    finally { Pop-Location }
+    if ($rc1 -ne 0 -or -not (Test-Path -LiteralPath $obj)) {
+        Get-Content -LiteralPath $buildLog -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+        Fail "42 concurrency_probe: probe failed to build (see $buildLog)"
+        return
+    }
+    $bin = Join-Path $outDir 'concurrency_probe.exe'
+    $linkLog = Join-Path $outDir 'concurrency_probe_link.log'
+    & $script:Cxx -pthread $obj -o $bin 1>$linkLog 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bin)) {
+        Get-Content -LiteralPath $linkLog -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+        Fail "42 concurrency_probe: probe failed to link (see $linkLog)"
+        return
+    }
+    $out = & $bin 2>&1
+    $rc = $LASTEXITCODE
+    if ($rc -eq 0) {
+        Pass "42 concurrency_probe: mcp\src\concurrency.h per-client-limit, global-timeout and Token-release branches (driver: $out)"
+    }
+    else {
+        $out | ForEach-Object { Write-Host "         $_" }
+        Fail "42 concurrency_probe: see driver output above"
+    }
+}
+
+# Table runner shared by gates 44 and 45 -- see build_test.sh's sql_table_run.
+# Rows are "label<TAB>expect<TAB>sql": expect = "E:<text>" (an ERROR whose
+# message contains <text>), "OK" (no ERROR) or "NONE" (either); every row
+# also fails if the backend dies. A "@mock" row swaps the reasoning mock back
+# in. Sets $script:TblN / $script:TblBad.
+function SqlTableRun([string]$Gate, [string]$Rows) {
+    $script:TblN = 0; $script:TblBad = 0
+    foreach ($line in ($Rows -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $f = $line -split "`t", 3
+        $label = $f[0]
+        if ($label -eq '@mock') { PgSwapPlugin $Mock | Out-Null; continue }
+        # "@plugin<TAB>NAME": swap the reasoning plugin to the script variable $NAME (Mock, Embed, ...).
+        # "@guc<TAB>name<TAB>value": ALTER SYSTEM SET fractalsql.<name> = value, then wait for it.
+        if ($label -eq '@plugin') { PgSwapPlugin (Get-Variable -Name $f[1] -ValueOnly -Scope Script) | Out-Null; continue }
+        if ($label -eq '@guc') {
+            $gv = if ($f.Count -gt 2) { $f[2] } else { '' }
+            if (-not (PgSetGuc -Name "fractalsql.$($f[1])" -SetVal "'$gv'" -Want $gv)) { Fail "$Gate error_paths: could not set fractalsql.$($f[1])" }
+            continue
+        }
+        $expect = $f[1]; $sql = $f[2]
+        $script:TblN++
+        $out = Psql -Sql $sql
+        $short = ($out -replace '\s+', ' ')
+        if ($short.Length -gt 160) { $short = $short.Substring(0, 160) }
+        if ($out -match 'server closed the connection|terminated by signal|in recovery mode|not yet accepting') {
+            Fail "$Gate error_paths: '$label' CRASHED the backend: $short"
+            $script:TblBad++
+            for ($i = 0; $i -lt (60 * $TimeoutMult); $i++) {
+                if ((Psql -Sql 'SELECT 1') -eq '1') { break }
+                Start-Sleep -Milliseconds 500
+            }
+            continue
+        }
+        $isErr = $out -match 'ERROR:'
+        if ($expect.StartsWith('E:')) {
+            if (-not ($isErr -and $out.Contains($expect.Substring(2)))) {
+                Fail "$Gate error_paths: '$label' expected ERROR containing '$($expect.Substring(2))', got: $short"; $script:TblBad++
+            }
+        } elseif ($expect -eq 'OK') {
+            if ($isErr) { Fail "$Gate error_paths: '$label' expected success, got: $short"; $script:TblBad++ }
+        }
+    }
+}
+
+# Gate 44: error-path / argument-validation sweep -- see build_test.sh's
+# gate_44_error_paths for the full rationale. One table of calls, each with
+# the outcome it must produce ("E:<text>" = an ERROR containing <text>, "OK" =
+# no ERROR, "NONE" = either); every row also fails if the backend dies.
+function Gate44ErrorPaths {
+    Psql -Sql @"
+DROP TABLE IF EXISTS bt_g44;
+CREATE TABLE bt_g44 (id int, emb float8[]);
+INSERT INTO bt_g44 VALUES (1, ARRAY[0.1,0.2]), (2, ARRAY[0.3,0.2]), (3, ARRAY[0.9,0.8]);
+DROP TABLE IF EXISTS bt_g44x, bt_g44e;
+CREATE TABLE bt_g44x (id serial PRIMARY KEY, emb float8[]);
+INSERT INTO bt_g44x (emb) VALUES (ARRAY[0.1,0.2,0.3,0.4]), (ARRAY[0.4,0.3,0.2,0.1]), (ARRAY[0.9,0.8,0.7,0.6]);
+CREATE TABLE bt_g44e (id serial PRIMARY KEY, emb float8[], txt text);
+INSERT INTO bt_g44e (emb, txt) VALUES (ARRAY[0.1,0.2,0.3], 'a'), (ARRAY[0.3,0.2,0.1], 'b'), (ARRAY[0.9,0.8,0.7], 'c');
+DROP TABLE IF EXISTS bt_g44n, bt_g44d, bt_g44z, bt_g44t, bt_g44v, bt_g44w;
+CREATE TABLE bt_g44n (id serial PRIMARY KEY, emb float8[]);
+INSERT INTO bt_g44n (emb) VALUES (NULL), (ARRAY[0.1,0.2]), (NULL);
+CREATE TABLE bt_g44d (id serial PRIMARY KEY, emb float8[]);
+INSERT INTO bt_g44d (emb) VALUES (ARRAY[0.1,0.2]), (ARRAY[0.1,0.2,0.3]);
+CREATE TABLE bt_g44z (id serial PRIMARY KEY, emb float8[]);
+CREATE TABLE bt_g44t (id serial PRIMARY KEY, emb text);
+INSERT INTO bt_g44t (emb) VALUES ('x'), ('y');
+CREATE TABLE bt_g44v (id serial PRIMARY KEY, emb fractal_vector);
+INSERT INTO bt_g44v (emb) VALUES ('[0.1,0.2]'), ('[0.3,0.2]'), ('[0.9,0.8]');
+CREATE TABLE bt_g44w (id serial PRIMARY KEY, emb fractal_vector);
+INSERT INTO bt_g44w (emb) VALUES ('[0.1,0.2]'), ('[0.1,0.2,0.3]');
+"@ | Out-Null
+    # The embed-dependent rows need the embed mock + a configured endpoint;
+    # the "@mock" row swaps the reasoning mock back in for what follows.
+    if (-not (PgSwapPlugin $Embed)) { Fail "44 error_paths: plugin swap did not take effect"; return }
+    if (-not (PgSetGuc -Name 'fractalsql.http_embed_url' -SetVal "'http://unused/embeddings'" -Want 'http://unused/embeddings')) {
+        Fail "44 error_paths: http_embed_url GUC did not take effect"; PgSwapPlugin $Mock | Out-Null; return
+    }
+
+    $rows = @'
+search_agent null query	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_search_agent(NULL,'bt_g44e','emb')
+search_agent null table	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_search_agent('q',NULL,'emb')
+search_agent null col	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_search_agent('q','bt_g44e',NULL)
+search_agent pop 0	E:fractalsql: search failed	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',0,15)
+search_agent iter 0	OK	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',50,0)
+search_agent null pop	OK	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',NULL,NULL)
+rag null q	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_rag_agent(NULL,'bt_g44e','emb')
+rag null tbl	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_rag_agent('q',NULL,'emb')
+rag null col	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_rag_agent('q','bt_g44e',NULL)
+rag bad filter	OK	SELECT * FROM fractal_rag_agent('q','bt_g44e','emb','not json')
+plan null state	OK	SELECT * FROM fractal_agent_plan_explore(NULL,'bt_g44e','emb',3)
+plan null tbl	OK	SELECT * FROM fractal_agent_plan_explore('s',NULL,'emb',3)
+plan null col	OK	SELECT * FROM fractal_agent_plan_explore('s','bt_g44e',NULL,3)
+plan null br	OK	SELECT * FROM fractal_agent_plan_explore('s','bt_g44e','emb',NULL)
+plan br 0	E:fractalsql: plan_explore search failed (rc=-1)	SELECT * FROM fractal_agent_plan_explore('s','bt_g44e','emb',0)
+traj null tbl	OK	SELECT * FROM fractal_agent_trajectory_predict(NULL,'emb',1,3)
+traj null col	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e',NULL,1,3)
+traj null id	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',NULL,3)
+traj null steps	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',1,NULL)
+traj steps 0	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',1,0)
+traj steps big	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',1,100000)
+traj missing id	E:fractal_agent_trajectory_predict: no row in bt_g44e with id = 999999	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',999999,3)
+loop null id	E:fractalsql: agent_id, state_log, and dim are required	SELECT * FROM fractal_agent_detect_loop(NULL,ARRAY[1,2]::float8[],1)
+loop null log	E:fractalsql: agent_id, state_log, and dim are required	SELECT * FROM fractal_agent_detect_loop('a',NULL,1)
+loop null dim	E:fractalsql: agent_id, state_log, and dim are required	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],NULL)
+loop dim 0	E:fractalsql: dim must be > 0	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],0)
+loop bits 0	E:fractalsql: n_bits must be > 0	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,0)
+loop bits huge	OK	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,100000)
+loop ragged	E:fractalsql: state_log length (3) is not a multiple of dim (2)	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2,3]::float8[],2)
+loop neg thresh	E:fractalsql: hamming_threshold must be >= 0	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,64,0.0,-1)
+loop null opts	OK	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2,1,2,1,2]::float8[],2,NULL,NULL,NULL)
+loop empty log	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_agent_detect_loop('a','{}'::float8[],1)
+loop null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,NULL]::float8[],1)
+loop 2d array	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[[1,2],[3,4]]::float8[],1)
+fingerprint bits 0	E:fractalsql: n_bits must be > 0	SELECT fractal_state_fingerprint(ARRAY[1,2]::float8[],0)
+fingerprint empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_state_fingerprint('{}'::float8[],8)
+cycle null elem	E:fractalsql: fingerprints array must not contain NULLs	SELECT * FROM fractal_cycle_detect(ARRAY['\x01',NULL]::bytea[])
+cycle ragged	E:fractalsql: every fingerprint must be the same length (index 0 was 1 b	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x0102']::bytea[])
+cycle neg thresh	E:fractalsql: hamming_threshold must be >= 0	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x01']::bytea[],-1)
+cycle empty	E:fractalsql: fingerprints array must not be empty	SELECT * FROM fractal_cycle_detect('{}'::bytea[])
+cycle repeat	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x02','\x01','\x02','\x01','\x02']::bytea[])
+cycle thresh	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x00','\x01','\x00','\x01','\x00','\x01']::bytea[],2)
+cycle 2d	OK	SELECT * FROM fractal_cycle_detect(ARRAY[['\x01','\x02'],['\x03','\x04']]::bytea[])
+dfa null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_dimension_dfa(ARRAY[1,NULL,3]::float8[])
+dfa empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_dimension_dfa('{}'::float8[])
+boxcount dim 0	E:fractalsql: points length (4) must be a positive multiple of dim (0)	SELECT fractal_dimension_boxcount(ARRAY[1,2,3,4]::float8[],0)
+boxcount ragged	E:fractalsql: points length (3) must be a positive multiple of dim (2)	SELECT fractal_dimension_boxcount(ARRAY[1,2,3]::float8[],2)
+boxcount few	E:fractalsql: fractal_dimension_boxcount rc=-1 (need >= 8 points, non-de	SELECT fractal_dimension_boxcount(ARRAY[1,2]::float8[],2)
+cp thresh	E:fractalsql: fractal_change_point_detect rc=-1 (need n >= 2*win, thresh	SELECT fractal_change_point_detect(ARRAY[1,2,3,4,5,6,7,8]::float8[],2,-1.0,16)
+cp max_points 0	E:fractalsql: max_points must be > 0	SELECT fractal_change_point_detect(ARRAY[1,2,3,4,5,6,7,8]::float8[],2,2.0,0)
+cp short	E:fractalsql: fractal_change_point_detect rc=-1 (need n >= 2*win, thresh	SELECT fractal_change_point_detect(ARRAY[1,2,3]::float8[],16,2.0,16)
+cp null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_change_point_detect(ARRAY[1,NULL,3]::float8[],2,2.0,16)
+periodogram short	E:fractalsql: fractal_periodogram rc=-1 (need n >= 4)	SELECT * FROM fractal_periodogram(ARRAY[1,2,3]::float8[],4)
+periodogram peaks 0	E:fractalsql: max_peaks must be > 0	SELECT * FROM fractal_periodogram(ARRAY[1,2,3,4,5,6,7,8]::float8[],0)
+periodogram null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_periodogram(ARRAY[1,NULL,3,4,5]::float8[],4)
+tda dim 0	E:fractalsql: dim must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],0)
+tda ragged	E:fractalsql: points length (3) must be a multiple of dim (2)	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3]::float8[],2)
+tda max_dim	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,-1)
+tda thresh	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,1,-1.0)
+tda bars	E:fractalsql: max_h0_bars must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,1,1.0,0)
+drift win	E:fractalsql: window must be > 0	SELECT fractal_dimension_drift(ARRAY[1,2,3,4]::float8[],0)
+drift short	E:fractalsql: fractal_dimension_drift rc=-1 (need n >= window + 16, wind	SELECT fractal_dimension_drift(ARRAY[1,2,3,4]::float8[],64)
+portfolio k 0	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],0)
+portfolio k big	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],5)
+portfolio cov len	E:fractalsql: cov length (3) must be n_assets^2 (n_assets=2, expected 4)	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0]::float8[],1)
+portfolio bad mode	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'bogus')	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,NULL,false,'bogus')
+portfolio null k	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],NULL)
+portfolio null mu	E:fractalsql: fractal_optimize_portfolio: mu must not be NULL	SELECT fractal_optimize_portfolio(NULL,ARRAY[1,0,0,1]::float8[],1)
+portfolio null cov	E:fractalsql: fractal_optimize_portfolio: cov must not be NULL	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],NULL,1)
+portfolio null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_optimize_portfolio(ARRAY[0.1,NULL]::float8[],ARRAY[1,0,0,1]::float8[],1)
+portfolio ok	OK	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,7)
+portfolio ok obl	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'cauchy')	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,7,true,'cauchy')
+mm null mu	E:fractalsql: fractal_optimize_portfolio_multimodal: mu must not be NULL	SELECT fractal_optimize_portfolio_multimodal(NULL,ARRAY[1,0,0,1]::float8[],1)
+mm null cov	E:fractalsql: fractal_optimize_portfolio_multimodal: cov must not be NUL	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],NULL,1)
+pareto null mu	E:fractalsql: fractal_optimize_portfolio_multimodal_pareto: mu must not 	SELECT fractal_optimize_portfolio_multimodal_pareto(NULL,ARRAY[1,0,0,1]::float8[],1)
+pareto null cov	E:fractalsql: fractal_optimize_portfolio_multimodal_pareto: cov must not	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],NULL,1)
+subset null vals	E:fractalsql: item_values, upper_bounds, and k must not be NULL	SELECT fractal_optimize_subset(NULL,ARRAY[1,1]::float8[],1)
+subset null ub	E:fractalsql: item_values, upper_bounds, and k must not be NULL	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],NULL,1)
+subset null k	E:fractalsql: item_values, upper_bounds, and k must not be NULL	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1,1]::float8[],NULL)
+subset k 0	E:fractalsql: k must satisfy 1 <= k <= n_items (2)	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1,1]::float8[],0)
+subset ub len	E:fractalsql: upper_bounds length (1) must match item_values length (2)	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1]::float8[],1)
+subset prev len	E:fractalsql: prev_weights length (1) must match item_values length (2)	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1,1]::float8[],1,ARRAY[1]::float8[])
+subset neg pen	E:fractalsql: fractal_optimize_subset rc=-1 (check upper_bounds in [0,1]	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1,1]::float8[],1,NULL,-1.0)
+subset ok prev	OK	SELECT fractal_optimize_subset(ARRAY[1,2,3]::float8[],ARRAY[1,1,1]::float8[],2,ARRAY[0.5,0.5,0]::float8[],0.1,3)
+subset ok nulls	OK	SELECT fractal_optimize_subset(ARRAY[1,2,3]::float8[],ARRAY[1,1,1]::float8[],2,NULL,NULL,NULL)
+vascular null	OK	SELECT fractal_vascular_network(NULL,ARRAY[0,1]::int4[],ARRAY[1.0]::float8[])
+vascular null edges	OK	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],NULL,ARRAY[1.0]::float8[])
+vascular null arc	OK	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,1]::int4[],NULL)
+vascular coords len	E:fractalsql: node_coords length must be a multiple of 3	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0]::float8[],ARRAY[0,1]::int4[],ARRAY[1.0]::float8[])
+vascular edges odd	E:fractalsql: edges length must be a multiple of 2	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,1,0]::int4[],ARRAY[1.0]::float8[])
+vascular arc len	E:fractalsql: edge_arc_length length (2) must equal edges length / 2 (1)	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,1]::int4[],ARRAY[1.0,2.0]::float8[])
+vascular idx range	E:fractalsql: fractal_vascular_network rc=-1	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,9]::int4[],ARRAY[1.0]::float8[])
+vascular neg idx	E:fractalsql: index array entries must be >= 0 (got -1)	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[-1,1]::int4[],ARRAY[1.0]::float8[])
+vascular neg arc	E:fractalsql: fractal_vascular_network rc=-1	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,1]::int4[],ARRAY[-1.0]::float8[])
+folding null	OK	SELECT fractal_cortical_folding(NULL,ARRAY[0,1,2]::int4[])
+folding null faces	OK	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],NULL)
+folding verts len	E:fractalsql: vertices length must be a multiple of 3	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0]::float8[],ARRAY[0,1,2]::int4[])
+folding faces len	E:fractalsql: faces length must be a multiple of 3	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],ARRAY[0,1]::int4[])
+folding idx range	E:fractalsql: fractal_cortical_folding rc=-1 (need >= 4 non-coplanar ver	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],ARRAY[0,1,9]::int4[])
+nerve null	OK	SELECT fractal_nerve_plexus_metric(NULL,2,ARRAY[0,1]::int4[])
+nerve null dim	OK	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],NULL,ARRAY[0,1]::int4[])
+nerve null edges	OK	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],2,NULL)
+nerve dim 0	E:fractalsql: node_coords length (4) must be a positive multiple of dim 	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],0,ARRAY[0,1]::int4[])
+nerve ragged	E:fractalsql: node_coords length (3) must be a positive multiple of dim 	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1]::float8[],2,ARRAY[0,1]::int4[])
+nerve edges odd	E:fractalsql: edges length must be a multiple of 2	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],2,ARRAY[0,1,0]::int4[])
+nerve idx range	E:fractalsql: fractal_nerve_plexus_metric rc=-1	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],2,ARRAY[0,7]::int4[])
+morph null	OK	SELECT fractal_morphological_complexity(NULL,2)
+morph null dim	OK	SELECT fractal_morphological_complexity(ARRAY[0,0,1,0]::float8[],NULL)
+morph dim 0	E:fractalsql: points length (4) must be a positive multiple of dim (0)	SELECT fractal_morphological_complexity(ARRAY[0,0,1,0]::float8[],0)
+morph ragged	E:fractalsql: points length (3) must be a positive multiple of dim (2)	SELECT fractal_morphological_complexity(ARRAY[0,0,1]::float8[],2)
+store_morph null	OK	SELECT fractal_store_morphology(NULL,ARRAY[1,2]::float8[])
+store_morph null arr	OK	SELECT fractal_store_morphology(1,NULL)
+store_morph empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_store_morphology(1,'{}'::float8[])
+mine null	OK	SELECT * FROM fractal_mine_topology_negatives(NULL,3)
+mine null k	OK	SELECT * FROM fractal_mine_topology_negatives(ARRAY[1,2]::float8[],NULL)
+mine k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_mine_topology_negatives(ARRAY[1,2]::float8[],0)
+mine empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_mine_topology_negatives('{}'::float8[],3)
+telemetry null tbl	OK	SELECT * FROM fractal_search_telemetry(NULL,'emb',ARRAY[1,2]::float8[],1)
+telemetry null col	OK	SELECT * FROM fractal_search_telemetry('bt_g44',NULL,ARRAY[1,2]::float8[],1)
+telemetry null q	OK	SELECT * FROM fractal_search_telemetry('bt_g44','emb',NULL,1)
+telemetry null k	OK	SELECT * FROM fractal_search_telemetry('bt_g44','emb',ARRAY[1,2]::float8[],NULL)
+telemetry k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_search_telemetry('bt_g44','emb',ARRAY[1,2]::float8[],0)
+telemetry no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_search_telemetry('bt_nope','emb',ARRAY[1,2]::float8[],1)
+telemetry no col	E:column "nope" does not exist	SELECT * FROM fractal_search_telemetry('bt_g44','nope',ARRAY[1,2]::float8[],1)
+telemetry empty q	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_search_telemetry('bt_g44','emb','{}'::float8[],1)
+telemetry dim mismatch	E:fractalsql: bt_g44.emb row 0 has dim 2, expected 3 (match the query)	SELECT * FROM fractal_search_telemetry('bt_g44','emb',ARRAY[1,2,3]::float8[],1)
+telemetry ok	OK	SELECT * FROM fractal_search_telemetry('bt_g44','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid null tbl	OK	SELECT * FROM fractal_hybrid_clinical_search(NULL,'emb',ARRAY[1,2]::float8[],ARRAY['(0,1)'],1)
+hybrid null col	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44',NULL,ARRAY[1,2]::float8[],ARRAY['(0,1)'],1)
+hybrid null q	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',NULL,ARRAY['(0,1)'],1)
+hybrid null ids	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],NULL,1)
+hybrid null k	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY['(0,1)'],NULL)
+hybrid k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY['(0,1)'],0)
+hybrid bad ctid	E:fractalsql: doc_ids cohort matched no rows in bt_g44.emb	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY['zzz'],1)
+hybrid empty ids	E:fractalsql: doc_ids must be a 1-D non-null text[] of ctid strings	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],'{}'::text[],1)
+hybrid null id elem	E:fractalsql: doc_ids must be a 1-D non-null text[] of ctid strings	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY[NULL]::text[],1)
+hybrid no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_hybrid_clinical_search('bt_nope','emb',ARRAY[1,2]::float8[],ARRAY['(0,1)'],1)
+hybrid ok	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[0.1,0.2]::float8[],ARRAY['(0,1)','(0,2)'],2)
+traj_search null tbl	OK	SELECT * FROM fractal_search_trajectory(NULL,'emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],1)
+traj_search null col	OK	SELECT * FROM fractal_search_trajectory('bt_g44',NULL,ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],1)
+traj_search null base	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',NULL::float8[],ARRAY[1,2]::float8[],1)
+traj_search null cur	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[1,2]::float8[],NULL::float8[],1)
+traj_search null k	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],NULL)
+traj_search k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],0)
+traj_search dim mismatch	E:fractalsql: baseline_vector dim (2) must match current_vector dim (3)	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY[1,2,3]::float8[],1)
+traj_search no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_search_trajectory('bt_nope','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],1)
+traj_search ok	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+traj_search_fv null tbl	OK	SELECT * FROM fractal_search_trajectory(NULL,'emb','[1,2]'::fractal_vector,'[1,2]'::fractal_vector,1)
+traj_search_fv null base	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',NULL::fractal_vector,'[1,2]'::fractal_vector,1)
+traj_search_fv k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_search_trajectory('bt_g44','emb','[1,2]'::fractal_vector,'[1,2]'::fractal_vector,0)
+traj_search_fv ok	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2]'::fractal_vector,2)
+cross null tbl	OK	SELECT * FROM fractal_cross_modal_search(NULL,'emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],0.5,1)
+cross null m	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',NULL::float8[],ARRAY[1,2]::float8[],0.5,1)
+cross null c	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],NULL::float8[],0.5,1)
+cross null alpha	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],NULL,1)
+cross alpha lo	E:fractalsql: alpha_weight must be in [0,1]	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],-0.1,1)
+cross alpha hi	E:fractalsql: alpha_weight must be in [0,1]	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],1.1,1)
+cross k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],0.5,0)
+cross dim mismatch	E:fractalsql: bt_g44x.emb row 0 has dim 4, expected 5 (match the query)	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2,3]::float8[],0.5,1)
+cross ok	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],0.5,2)
+cross_fv null tbl	OK	SELECT * FROM fractal_cross_modal_search(NULL,'emb','[1,2]'::fractal_vector,'[1,2]'::fractal_vector,0.5,1)
+cross_fv alpha	E:fractalsql: alpha_weight must be in [0,1]	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb','[1,2]'::fractal_vector,'[1,2]'::fractal_vector,2.0,1)
+cross_fv ok	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2]'::fractal_vector,0.5,2)
+explore bad col	E:column "nope" does not exist	SELECT * FROM fractal_search_explore('bt_g44','nope',ARRAY[1,2]::float8[])
+explore no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_search_explore('bt_nope','emb',ARRAY[1,2]::float8[])
+explore bad opts	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[1,2]::float8[],'[1]'::jsonb)
+explore pop	E:fractalsql: population_size 0 out of range [1, 100000]	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[1,2]::float8[],'{"population_size":0}')
+explore ok	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"iterations":3,"population_size":5}')
+explore str opt	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"iterations":"x"}')
+search iter 0	E:fractalsql: iterations 0 out of range [1, 10000]	SELECT fractal_search(ARRAY[1,2]::float8[],0)
+search pop 0	E:fractalsql: population_size 0 out of range [1, 100000]	SELECT fractal_search(ARRAY[1,2]::float8[],5,0)
+search empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_search('{}'::float8[])
+search_dbg diff	E:fractalsql: diffusion_factor 99 out of range [1, 32]	SELECT fractal_search_debug(ARRAY[1,2]::float8[],5,5,99)
+embed null	E:fractal_embed: input must not be NULL	SELECT fractal_embed(NULL)
+embed empty	E:fractal_embed: dispatch failed (rc=-1): fractalsql: invalid arguments 	SELECT fractal_embed('')
+schema bad tbl	E:fractal_schema_context: table "bt_nope" not found or not visible	SELECT fractal_schema_context(ARRAY['bt_nope'])
+schema empty arr	E:fractal_schema_context: no visible tables found	SELECT fractal_schema_context('{}'::text[])
+schema null elem	E:fractal_schema_context: no visible tables found	SELECT fractal_schema_context(ARRAY[NULL]::text[])
+schema hint	OK	SELECT length(fractal_schema_context(ARRAY['bt_g44'],'embedding'))>0
+t2s null tables elem	E:fractal_schema_context: no visible tables found	SELECT fractal_text_to_sql('q',ARRAY[NULL]::text[])
+getcfg unknown	E:fractalsql_get_config: unknown config key "nope"	SELECT fractalsql_get_config('nope')
+getcfg secret	OK	SELECT fractalsql_get_config('enterprise_ledger_key')
+getcfg prefixed	OK	SELECT fractalsql_get_config('fractalsql.http_url')
+getcfg null	E:fractalsql_get_config: the key must not be NULL	SELECT fractalsql_get_config(NULL)
+getcfg all keys	OK	SELECT k,fractalsql_get_config(k) FROM unnest(ARRAY['reasoning_plugin','http_url','http_model','http_allow_plaintext','http_embed_url','http_embed_model','http_think','http_think_provider','http_native_url','http_num_ctx','text_to_sql_max_attempts','text_to_sql_allowed_statements','text_to_sql_use_review','enterprise_lib','enterprise_require_signature','agent_partial_reasoning_fail']) k
+setcfg unknown	E:fractalsql_set_config: unknown config key "nope"	SELECT fractalsql_set_config('nope','x')
+setcfg null val	E:fractalsql_set_config: the value must not be NULL	SELECT fractalsql_set_config('agent_partial_reasoning_fail',NULL)
+setcfg bad bool	E:fractalsql_set_config: "agent_partial_reasoning_fail" expects a boolea	SELECT fractalsql_set_config('agent_partial_reasoning_fail','maybe')
+setcfg ok	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','on')
+setcfg reload	E:fractalsql_set_config: "fractalsql.http_url" is reload-scoped and cann	SELECT fractalsql_set_config('http_url','http://x')
+setcfg secret	NONE	SELECT fractalsql_set_config('enterprise_ledger_key','abc')
+setcfg max_attempts bad	E:fractalsql_set_config: "text_to_sql_max_attempts" expects an integer	SELECT fractalsql_set_config('text_to_sql_max_attempts','abc')
+setcfg prefixed	OK	SELECT fractalsql_set_config('fractalsql.agent_partial_reasoning_fail','off')
+ledger verify kind	OK	SELECT fractal_ledger_verify(3)
+ledger verify null	OK	SELECT fractal_ledger_verify(NULL)
+ledger verify 1	OK	SELECT fractal_ledger_verify(1)
+ledger verify 2	OK	SELECT fractal_ledger_verify(2)
+diversify bad win	E:fractalsql: fsql_diversify_set_params rc=-1:	SELECT fractal_diversify_set_params(-1)
+diversify bad stall	E:fractalsql: fsql_diversify_set_params rc=-1:	SELECT fractal_diversify_set_params(NULL,-1.0)
+diversify bad sigma	OK	SELECT fractal_diversify_set_params(NULL,NULL,0.0)
+diversify bad weight	E:fractalsql: fsql_diversify_set_params rc=-1:	SELECT fractal_diversify_set_params(NULL,NULL,NULL,-1.0)
+feedback bad kind	E:fractalsql: kind must be one of 'dwell', 'positive', 'negative' (got '	SELECT fractal_feedback_report(1,'bogus')
+feedback null	E:fractalsql: kind must be one of 'dwell', 'positive', 'negative' (got '	SELECT fractal_feedback_report(NULL,'click')
+feedback dwell	OK	SELECT fractal_feedback_report(1,'dwell',-5)
+feedback ok	E:fractalsql: kind must be one of 'dwell', 'positive', 'negative' (got '	SELECT fractal_feedback_report(1,'click')
+isolate null	OK	SELECT fractal_isolate_background(NULL)
+isolate bad	E:fractalsql: result_handle must be >= 0	SELECT fractal_isolate_background(-1)
+explain	OK	SELECT fractal_explain_result()
+collapse	OK	SELECT fractal_detect_collapse()
+vec from_text bad	E:fractal_vector_from_text: could not parse "abc" as a vector: invalid i	SELECT fractal_vector_from_text('abc')
+vec from_text empty	E:fractal_vector_from_text: could not parse "[]" as a vector array: frac	SELECT fractal_vector_from_text('[]')
+vec from_text nan	OK	SELECT fractal_vector_from_text('[NaN,1]')
+vec from_array null elem	E:fractal_vector: source float8[] must be 1-D non-null	SELECT fractal_vector_from_float8_array(ARRAY[1,NULL]::float8[])
+vec from_array empty	E:fractal_vector: source float8[] must be 1-D non-null	SELECT fractal_vector_from_float8_array('{}'::float8[])
+vec dim mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_l2_distance('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec add mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_add('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec sub mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_sub('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec cos mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_cosine_distance('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec cos zero	OK	SELECT fractal_vector_cosine_distance('[0,0]'::fractal_vector,'[1,2]'::fractal_vector)
+vec cossim zero	OK	SELECT fractal_vector_cosine_similarity('[0,0]'::fractal_vector,'[0,0]'::fractal_vector)
+vec ip mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_negative_inner_product('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec l2sq mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_l2_squared('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec lp p0	E:fractal_vector_lp_distance: p must be > 0	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[1,2]'::fractal_vector,0)
+vec lp mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector,2)
+vec lp inf	OK	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[3,5]'::fractal_vector,'Infinity')
+vec lp 1	OK	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[3,5]'::fractal_vector,1)
+vec lp 3	OK	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[3,5]'::fractal_vector,3)
+vec normalize zero	OK	SELECT fractal_vector_normalize('[0,0]'::fractal_vector)
+vec scale nan	OK	SELECT fractal_vector_scale('[1,2]'::fractal_vector,'NaN')
+vec scale inf	OK	SELECT fractal_vector_scale('[1,2]'::fractal_vector,'Infinity')
+vec typmod bad	E:fractal_vector dimension mismatch: column is fractal_vector(3), value 	SELECT '[1,2]'::fractal_vector(3)
+vec typmod zero	E:fractal_vector dimension must be between 1 and 32767, got 0	SELECT '[1,2]'::fractal_vector(0)
+vec typmod huge	E:fractal_vector dimension must be between 1 and 32767, got 100000	SELECT '[1,2]'::fractal_vector(100000)
+vec typmod ok	OK	SELECT '[1,2]'::fractal_vector(2)
+vec cast explicit	E:fractal_vector dimension mismatch: column is fractal_vector(3), value 	SELECT fractal_vector('[1,2]'::fractal_vector,3,true)
+vec quant zero	OK	SELECT fractal_vector_quantize_int8('[0,0]'::fractal_vector)
+vec quant ok	OK	SELECT fractal_vector_quantize_int8('[0.5,-1]'::fractal_vector)
+vec hamming empty	E:fractal_vector_hamming_distance rc=-1	SELECT fractal_vector_hamming_distance('\x'::bytea,'\x'::bytea)
+vec to_json	OK	SELECT fractal_vector_to_json('[1,2]'::fractal_vector)
+vec recv send	OK	SELECT fractal_vector_send('[1,2]'::fractal_vector)
+vec in bad bracket	E:fractal_vector: expected '[' at start of "1,2"	SELECT '1,2'::fractal_vector
+vec in trailing	E:fractal_vector: unexpected trailing data in "[1,2]x"	SELECT '[1,2]x'::fractal_vector
+vec in dims big	OK	SELECT fractal_vector_dims(('['||(SELECT string_agg('1',',') FROM generate_series(1,17000))||']')::fractal_vector)
+vec in too long	E:fractal_vector: dimension exceeds maximum 32767	SELECT ('['||(SELECT string_agg('1',',') FROM generate_series(1,100000))||']')::fractal_vector
+vec typmod_in bad	E:fractal_vector: invalid dimension "abc"	SELECT 'x'::fractal_vector(abc)
+vec in leading ws	OK	SELECT '   [1,2]'::fractal_vector
+vec in inner ws	OK	SELECT '[ 1 , 2 ]   '::fractal_vector
+vec in empty	E:fractal_vector dimension must be between 1 and 32767, got 0	SELECT '[]'::fractal_vector
+vec in empty ws	E:fractal_vector dimension must be between 1 and 32767, got 0	SELECT '[  ]'::fractal_vector
+vec in blank	E:fractal_vector: expected '[' at start of "   "	SELECT '   '::fractal_vector
+vec in empty str	E:fractal_vector: expected '[' at start of ""	SELECT ''::fractal_vector
+vec in bad number	E:fractal_vector: invalid number in "[1,abc]"	SELECT '[1,abc]'::fractal_vector
+vec in trailing comma	E:fractal_vector: invalid number in "[1,]"	SELECT '[1,]'::fractal_vector
+vec in no close	E:fractal_vector: expected ']' in "[1,2"	SELECT '[1,2'::fractal_vector
+vec in no close ws	E:fractal_vector: expected ']' in "[1 2]"	SELECT '[1 2]'::fractal_vector
+vec in 64 elems	OK	SELECT fractal_vector_dims(('['||(SELECT string_agg('1',',') FROM generate_series(1,64))||']')::fractal_vector)
+vec in 65 elems	OK	SELECT fractal_vector_dims(('['||(SELECT string_agg('1',',') FROM generate_series(1,65))||']')::fractal_vector)
+vec in 200 elems	OK	SELECT fractal_vector_dims(('['||(SELECT string_agg('1',',') FROM generate_series(1,200))||']')::fractal_vector)
+vec in exp inf	NONE	SELECT '[1e999,-1e999]'::fractal_vector
+vec typmod two args	E:fractal_vector typmod takes exactly one non-NULL parameter	SELECT '[1,2]'::fractal_vector(1,2)
+vec typmod junk	E:fractal_vector: invalid dimension "2x"	SELECT '[1,2]'::fractal_vector('2x')
+vec typmod empty str	E:fractal_vector: invalid dimension ""	SELECT '[1,2]'::fractal_vector('')
+vec typmod negative	E:fractal_vector dimension must be between 1 and 32767, got -1	SELECT '[1,2]'::fractal_vector(-1)
+vec typmod null	NONE	SELECT '[1,2]'::fractal_vector(NULL)
+vec hamming long eq	OK	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),decode(repeat('ab',200),'hex'))
+vec hamming long diff	OK	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),decode(repeat('ba',200),'hex'))
+vec hamming long mismatch	E:fractal_vector_hamming_distance: length mismatch (200 vs 201 bytes)	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),decode(repeat('ab',201),'hex'))
+vec hamming short vs long	E:fractal_vector_hamming_distance: length mismatch (1 vs 200 bytes)	SELECT fractal_vector_hamming_distance('\x01'::bytea,decode(repeat('ab',200),'hex'))
+vec hamming long vs short	E:fractal_vector_hamming_distance: length mismatch (200 vs 1 bytes)	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),'\x01'::bytea)
+vec quant binary long	OK	SELECT length(fractal_vector_quantize_binary(('['||(SELECT string_agg(((i%2)*2-1)::text,',') FROM generate_series(1,1100) i)||']')::fractal_vector))
+vec quant int8 long	OK	SELECT (fractal_vector_quantize_int8(('['||(SELECT string_agg((i-70)::text,',') FROM generate_series(1,140) i)||']')::fractal_vector)).scale
+vectorizer create no table	E:relation "bt_nope" does not exist	SELECT fractal_vectorizer_create('bt_nope','t','e')
+vectorizer create no col	E:column "nope" of relation "bt_g44e" does not exist	SELECT fractal_vectorizer_create('bt_g44e','nope','emb')
+vectorizer pause missing	E:fractal_vectorizer_pause: no vectorizer with id 999999	SELECT fractal_vectorizer_pause(999999)
+vectorizer resume missing	E:fractal_vectorizer_resume: no vectorizer with id 999999	SELECT fractal_vectorizer_resume(999999)
+vectorizer drop missing	E:fractal_vectorizer_drop: no vectorizer with id 999999	SELECT fractal_vectorizer_drop(999999)
+vectorizer null	E:fractal_vectorizer_pause: no vectorizer with id <NULL>	SELECT fractal_vectorizer_pause(NULL)
+vectorizer queue 0	OK	SELECT fractal_vectorizer_process_queue(0)
+vectorizer queue neg	E:LIMIT must not be negative	SELECT fractal_vectorizer_process_queue(-1)
+rag ok	OK	SELECT count(*)>=0 FROM fractal_rag_agent('q','bt_g44e','emb')
+rag meta filter	OK	SELECT count(*)>=0 FROM fractal_rag_agent('q','bt_g44e','emb','{"id":1}')
+search_agent ok	OK	SELECT count(*)>=0 FROM fractal_search_agent('q','bt_g44e','emb')
+search_agent small	E:fractalsql: search failed	SELECT count(*)>=0 FROM fractal_search_agent('q','bt_g44e','emb',1,1)
+plan ok	OK	SELECT count(*) FROM fractal_agent_plan_explore('q','bt_g44e','emb',2)
+plan no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_agent_plan_explore('q','bt_nope','emb',2)
+plan no col	E:column "nope" does not exist	SELECT * FROM fractal_agent_plan_explore('q','bt_g44e','nope',2)
+traj ok	OK	SELECT predicted_state_vector IS NOT NULL FROM fractal_agent_trajectory_predict('bt_g44e','emb',1,2)
+embed ok	OK	SELECT array_length(fractal_embed('hello'),1)
+embed huge	E:fractal_embed: input exceeds the 4 MiB limit	SELECT fractal_embed(repeat('A', 4*1024*1024 + 1))
+vectorizer create ok	OK	SELECT fractal_vectorizer_create('bt_g44e','txt','emb')
+cycle empty elems	E:fractalsql: fsql_cycle_detect_init rc=-1	SELECT * FROM fractal_cycle_detect(ARRAY['\x','\x']::bytea[])
+cycle thresh huge	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x01']::bytea[],100000)
+cycle long ok	OK	SELECT * FROM fractal_cycle_detect(ARRAY[decode(repeat('ab',200),'hex'),decode(repeat('ab',200),'hex'),decode(repeat('ab',200),'hex'),decode(repeat('ab',200),'hex')]::bytea[])
+cycle long mismatch	E:fractalsql: every fingerprint must be the same length (index 0 was 200	SELECT * FROM fractal_cycle_detect(ARRAY[decode(repeat('ab',200),'hex'),decode(repeat('ab',201),'hex')]::bytea[])
+cycle first null	E:fractalsql: fingerprints array must not contain NULLs	SELECT * FROM fractal_cycle_detect(ARRAY[NULL,'\x01']::bytea[])
+cycle long null	E:fractalsql: fingerprints array must not contain NULLs	SELECT * FROM fractal_cycle_detect(ARRAY[decode(repeat('ab',200),'hex'),NULL]::bytea[])
+cycle short mismatch long	E:fractalsql: every fingerprint must be the same length (index 0 was 1 b	SELECT * FROM fractal_cycle_detect(ARRAY['\x01',decode(repeat('ab',200),'hex')]::bytea[])
+cycle abab	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x010203','\x040506','\x010203','\x040506','\x010203','\x040506','\x010203','\x040506']::bytea[])
+cycle thresh near	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x00','\x01','\x00','\x01','\x00','\x01']::bytea[],4)
+loop one state	E:fractalsql: state_log must contain at least 2 states	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],2)
+loop repeating	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(v) FROM (SELECT CASE WHEN i%2=0 THEN 1.0 ELSE 2.0 END AS v FROM generate_series(1,80) i) s),2)
+loop wander	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(sin(i*1.7)+i*0.05) FROM generate_series(1,96) i),2)
+loop thresh	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(sin(i*1.3)) FROM generate_series(1,64) i),4,64,1.0,8)
+setcfg http_num_ctx=abc	E:fractalsql_set_config: "http_num_ctx" expects an integer	SELECT fractalsql_set_config('http_num_ctx','abc')
+setcfg http_num_ctx=99999999999999999999	E:fractalsql_set_config: "http_num_ctx" expects an integer	SELECT fractalsql_set_config('http_num_ctx','99999999999999999999')
+setcfg http_num_ctx=-5	E:fractalsql_set_config: "http_num_ctx" must be between 0 and 1048576	SELECT fractalsql_set_config('http_num_ctx','-5')
+setcfg http_num_ctx=2000000	E:fractalsql_set_config: "http_num_ctx" must be between 0 and 1048576	SELECT fractalsql_set_config('http_num_ctx','2000000')
+setcfg http_num_ctx=4096	E:fractalsql_set_config: "fractalsql.http_num_ctx" is reload-scoped and 	SELECT fractalsql_set_config('http_num_ctx','4096')
+setcfg text_to_sql_max_attempts=0	E:fractalsql_set_config: "text_to_sql_max_attempts" must be between 1 an	SELECT fractalsql_set_config('text_to_sql_max_attempts','0')
+setcfg text_to_sql_max_attempts=11	E:fractalsql_set_config: "text_to_sql_max_attempts" must be between 1 an	SELECT fractalsql_set_config('text_to_sql_max_attempts','11')
+setcfg text_to_sql_max_attempts=3x	E:fractalsql_set_config: "text_to_sql_max_attempts" expects an integer	SELECT fractalsql_set_config('text_to_sql_max_attempts','3x')
+setcfg text_to_sql_max_attempts=3	E:fractalsql_set_config: "fractalsql.text_to_sql_max_attempts" is reload	SELECT fractalsql_set_config('text_to_sql_max_attempts','3')
+setcfg text_to_sql_allowed_statements=bogus	E:fractalsql_set_config: "text_to_sql_allowed_statements" must be one of	SELECT fractalsql_set_config('text_to_sql_allowed_statements','bogus')
+setcfg text_to_sql_allowed_statements=select	E:fractalsql_set_config: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractalsql_set_config('text_to_sql_allowed_statements','select')
+setcfg text_to_sql_allowed_statements=select_insert_update	E:fractalsql_set_config: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractalsql_set_config('text_to_sql_allowed_statements','select_insert_update')
+setcfg text_to_sql_use_review=maybe	E:fractalsql_set_config: "text_to_sql_use_review" expects a boolean	SELECT fractalsql_set_config('text_to_sql_use_review','maybe')
+setcfg text_to_sql_use_review=on	E:fractalsql_set_config: "fractalsql.text_to_sql_use_review" is reload-s	SELECT fractalsql_set_config('text_to_sql_use_review','on')
+setcfg http_allow_plaintext=no	E:fractalsql_set_config: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractalsql_set_config('http_allow_plaintext','no')
+setcfg http_allow_plaintext=y	E:fractalsql_set_config: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractalsql_set_config('http_allow_plaintext','y')
+setcfg too long	E:fractalsql_set_config: "http_url" is too long	SELECT fractalsql_set_config('http_url',repeat('x',9000))
+setcfg upper key	E:fractalsql_set_config: "fractalsql.http_url" is reload-scoped and cann	SELECT fractalsql_set_config('FractalSQL.HTTP_URL','http://x')
+setcfg long key	E:fractalsql_set_config: unknown config key "kkkkkkkkkkkkkkkkkkkkkkkkkkk	SELECT fractalsql_set_config(repeat('k',200),'x')
+setcfg bool on	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','on')
+setcfg bool 1	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','1')
+setcfg bool true	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','true')
+setcfg bool yes	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','yes')
+setcfg bool t	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','t')
+setcfg bool y	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','y')
+setcfg bool TRUE	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','TRUE')
+setcfg bool off	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','off')
+setcfg bool 0	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','0')
+setcfg bool false	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','false')
+setcfg bool no	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','no')
+setcfg bool f	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','f')
+setcfg bool n	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','n')
+setcfg bool Off	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','Off')
+getcfg reasoning_plugin	OK	SELECT fractalsql_get_config('reasoning_plugin')
+getcfg http_model	OK	SELECT fractalsql_get_config('http_model')
+getcfg http_embed_url	OK	SELECT fractalsql_get_config('http_embed_url')
+getcfg http_think	OK	SELECT fractalsql_get_config('http_think')
+getcfg enterprise_lib	OK	SELECT fractalsql_get_config('enterprise_lib')
+getcfg http_token	OK	SELECT fractalsql_get_config('http_token')
+telemetry empty	E:fractalsql: no corpus rows to search	SELECT * FROM fractal_search_telemetry('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid empty	E:fractalsql: doc_ids cohort matched no rows in bt_g44z.emb	SELECT * FROM fractal_hybrid_clinical_search('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44z),ARRAY['(0,1)']),2)
+explore empty	E:fractalsql: bt_g44z.emb has no rows to explore	SELECT count(*) FROM fractal_search_explore('bt_g44z','emb',ARRAY[0.1,0.2]::float8[])
+traj_search empty	E:fractalsql: no corpus rows to search	SELECT * FROM fractal_search_trajectory('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross empty	E:fractalsql: no corpus rows to search	SELECT * FROM fractal_cross_modal_search('bt_g44z','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+telemetry null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_search_telemetry('bt_g44n','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid null vec	E:fractalsql: NULL vector at cohort row 0	SELECT * FROM fractal_hybrid_clinical_search('bt_g44n','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44n),ARRAY['(0,1)']),2)
+explore null vec	E:fractalsql: NULL vector at row 0	SELECT count(*) FROM fractal_search_explore('bt_g44n','emb',ARRAY[0.1,0.2]::float8[])
+traj_search null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_search_trajectory('bt_g44n','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_cross_modal_search('bt_g44n','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+telemetry ragged dims	E:fractalsql: bt_g44d.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_search_telemetry('bt_g44d','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid ragged dims	E:fractalsql: bt_g44d.emb cohort row 1 has dim 3, expected 2 (match the 	SELECT * FROM fractal_hybrid_clinical_search('bt_g44d','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44d),ARRAY['(0,1)']),2)
+explore ragged dims	E:fractalsql: bt_g44d.emb row 1 has dim 3, expected 2 (match the query)	SELECT count(*) FROM fractal_search_explore('bt_g44d','emb',ARRAY[0.1,0.2]::float8[])
+traj_search ragged dims	E:fractalsql: bt_g44d.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_search_trajectory('bt_g44d','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross ragged dims	E:fractalsql: bt_g44d.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_cross_modal_search('bt_g44d','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+telemetry text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_search_telemetry('bt_g44t','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid text col	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_hybrid_clinical_search('bt_g44t','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44t),ARRAY['(0,1)']),2)
+explore text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT count(*) FROM fractal_search_explore('bt_g44t','emb',ARRAY[0.1,0.2]::float8[])
+traj_search text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_search_trajectory('bt_g44t','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_cross_modal_search('bt_g44t','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+telemetry mixed fvec dims	E:fractalsql: bt_g44w.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_search_telemetry('bt_g44w','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid mixed fvec dims	E:fractalsql: bt_g44w.emb cohort row 1 has dim 3, expected 2 (match the 	SELECT * FROM fractal_hybrid_clinical_search('bt_g44w','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44w),ARRAY['(0,1)']),2)
+explore mixed fvec dims	E:fractalsql: bt_g44w.emb row 1 has dim 3, expected 2 (match the query)	SELECT count(*) FROM fractal_search_explore('bt_g44w','emb',ARRAY[0.1,0.2]::float8[])
+traj_search mixed fvec dims	E:fractalsql: bt_g44w.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_search_trajectory('bt_g44w','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross mixed fvec dims	E:fractalsql: bt_g44w.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_cross_modal_search('bt_g44w','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+search_agent empty	E:fractalsql: no rows found in bt_g44z.emb	SELECT * FROM fractal_search_agent('q','bt_g44z','emb')
+rag empty	E:fractalsql: no rows found in bt_g44z.emb	SELECT * FROM fractal_rag_agent('q','bt_g44z','emb')
+plan empty	E:fractalsql: no rows found in bt_g44z.emb	SELECT * FROM fractal_agent_plan_explore('q','bt_g44z','emb',2)
+search_agent null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_search_agent('q','bt_g44n','emb')
+rag null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_rag_agent('q','bt_g44n','emb')
+plan null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_agent_plan_explore('q','bt_g44n','emb',2)
+search_agent ragged dims	E:fractalsql: bt_g44d.emb row 0 has dim 2, expected 3 (match the query)	SELECT * FROM fractal_search_agent('q','bt_g44d','emb')
+rag ragged dims	E:fractalsql: bt_g44d.emb row 0 has dim 2, expected 3 (match the query)	SELECT * FROM fractal_rag_agent('q','bt_g44d','emb')
+plan ragged dims	E:fractalsql: bt_g44d.emb row 0 has dim 2, expected 3 (match the query)	SELECT * FROM fractal_agent_plan_explore('q','bt_g44d','emb',2)
+search_agent text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_search_agent('q','bt_g44t','emb')
+rag text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_rag_agent('q','bt_g44t','emb')
+plan text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_agent_plan_explore('q','bt_g44t','emb',2)
+telemetry fvec	OK	SELECT * FROM fractal_search_telemetry('bt_g44v','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid fvec	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44v','emb',ARRAY[0.1,0.2]::float8[],(SELECT array_agg(ctid::text) FROM bt_g44v),2)
+explore fvec	OK	SELECT count(*) FROM fractal_search_explore('bt_g44v','emb',ARRAY[0.1,0.2]::float8[])
+explore mmr low	OK	SELECT count(*) FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"mmr_lambda":-1}')
+explore mmr high	OK	SELECT count(*) FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"mmr_lambda":2}')
+traj baseline null	E:fractal_agent_trajectory_predict: baseline vector is NULL	SELECT * FROM fractal_agent_trajectory_predict('bt_g44n','emb',1,2)
+traj current null	E:fractal_agent_trajectory_predict: current vector is NULL	SELECT * FROM fractal_agent_trajectory_predict('bt_g44n','emb',2,2)
+traj dim mismatch	E:fractal_agent_trajectory_predict: baseline dim 2 != current dim 3	SELECT * FROM fractal_agent_trajectory_predict('bt_g44d','emb',1,2)
+traj empty table	E:fractal_agent_trajectory_predict: no row in bt_g44z with id = 1	SELECT * FROM fractal_agent_trajectory_predict('bt_g44z','emb',1,2)
+traj no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_agent_trajectory_predict('bt_nope','emb',1,2)
+traj fvec	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44v','emb',1,2)
+traj fvec mixed	E:fractal_agent_trajectory_predict: baseline dim 2 != current dim 3	SELECT * FROM fractal_agent_trajectory_predict('bt_g44w','emb',1,2)
+mine ok	OK	SELECT * FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2]::float8[],2)
+store_morph ok	OK	SELECT fractal_store_morphology(1,ARRAY[0.1,0.2]::float8[])
+mine after store	OK	SELECT * FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2]::float8[],2)
+mine dim differs	OK	SELECT * FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2,0.3]::float8[],2)
+store_morph null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_store_morphology(2,ARRAY[0.1,NULL]::float8[])
+store_morph neg	E:fractalsql: doc_id must be >= 0	SELECT fractal_store_morphology(-1,ARRAY[0.1,0.2]::float8[])
+@mock		
+sql_agent null q	E:fractal_sql_agent: question must not be NULL	SELECT * FROM fractal_sql_agent(NULL)
+sql_agent neg retries	E:fractal_sql_agent: max_retries must be >= 1 (got -1)	SELECT * FROM fractal_sql_agent('q',NULL,-1)
+sql_agent ok	NONE	SELECT * FROM fractal_sql_agent('q')
+vascular 2d edges	E:fractalsql: index array must be 1-D non-null int4[]	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[[0,1],[1,0]]::int4[],ARRAY[1.0,1.0]::float8[])
+vascular null elem edges	E:fractalsql: index array must be 1-D non-null int4[]	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,NULL]::int4[],ARRAY[1.0]::float8[])
+nerve 2d edges	E:fractalsql: index array must be 1-D non-null int4[]	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],2,ARRAY[[0,1],[1,0]]::int4[])
+feedback neg handle	E:fractalsql: result_handle must be >= 0	SELECT fractal_feedback_report(-1,'positive')
+isolate neg handle	NONE	SELECT fractal_isolate_background(-1)
+diversify dq	OK	SELECT fractal_diversify_current_dq()
+diversify p99	OK	SELECT fractal_diversify_overhead_p99_us()
+hybrid 2d ids	E:fractalsql: doc_ids must be a 1-D non-null text[]	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[0.1,0.2]::float8[],ARRAY[['(0,1)','(0,2)'],['(0,3)','(0,4)']],2)
+hybrid null elem ids	E:fractalsql: doc_ids must be a 1-D non-null text[]	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[0.1,0.2]::float8[],ARRAY['(0,1)',NULL],2)
+hybrid empty ids	E:fractalsql: doc_ids must be a 1-D non-null text[]	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{}'::text[],2)
+trajectory fv k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_search_trajectory('bt_g44v','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2]'::fractal_vector,0)
+trajectory fv dims	E:fractalsql: baseline_vector dim (2) must match current_vector dim (3)	SELECT * FROM fractal_search_trajectory('bt_g44v','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2,0.1]'::fractal_vector,2)
+cross fv k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_cross_modal_search('bt_g44v','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2]'::fractal_vector,0.5,0)
+agent trajectory text col	NONE	SELECT * FROM fractal_agent_trajectory_predict('bt_g44t','emb',1,3)
+'@
+    SqlTableRun '44' $rows
+    $n = $script:TblN; $bad = $script:TblBad
+    if ($bad -eq 0) { Pass "44 error_paths: all $n argument-validation / error-path / NULL-argument calls behaved as specified (no backend crash)" }
+
+    Psql -Sql "SELECT fractal_vectorizer_drop(v.id) FROM fractal_vectorizers v WHERE v.source_table = 'bt_g44e';" | Out-Null
+    Psql -Sql "DROP TABLE IF EXISTS bt_g44, bt_g44x, bt_g44e, bt_g44n, bt_g44d, bt_g44z, bt_g44t, bt_g44v, bt_g44w; DELETE FROM fractalsql_feature_store;" | Out-Null
+    PgSwapPlugin $Mock | Out-Null
+}
+
+# Gate 45: enterprise-tier paths driven through tests\mock_enterprise_core.c --
+# see build_test.sh's gate_45_enterprise_paths for the full rationale
+# (validation behind the tier check, and the ledger-tip authentication that
+# fractal_ledger_load() runs before handing the chain to the core).
+function Gate45EnterprisePaths {
+    $mockSo = Join-Path $env:TEMP "fractalsql_bt_g45_ent_$PgMajor.dll"
+    Remove-Item -Force $mockSo, "$mockSo.sig" -ErrorAction SilentlyContinue
+    $obj = [System.IO.Path]::ChangeExtension($mockSo, '.obj')
+    $src = Join-Path $RepoRoot 'tests\mock_enterprise_core.c'
+    $inc = Join-Path $RepoRoot 'include'
+    $buildOut = & cl.exe /nologo /MT /LD /DFSQL_BUILDING_DLL "/I$inc" $src "/Fo$obj" "/Fe$mockSo" 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $mockSo)) {
+        Fail "45 enterprise_paths: mock .dll failed to build"
+        Write-Host ($buildOut -join "`n")
+        return
+    }
+    Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;" | Out-Null
+    if (-not (PgSetGuc -Name 'fractalsql.enterprise_lib' -SetVal "'$mockSo'" -Want $mockSo)) {
+        Fail "45 enterprise_paths: could not point enterprise_lib at the mock"
+        Remove-Item -Force $mockSo -ErrorAction SilentlyContinue
+        return
+    }
+
+    # ---- (a) argument validation behind the tier check ----
+    $rowsA = @'
+mm null mu	E:fractalsql: fractal_optimize_portfolio_multimodal: mu must not be NULL	SELECT fractal_optimize_portfolio_multimodal(NULL,ARRAY[1,0,0,1]::float8[],1)
+mm null cov	E:fractalsql: fractal_optimize_portfolio_multimodal: cov must not be NUL	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],NULL,1)
+mm null k	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],NULL)
+mm k 0	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],0)
+mm cov len	E:fractalsql: cov length (3) must be n_assets^2 (n_assets=2, expected 4)	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0]::float8[],1)
+mm restarts 0	E:fractalsql: n_restarts must satisfy 1 <= n_restarts <= 64	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,0)
+mm overlap	NONE	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,2.0)
+mm quality	NONE	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,0.1,2.0)
+mm bad mode	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'bogus')	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,0.1,0.9,1,false,'bogus')
+mm ok	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'cauchy')	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,3,0.15,0.9,5,true,'cauchy')
+mm ok nulls	OK	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,NULL,NULL,NULL,NULL,NULL,NULL)
+pareto null mu	E:fractalsql: fractal_optimize_portfolio_multimodal_pareto: mu must not 	SELECT fractal_optimize_portfolio_multimodal_pareto(NULL,ARRAY[1,0,0,1]::float8[],1)
+pareto null cov	E:fractalsql: fractal_optimize_portfolio_multimodal_pareto: cov must not	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],NULL,1)
+pareto null k	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],NULL)
+pareto k 0	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],0)
+pareto cov len	E:fractalsql: cov length (3) must be n_assets^2 (n_assets=2, expected 4)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0]::float8[],1)
+pareto restarts 0	E:fractalsql: n_restarts must satisfy 1 <= n_restarts <= 64	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,0)
+pareto front 0	E:fractalsql: max_front must satisfy 1 <= max_front <= n_restarts (2)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,0)
+pareto front big	E:fractalsql: max_front must satisfy 1 <= max_front <= n_restarts (2)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,99)
+pareto bad mode	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'bogus')	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,2,1,false,'bogus')
+pareto ok	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'cauchy')	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,3,3,5,true,'cauchy')
+pareto ok nulls	OK	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,NULL,NULL,NULL,NULL,NULL)
+audit_unpack null	OK	SELECT fractal_audit_unpack(NULL)
+audit_unpack short	E:invalid input syntax for type json	SELECT fractal_audit_unpack('\x00')
+audit_unpack garbage	E:invalid input syntax for type json	SELECT fractal_audit_unpack(decode(repeat('ab',64),'hex'))
+audit_log null	E:fractalsql: fractal_audit_log: entry_type and payload must not be NULL	SELECT fractal_audit_log(NULL,'{}')
+audit_log null payload	E:fractalsql: fractal_audit_log: entry_type and payload must not be NULL	SELECT fractal_audit_log('x',NULL)
+audit_log ok	OK	SELECT fractal_audit_log('g45.test', '{"n":1}'::jsonb)
+audit_log big	OK	SELECT fractal_audit_log('g45.test', jsonb_build_object('p', repeat('x', 200000)))
+audit_log keyed	OK	SET fractalsql.enterprise_ledger_key = 'g45-key'; SELECT fractal_audit_log('g45.keyed', '{"n":2}'::jsonb)
+audit_unpack json	OK	SELECT fractal_audit_unpack(convert_to('{"a":1}', 'UTF8'))
+audit_unpack not json	E:invalid input syntax for type json	SELECT fractal_audit_unpack(convert_to('not json', 'UTF8'))
+audit_unpack empty	E:invalid input syntax for type json	SELECT fractal_audit_unpack('\x'::bytea)
+audit_unpack big	OK	SELECT length(fractal_audit_unpack(convert_to('"' || repeat('x', 300000) || '"', 'UTF8'))::text)
+mm ok k=n	OK	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],2)
+pareto ok k=n	OK	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],2)
+mm null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,NULL]::float8[],ARRAY[1,0,0,1]::float8[],1)
+pareto null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,NULL]::float8[],ARRAY[1,0,0,1]::float8[],1)
+'@
+    SqlTableRun '45' $rowsA
+    if ($script:TblBad -eq 0) { Pass "45 enterprise_paths: all $($script:TblN) multimodal / pareto / audit validation calls behaved as specified (mock core loaded)" }
+
+    # ---- (b) ledger tip authentication ----
+    # Constraint-free ledger fixture (same shape and index as gate 31's) so
+    # rows the extension's own DDL would refuse can be staged; bt_hmac() is
+    # a plain HMAC-SHA256 over the built-in sha256().
+    Psql -Sql @'
+DROP TABLE IF EXISTS fractalsql_ledger;
+CREATE TABLE fractalsql_ledger (
+  id bigserial PRIMARY KEY, kind integer NOT NULL, blob bytea NOT NULL,
+  mac bytea, prev_hash bytea, entry_hash bytea,
+  sealed boolean NOT NULL DEFAULT false, updated timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS fractalsql_ledger_kind_id_idx ON fractalsql_ledger (kind, id DESC);
+CREATE OR REPLACE FUNCTION bt_put(p bytea, b bytea, m bytea) RETURNS bytea LANGUAGE plpgsql AS $f$
+DECLARE h bytea := sha256(p || b || coalesce(m, '\x'::bytea));
+BEGIN
+  INSERT INTO fractalsql_ledger (kind, blob, mac, prev_hash, entry_hash) VALUES (1, b, m, p, h);
+  RETURN h;
+END $f$;
+CREATE OR REPLACE FUNCTION bt_hmac(k bytea, m bytea) RETURNS bytea LANGUAGE plpgsql IMMUTABLE AS $f$
+DECLARE ik bytea := '\x'::bytea; ok bytea := '\x'::bytea; kk bytea := k; i int;
+BEGIN
+  IF length(kk) > 64 THEN kk := sha256(kk); END IF;
+  kk := kk || decode(repeat('00', 64 - length(kk)), 'hex');
+  FOR i IN 0..63 LOOP
+    ik := ik || set_byte('\x00'::bytea, 0, get_byte(kk, i) # 54);
+    ok := ok || set_byte('\x00'::bytea, 0, get_byte(kk, i) # 92);
+  END LOOP;
+  RETURN sha256(ok || sha256(ik || m));
+END $f$;
+'@ | Out-Null
+    $rowsB = @'
+tip empty	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT fractal_ledger_load()
+tip genesis ok	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01020304',NULL); SELECT fractal_ledger_load()
+tip genesis nonzero prev	E:fractalsql: ledger chain verification failed -- the sole entry's prev_	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(decode(repeat('11',32),'hex'),'\x01',NULL); SELECT fractal_ledger_load()
+tip chain ok	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); SELECT fractal_ledger_load()
+tip chain link broken	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',NULL); SELECT bt_put(decode(repeat('22',32),'hex'),'\x02',NULL); SELECT fractal_ledger_load()
+tip prior hash null	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,NULL); SELECT bt_put($zero,'\x02',NULL); SELECT fractal_ledger_load()
+tip prior hash short	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,'\x0011'); SELECT bt_put($zero,'\x02',NULL); SELECT fractal_ledger_load()
+tip blob tampered	E:fractalsql: ledger chain verification failed -- the latest entry's has	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x0102',NULL); UPDATE fractalsql_ledger SET blob='\x0103' WHERE kind=1; SELECT fractal_ledger_load()
+tip prev short	E:fractalsql: ledger chain verification failed -- stored prev_hash/entry	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01','\x0011',$zero); SELECT fractal_ledger_load()
+tip hash short	E:fractalsql: ledger chain verification failed -- stored prev_hash/entry	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,'\x0011'); SELECT fractal_ledger_load()
+tip entry_hash null	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,NULL); SELECT fractal_ledger_load()
+tip prev null	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',NULL,$zero); SELECT fractal_ledger_load()
+tip key, no mac	E:fractalsql: ledger MAC verification failed -- the persisted blob has n	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',NULL); SELECT fractal_ledger_load()
+tip key, mac short	E:fractalsql: ledger MAC verification failed -- stored MAC is 16 bytes, 	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',decode(repeat('cd',16),'hex')); SELECT fractal_ledger_load()
+tip key, mac wrong	E:fractalsql: ledger MAC verification failed -- the persisted QTL blob i	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',decode(repeat('cd',32),'hex')); SELECT fractal_ledger_load()
+tip key, mac valid	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); SELECT fractal_ledger_load()
+tip key, mac valid, blob tampered	E:fractalsql: ledger MAC verification failed -- the persisted QTL blob i	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); UPDATE fractalsql_ledger SET blob='\x02' WHERE kind=1; SELECT fractal_ledger_load()
+tip key, mac valid, hash tampered	E:fractalsql: ledger chain verification failed -- the latest entry's has	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); UPDATE fractalsql_ledger SET entry_hash=decode(repeat('ee',32),'hex') WHERE kind=1; SELECT fractal_ledger_load()
+tip nokey, mac present	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',decode(repeat('ab',32),'hex')); SELECT fractal_ledger_load()
+tip nokey, mac short	E:fractalsql: ledger MAC verification failed -- stored MAC is 16 bytes, 	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',decode(repeat('ab',16),'hex')); SELECT fractal_ledger_load()
+tip verify kind1 ok	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); SELECT fractal_ledger_verify(1)::text
+tip verify kind1 tampered	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); UPDATE fractalsql_ledger SET blob='\x09' WHERE kind=1 AND id=(SELECT min(id) FROM fractalsql_ledger WHERE kind=1); SELECT fractal_ledger_verify(1)::text
+migrate old schema	OK	DROP TABLE IF EXISTS fractalsql_ledger; CREATE TABLE fractalsql_ledger (kind int PRIMARY KEY, blob bytea); SELECT fractal_ledger_verify(1)
+migrate missing index	OK	DROP TABLE IF EXISTS fractalsql_ledger; CREATE TABLE fractalsql_ledger (id bigserial PRIMARY KEY, kind integer NOT NULL, blob bytea NOT NULL, mac bytea, prev_hash bytea NOT NULL, entry_hash bytea NOT NULL, sealed boolean NOT NULL DEFAULT false, updated timestamptz NOT NULL DEFAULT now()); SELECT fractal_ledger_verify(1)
+'@
+    $rowsB = $rowsB.Replace('$zero', "decode(repeat('00',32),'hex')").Replace('$key', 'gate45-ledger-key')
+    SqlTableRun '45' $rowsB
+    if ($script:TblBad -eq 0) { Pass "45 enterprise_paths: all $($script:TblN) ledger-tip authentication cases behaved as specified (genesis, link, hash, MAC, key/no-key)" }
+
+    # ---- (c) enterprise libraries that are missing symbols ----
+    # One built without the optional multimodal symbols (an older enterprise
+    # build: the loader accepts it, the multimodal functions refuse), one
+    # without a required symbol (the loader refuses the whole library).
+    $mockOld = Join-Path $env:TEMP "fractalsql_bt_g45_old_$PgMajor.dll"
+    $mockBad = Join-Path $env:TEMP "fractalsql_bt_g45_bad_$PgMajor.dll"
+    Remove-Item -Force $mockOld, $mockBad -ErrorAction SilentlyContinue
+    $okOld = $false; $okBad = $false
+    & cl.exe /nologo /MT /LD /DFSQL_BUILDING_DLL /DMOCK_OMIT_MULTIMODAL "/I$inc" $src "/Fo$([System.IO.Path]::ChangeExtension($mockOld, '.obj'))" "/Fe$mockOld" 2>&1 | Out-Null
+    $okOld = ($LASTEXITCODE -eq 0 -and (Test-Path $mockOld))
+    & cl.exe /nologo /MT /LD /DFSQL_BUILDING_DLL /DMOCK_OMIT_AUDIT_UNPACK "/I$inc" $src "/Fo$([System.IO.Path]::ChangeExtension($mockBad, '.obj'))" "/Fe$mockBad" 2>&1 | Out-Null
+    $okBad = ($LASTEXITCODE -eq 0 -and (Test-Path $mockBad))
+    if ($okOld -and $okBad) {
+        PgSetGuc -Name 'fractalsql.enterprise_lib' -SetVal "'$mockOld'" -Want $mockOld | Out-Null
+        $rowsOld = @'
+old core multimodal	E:not available in this enterprise library	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2)
+old core pareto	E:not available in this enterprise library	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2)
+old core ledger still works	OK	SELECT fractal_ledger_truth_count()
+'@
+        SqlTableRun '45' $rowsOld
+        if ($script:TblBad -eq 0) { Pass "45 enterprise_paths: a core without the optional multimodal symbols loads, and only the multimodal functions refuse" }
+        PgSetGuc -Name 'fractalsql.enterprise_lib' -SetVal "'$mockBad'" -Want $mockBad | Out-Null
+        $rowsBad = @'
+bad core ledger	E:enterprise tier not loaded	SELECT fractal_ledger_flush()
+bad core multimodal	E:enterprise tier not loaded	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2)
+'@
+        SqlTableRun '45' $rowsBad
+        if ($script:TblBad -eq 0) { Pass "45 enterprise_paths: a core missing a required symbol is refused as a whole" }
+    } else {
+        Fail "45 enterprise_paths: reduced mock cores failed to build"
+    }
+    Remove-Item -Force $mockOld, $mockBad -ErrorAction SilentlyContinue
+
+    Psql -Sql "DROP FUNCTION IF EXISTS bt_hmac(bytea,bytea), bt_put(bytea,bytea,bytea); DELETE FROM fractalsql_ledger;" | Out-Null
+    Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_require_signature;" | Out-Null
+    Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_lib;" | Out-Null
+    Psql -Sql "SELECT pg_reload_conf();" | Out-Null
+    Remove-Item -Force $mockSo, "$mockSo.sig" -ErrorAction SilentlyContinue
+}
+
+# Gate 46: plugin / provider configuration paths -- see build_test.sh's
+# gate_46_plugin_config. Sets every "if configured" provider setting, runs the
+# reasoning / embed / text-to-sql entry points against the mock plugins, then
+# clears the plugin path to exercise the "no plugin configured" errors.
+function Gate46PluginConfig {
+    Psql -Sql @"
+DROP TABLE IF EXISTS bt_g46;
+CREATE TABLE bt_g46 (id serial PRIMARY KEY, emb float8[], txt text);
+INSERT INTO bt_g46 (emb, txt) VALUES (ARRAY[0.1,0.2,0.3],'a'), (ARRAY[0.3,0.2,0.1],'b');
+"@ | Out-Null
+    [System.IO.File]::WriteAllText($SqlFile, "SELECT count(*) FROM bt_g46`n")
+    PgSwapPlugin $Mock | Out-Null
+    $rows = @'
+@guc	http_url	http://127.0.0.1:9/v1/chat/completions
+@guc	http_token	bt-token
+@guc	http_model	bt-model
+@guc	http_allow_plaintext	on
+@guc	http_embed_url	http://127.0.0.1:9/v1/embeddings
+@guc	http_embed_model	bt-embed
+@guc	http_think	low
+@guc	http_think_provider	ollama
+@guc	http_native_url	http://127.0.0.1:9/api/chat
+@guc	http_num_ctx	4096
+@guc	text_to_sql_max_attempts	3
+@guc	text_to_sql_allowed_statements	select_insert_update
+configured reason	OK	SELECT fractal_reason('q')
+configured reason ctx	OK	SELECT fractal_reason('q', '{"k":1}')
+configured t2s	OK	SELECT fractal_text_to_sql('count rows in bt_g46')
+configured t2s tables	OK	SELECT fractal_text_to_sql('count rows', ARRAY['bt_g46'])
+configured sql_agent	OK	SELECT * FROM fractal_sql_agent('count rows in bt_g46')
+configured sql_agent exec	OK	SELECT * FROM fractal_sql_agent('count rows in bt_g46', ARRAY['bt_g46'], 2, true)
+configured schema	OK	SELECT length(fractal_schema_context(ARRAY['bt_g46'], 'rows')) > 0
+@guc	text_to_sql_use_review	on
+review t2s	E:fractal_text_to_sql: exhausted 3 attempt(s), last review verdict: ```s	SELECT fractal_text_to_sql('count rows in bt_g46')
+review sql_agent	OK	SELECT * FROM fractal_sql_agent('count rows in bt_g46')
+@guc	text_to_sql_use_review	off
+@plugin	EMBED
+configured embed	OK	SELECT array_length(fractal_embed('hello'), 1)
+configured search_agent	OK	SELECT * FROM fractal_search_agent('q', 'bt_g46', 'emb')
+configured rag	OK	SELECT * FROM fractal_rag_agent('q', 'bt_g46', 'emb')
+configured plan	OK	SELECT count(*) FROM fractal_agent_plan_explore('q', 'bt_g46', 'emb', 2)
+@guc	http_embed_url	
+embed url unset	E:http_embed_url is not configured	SELECT fractal_embed('hello')
+embed url unset agent	E:fractal_embed: fractalsql.http_embed_url is not configured	SELECT * FROM fractal_search_agent('q', 'bt_g46', 'emb')
+@guc	reasoning_plugin	
+no plugin reason	E:fractal_reason: no reasoning plugin loaded	SELECT fractal_reason('q')
+no plugin t2s	E:fractal_text_to_sql: no reasoning plugin loaded	SELECT fractal_text_to_sql('count rows in bt_g46')
+no plugin sql_agent	E:fractal_sql_agent: no reasoning plugin loaded	SELECT * FROM fractal_sql_agent('count rows in bt_g46')
+no plugin embed	E:fractal_embed: no reasoning plugin loaded	SELECT fractal_embed('hello')
+no plugin schema	OK	SELECT length(fractal_schema_context(ARRAY['bt_g46'])) > 0
+no plugin search_agent	E:fractal_search_agent: no reasoning plugin loaded	SELECT * FROM fractal_search_agent('q', 'bt_g46', 'emb')
+'@
+    SqlTableRun '46' $rows
+    if ($script:TblBad -eq 0) { Pass "46 plugin_config: all $($script:TblN) provider-configuration / no-plugin calls behaved as specified (no backend crash)" }
+    foreach ($k in 'http_url','http_token','http_model','http_allow_plaintext','http_embed_url','http_embed_model','http_think',
+                   'http_think_provider','http_native_url','http_num_ctx','text_to_sql_max_attempts','text_to_sql_allowed_statements',
+                   'text_to_sql_use_review') {
+        Psql -Sql "ALTER SYSTEM RESET fractalsql.$k;" | Out-Null
+    }
+    Psql -Sql "SELECT pg_reload_conf();" | Out-Null
+    PgSwapPlugin $Mock | Out-Null
+    Psql -Sql "DROP TABLE IF EXISTS bt_g46;" | Out-Null
+}
+
+# Gate 47: fault injection into the SPI and core calls the extension checks --
+# see build_test.sh's gate_47_fault_injection for the full rationale. A test
+# build (Gate01Build passes -FaultInject; src\fsql_fault.h) lets a session fail
+# the Nth call of one named site (SET fractalsql.fault_inject = 'SPI_execute:3').
+# Each statement is swept over every site, failing call 1, 2, 3, ... until a
+# run no longer reaches that many calls; every injected run must end without a
+# backend crash or a leak warning. Unlike the Linux gate there is no per-run
+# timeout (Psql has none), so a hang shows as a stuck run rather than a failure.
+$script:FiSites = @('srf_context','SPI_connect','SPI_execute','SPI_execute_with_args','fsql_new_sovereign','fsql_load_reasoning','fsql_search_ptr','fsql_search_null_json','fsql_dispatch_ai','fsql_dispatch_ai_resp','fsql_dispatch_ai_nosummary','fsql_extract_topk','fsql_topk_idx_neg','fsql_topk_idx_big','fsql_extract_best_point','fsql_extract_population','fsql_parse_embedding_array','fsql_cycle_detect_init','fsql_cycle_detect_feed','fsql_state_fingerprint','fsql_feedback_report','fsql_diversify_enable','fsql_diversify_disable','fsql_diversify_get_params','fsql_diversify_set_params','fsql_optimize_portfolio_ex','get_call_result_type','g_ent_ledger_flush','g_ent_ledger_load','g_ent_ledger_compact','g_ent_ledger_reset_soft','g_ent_ledger_reset_hard','g_ent_ledger_truth_count','g_ent_ledger_shadow_count','g_ent_optimize_portfolio_multimodal','g_ent_optimize_portfolio_multimodal_ex','g_ent_optimize_portfolio_multimodal_pareto')
+$script:FiRuns = 0; $script:FiFired = 0; $script:FiBad = 0
+
+function FaultSweep([string]$Label, [string]$Sql) {
+    foreach ($site in $script:FiSites) {
+        for ($k = 1; $k -le 100; $k++) {
+            $out = Psql -Sql "SET fractalsql.fault_inject = '${site}:$k'; $Sql"
+            $script:FiRuns++
+            if ($out -match 'server closed the connection|terminated by signal|in recovery mode|not yet accepting') {
+                $short = ($out -replace '\s+', ' '); if ($short.Length -gt 160) { $short = $short.Substring(0, 160) }
+                Fail "47 fault_injection: '$Label' with ${site}:$k CRASHED the backend: $short"
+                $script:FiBad++
+                for ($i = 0; $i -lt (60 * $TimeoutMult); $i++) {
+                    if ((Psql -Sql 'SELECT 1') -eq '1') { break }
+                    Start-Sleep -Milliseconds 500
+                }
+                break
+            }
+            if ($out -notmatch 'fractalsql: fault injected at') { break }    # ran past the last call of this site
+            $script:FiFired++
+            if ($out -match 'non-empty SPI stack|leak|was not closed|still open') {
+                Fail "47 fault_injection: '$Label' with ${site}:$k leaked: $(($out -split "`n" | Where-Object { $_ -match 'non-empty SPI stack|leak|was not closed|still open' } | Select-Object -First 1))"
+                $script:FiBad++
+            }
+        }
+    }
+}
+
+# Sweep every "label<TAB>sql" row of a here-string.
+function FaultSweepRows([string]$Rows) {
+    foreach ($line in ($Rows -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $f = $line -split "`t", 2
+        FaultSweep $f[0] $f[1]
+    }
+}
+
+function Gate47FaultInjection {
+    $probe = Psql -Sql 'SHOW fractalsql.fault_inject;'
+    if ($probe -match 'ERROR|unrecognized') {
+        Skip "47 fault_injection: this build has no fault-injection hook (needs build-windows.ps1 -FaultInject)"
+        return
+    }
+    Psql -Sql @"
+DROP TABLE IF EXISTS bt_g47, bt_g47v;
+CREATE TABLE bt_g47 (id serial PRIMARY KEY, emb float8[], txt text);
+INSERT INTO bt_g47 (emb, txt) VALUES (ARRAY[0.1,0.2,0.3],'a'), (ARRAY[0.3,0.2,0.1],'b'), (ARRAY[0.9,0.8,0.7],'c'), (ARRAY[0.5,0.5,0.5],'d');
+CREATE TABLE bt_g47v (id serial PRIMARY KEY, emb fractal_vector);
+INSERT INTO bt_g47v (emb) VALUES ('[0.1,0.2,0.3]'), ('[0.3,0.2,0.1]'), ('[0.9,0.8,0.7]');
+"@ | Out-Null
+    [System.IO.File]::WriteAllText($SqlFile, "SELECT count(*) FROM bt_g47`n")
+    $script:FiRuns = 0; $script:FiFired = 0; $script:FiBad = 0
+
+    # ---- reasoning mock: text-to-SQL, the SQL agent, schema context ----
+    PgSwapPlugin $Mock | Out-Null
+    FaultSweepRows @'
+sql_agent	SELECT * FROM fractal_sql_agent('count rows in bt_g47')
+sql_agent exec	SELECT * FROM fractal_sql_agent('count rows in bt_g47', ARRAY['bt_g47'], 2, true)
+text_to_sql	SELECT fractal_text_to_sql('count rows in bt_g47', ARRAY['bt_g47'])
+schema_context	SELECT length(fractal_schema_context(ARRAY['bt_g47'], 'rows'))
+schema_context auto	SELECT length(fractal_schema_context())
+reason	SELECT fractal_reason('q')
+'@
+    PgSetGuc -Name 'fractalsql.text_to_sql_use_review' -SetVal "'on'" -Want 'on' | Out-Null
+    PgSetGuc -Name 'fractalsql.text_to_sql_max_attempts' -SetVal "'2'" -Want '2' | Out-Null
+    FaultSweep 'sql_agent review' "SELECT * FROM fractal_sql_agent('count rows in bt_g47')"
+    FaultSweep 'text_to_sql review' "SELECT fractal_text_to_sql('count rows in bt_g47')"
+    PgSetGuc -Name 'fractalsql.text_to_sql_use_review' -SetVal "'off'" -Want 'off' | Out-Null
+
+    # ---- embed mock: the embedding-driven agents ----
+    PgSwapPlugin $Embed | Out-Null
+    PgSetGuc -Name 'fractalsql.http_embed_url' -SetVal "'http://unused/embeddings'" -Want 'http://unused/embeddings' | Out-Null
+    FaultSweepRows @'
+embed	SELECT array_length(fractal_embed('hello'), 1)
+search_agent	SELECT * FROM fractal_search_agent('q', 'bt_g47', 'emb')
+rag_agent	SELECT * FROM fractal_rag_agent('q', 'bt_g47', 'emb')
+plan_explore	SELECT count(*) FROM fractal_agent_plan_explore('q', 'bt_g47', 'emb', 2)
+'@
+    Psql -Sql 'ALTER SYSTEM RESET fractalsql.http_embed_url;' | Out-Null
+    Psql -Sql 'SELECT pg_reload_conf();' | Out-Null
+
+    # ---- no plugin needed: search, trajectory, loop/cycle, diversify ----
+    PgSwapPlugin $Mock | Out-Null
+    FaultSweepRows @'
+search	SELECT fractal_search(ARRAY[0.1,0.2,0.3]::float8[], 3, 6)
+search_debug	SELECT fractal_search_debug(ARRAY[0.1,0.2,0.3]::float8[], 3, 6)
+search_explore	SELECT count(*) FROM fractal_search_explore('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], '{"iterations":3,"population_size":5}')
+search_explore fv	SELECT count(*) FROM fractal_search_explore('bt_g47v', 'emb', ARRAY[0.1,0.2,0.3]::float8[])
+telemetry	SELECT count(*) FROM fractal_search_telemetry('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], 2)
+telemetry fv	SELECT count(*) FROM fractal_search_telemetry('bt_g47v', 'emb', ARRAY[0.1,0.2,0.3]::float8[], 2)
+trajectory	SELECT count(*) FROM fractal_search_trajectory('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], ARRAY[0.3,0.2,0.1]::float8[], 2)
+trajectory fv	SELECT count(*) FROM fractal_search_trajectory('bt_g47v', 'emb', '[0.1,0.2,0.3]'::fractal_vector, '[0.3,0.2,0.1]'::fractal_vector, 2)
+cross_modal	SELECT count(*) FROM fractal_cross_modal_search('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], ARRAY[0.3,0.2,0.1]::float8[], 0.5, 2)
+cross_modal fv	SELECT count(*) FROM fractal_cross_modal_search('bt_g47v', 'emb', '[0.1,0.2,0.3]'::fractal_vector, '[0.3,0.2,0.1]'::fractal_vector, 0.5, 2)
+hybrid	SELECT count(*) FROM fractal_hybrid_clinical_search('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], (SELECT array_agg(ctid::text) FROM bt_g47), 2)
+hybrid fv	SELECT count(*) FROM fractal_hybrid_clinical_search('bt_g47v', 'emb', ARRAY[0.1,0.2,0.3]::float8[], (SELECT array_agg(ctid::text) FROM bt_g47v), 2)
+agent trajectory	SELECT * FROM fractal_agent_trajectory_predict('bt_g47', 'emb', 1, 3)
+agent trajectory fv	SELECT * FROM fractal_agent_trajectory_predict('bt_g47v', 'emb', 1, 3)
+detect_loop	SELECT * FROM fractal_agent_detect_loop('a', ARRAY[1,2,1,2,1,2,1,2]::float8[], 2)
+fingerprint	SELECT fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64)
+cycle_detect	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x02','\x01','\x02','\x01','\x02']::bytea[])
+diversify	SELECT fractal_diversify_enable(); SELECT fractal_diversify_set_params(5); SELECT fractal_feedback_report(1,'positive'); SELECT fractal_explain_result(); SELECT fractal_detect_collapse(); SELECT fractal_diversify_disable()
+diversify dq	SELECT fractal_diversify_enable(); SELECT fractal_diversify_current_dq(); SELECT fractal_diversify_overhead_p99_us(); SELECT fractal_isolate_background(1); SELECT fractal_diversify_disable()
+periodogram	SELECT * FROM fractal_periodogram(ARRAY[1,2,3,4,5,6,7,8]::float8[], 4)
+tda	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4,5,6]::float8[], 2)
+portfolio	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2,0.15]::float8[], ARRAY[1,0,0,0,1,0,0,0,1]::float8[], 2, 7)
+set_config	SELECT fractalsql_set_config('http_model', 'bt-model'); SELECT fractalsql_get_config('http_model')
+store/mine	SELECT fractal_store_morphology(1, ARRAY[0.1,0.2]::float8[]); SELECT count(*) FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2]::float8[], 2)
+'@
+
+    # ---- enterprise mock: ledger / audit ----
+    $mockSo = Join-Path $env:TEMP "fractalsql_bt_g47_ent_$PgMajor.dll"
+    Remove-Item -Force $mockSo, "$mockSo.sig" -ErrorAction SilentlyContinue
+    $obj = [System.IO.Path]::ChangeExtension($mockSo, '.obj')
+    $src = Join-Path $RepoRoot 'tests\mock_enterprise_core.c'
+    $inc = Join-Path $RepoRoot 'include'
+    $buildOut = & cl.exe /nologo /MT /LD /DFSQL_BUILDING_DLL "/I$inc" $src "/Fo$obj" "/Fe$mockSo" 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $mockSo)) {
+        Fail "47 fault_injection: mock enterprise core failed to build"
+        Write-Host ($buildOut -join "`n")
+    } else {
+        Psql -Sql 'ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;' | Out-Null
+        if (PgSetGuc -Name 'fractalsql.enterprise_lib' -SetVal "'$mockSo'" -Want $mockSo) {
+            FaultSweepRows @'
+ledger verify	SELECT fractal_ledger_verify(1)
+ledger load	SELECT fractal_ledger_load()
+ledger flush	SELECT fractal_ledger_flush()
+audit_log	SELECT fractal_audit_log('bt', '{"k":1}')
+ledger compact	SELECT fractal_ledger_compact()
+ledger reset	SELECT fractal_ledger_reset_soft(); SELECT fractal_ledger_reset_hard()
+ledger counts	SELECT fractal_ledger_truth_count(); SELECT fractal_ledger_shadow_count()
+multimodal	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[], ARRAY[1,0,0,0,1,0,0,0,1]::float8[], 2)
+pareto	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2,0.15]::float8[], ARRAY[1,0,0,0,1,0,0,0,1]::float8[], 2)
+'@
+        } else {
+            Fail "47 fault_injection: could not point enterprise_lib at the mock"
+        }
+        Psql -Sql 'ALTER SYSTEM RESET fractalsql.enterprise_require_signature;' | Out-Null
+        Psql -Sql 'ALTER SYSTEM RESET fractalsql.enterprise_lib;' | Out-Null
+        Psql -Sql 'SELECT pg_reload_conf();' | Out-Null
+    }
+    Remove-Item -Force $mockSo, "$mockSo.sig" -ErrorAction SilentlyContinue
+
+    # ---- ledger storage callbacks, driven directly (test-only SQL wrapper) ----
+    # The enterprise core is what normally calls them, and none is vendored in a
+    # community checkout, so the build's fractal_fi_ledger_vfs() stands in.
+    Psql -Sql "CREATE OR REPLACE FUNCTION bt_fi_ledger_vfs(op text, kind int4, payload bytea DEFAULT NULL) RETURNS text AS '$DllPath','fractal_fi_ledger_vfs' LANGUAGE C VOLATILE; DROP TABLE IF EXISTS fractalsql_ledger;" | Out-Null
+    $lr = Psql -Sql "SELECT bt_fi_ledger_vfs('read', 1)"
+    if ($lr -eq 'rc=-46 len=0 hex=') { Pass "47 fault_injection: reading an empty ledger reports 'unavailable' (-46), not an error" }
+    else { Fail "47 fault_injection: empty-ledger read returned: $lr" }
+    Psql -Sql "SELECT bt_fi_ledger_vfs('write', 1, '\x616263')" | Out-Null
+    $lr = Psql -Sql "SELECT bt_fi_ledger_vfs('read', 1)"
+    if ($lr -eq 'rc=0 len=3 hex=616263') { Pass "47 fault_injection: a ledger entry written through the storage callback reads back byte for byte" }
+    else { Fail "47 fault_injection: ledger read-back returned: $lr" }
+    FaultSweepRows @'
+ledger vfs write	SELECT bt_fi_ledger_vfs('write', 1, '\x616263')
+ledger vfs write keyed	SET fractalsql.enterprise_ledger_key = 'bt-key'; SELECT bt_fi_ledger_vfs('write', 1, '\x616263'); SELECT bt_fi_ledger_vfs('read', 1)
+ledger vfs read	SELECT bt_fi_ledger_vfs('read', 1)
+ledger vfs seal	SELECT bt_fi_ledger_vfs('seal', 1)
+'@
+    Psql -Sql "DROP FUNCTION IF EXISTS bt_fi_ledger_vfs(text,int4,bytea); DROP TABLE IF EXISTS fractalsql_ledger;" | Out-Null
+
+    if ($script:FiBad -eq 0 -and $script:FiFired -gt 100) {
+        Pass "47 fault_injection: $($script:FiFired) injected SPI/core failures across $($script:FiRuns) runs; none crashed or leaked"
+    } elseif ($script:FiBad -eq 0) {
+        Fail "47 fault_injection: only $($script:FiFired) faults fired in $($script:FiRuns) runs -- the hook is not reaching the call sites"
+    }
+    Psql -Sql 'RESET fractalsql.fault_inject; DROP TABLE IF EXISTS bt_g47, bt_g47v;' | Out-Null
+    PgSwapPlugin $Mock | Out-Null
+}
+
+function Gate43EnterpriseSurface {
+    # The enterprise SURFACE invariant: of the twelve user-facing
+    # enterprise functions, exactly ONE is not gated on the enterprise
+    # core library.
+    #
+    # fractal_ledger_verify() is a pure storage-layer check -- it walks
+    # the persisted ledger chain with SPI and never touches the
+    # enterprise core (no ensure_search_ctx, no ensure_enterprise_lib) --
+    # so it must answer on EVERY edition, including community with no
+    # shared lib anywhere. The other ELEVEN (9 ledger/audit + 2
+    # portfolio) must raise the documented 'enterprise tier not loaded'
+    # error when the library is absent.
+    #
+    # This is easy to break by accident, in both directions:
+    #   - GATING fractal_ledger_verify() "for consistency" would take the
+    #     CISO audit query offline on community -- a forensic read of the
+    #     persisted chain, which community still writes via the
+    #     best-effort audit bindings, with no core library involved.
+    #   - UNGATING one of the other eleven would make a dormant function
+    #     appear to work, and then fail deeper in, in a way that leaks
+    #     the enterprise core's internals.
+    # The sibling engine (fractalsql-sqlite) holds the same invariant,
+    # and the whole point of pinning it here is that it is a property of
+    # the SURFACE, not of any one edition.
+    #
+    # The dormant state is forced deterministically by pointing
+    # fractalsql.enterprise_lib at a path that does not exist -- the
+    # same trick gate 24's Phase B uses -- so this gate asserts the SAME
+    # thing whether or not an enterprise library happens to be vendored
+    # in include/. It therefore does NOT self-skip on a community
+    # checkout: the community checkout is precisely the state it is here
+    # to pin.
+    $applyGuc = {
+        param($val)
+        $escaped = $val -replace "'", "''"
+        [void](Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_lib = '$escaped';")
+        [void](Psql -Sql "SELECT pg_reload_conf();")
+        Start-Sleep -Milliseconds 1500
+    }
+    & $applyGuc '/nonexistent/fractalsql-enterprise-absent.dll'
+    $v = Psql -Sql "SHOW fractalsql.enterprise_lib;"
+    if ($v -ne '/nonexistent/fractalsql-enterprise-absent.dll') {
+        Fail "43 enterprise_surface: could not force the dormant tier (reload did not take effect; got '$v')"
+        return
+    }
+
+    # The one UNGATED function: a forensic read of the persisted chain
+    # that must work with no enterprise core loaded at all.
+    $vres = Psql -Sql "SELECT fractal_ledger_verify();"
+    if ($vres -match 'enterprise tier not loaded') {
+        Fail "43 enterprise_surface: fractal_ledger_verify() must NOT be gated on the enterprise core, but it raised the dormant error"
+    }
+    elseif ($vres -match '"ok":\s*true') {
+        Pass "43 enterprise_surface: fractal_ledger_verify() answers with no enterprise core loaded (the one ungated function)"
+    }
+    else {
+        Fail "43 enterprise_surface: expected fractal_ledger_verify() to return an ok report, got: $vres"
+    }
+
+    # The other ELEVEN: each must raise the documented dormant error.
+    # The portfolio pair is checked with the same arguments gate 24 uses,
+    # so a failure here is about the GATE and not about the arguments.
+    $gatedCalls = @(
+        'SELECT fractal_ledger_flush();',
+        'SELECT fractal_ledger_load();',
+        'SELECT fractal_ledger_compact();',
+        'SELECT fractal_ledger_reset_soft();',
+        'SELECT fractal_ledger_reset_hard();',
+        'SELECT fractal_ledger_truth_count();',
+        'SELECT fractal_ledger_shadow_count();',
+        "SELECT fractal_audit_log('t', '{}'::jsonb);",
+        "SELECT fractal_audit_unpack(''::bytea);",
+        'SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.05,0.08]::float8[], ARRAY[0.04,0.01,0.01, 0.01,0.03,0.01, 0.01,0.01,0.05]::float8[], 2);',
+        'SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.05,0.08]::float8[], ARRAY[0.04,0.01,0.01, 0.01,0.03,0.01, 0.01,0.01,0.05]::float8[], 2);'
+    )
+    $gatedNames = @(
+        'fractal_ledger_flush',
+        'fractal_ledger_load',
+        'fractal_ledger_compact',
+        'fractal_ledger_reset_soft',
+        'fractal_ledger_reset_hard',
+        'fractal_ledger_truth_count',
+        'fractal_ledger_shadow_count',
+        'fractal_audit_log',
+        'fractal_audit_unpack',
+        'fractal_optimize_portfolio_multimodal',
+        'fractal_optimize_portfolio_multimodal_pareto'
+    )
+    $badGated = @()
+    for ($i = 0; $i -lt $gatedCalls.Count; $i++) {
+        $out = Psql -Sql $gatedCalls[$i]
+        if ($out -notmatch 'enterprise tier not loaded') {
+            $badGated += ("{0}: {1}" -f $gatedNames[$i], $out)
+        }
+    }
+    if ($badGated.Count -eq 0) {
+        Pass "43 enterprise_surface: all 11 gated enterprise functions raise 'enterprise tier not loaded' with no core loaded"
+    }
+    else {
+        Fail "43 enterprise_surface: expected all 11 gated functions to be dormant, got: $($badGated -join '; ')"
+    }
+
+    # Database-side guard behind the MCP server's FSQL_MCP_READ_ONLY switch: the two
+    # ledger resets are not executable by PUBLIC (sql\fractalsql--1.0.sql), so a role
+    # with no grant is refused by Postgres itself, before the enterprise core is even
+    # consulted. The superuser calls above still reach the dormant error.
+    Psql -Sql "DROP ROLE IF EXISTS bt_ledger_lowpriv; CREATE ROLE bt_ledger_lowpriv LOGIN;" | Out-Null
+    $lpBad = @()
+    foreach ($lpFn in 'fractal_ledger_reset_soft', 'fractal_ledger_reset_hard') {
+        $out = Psql -Sql "SELECT $lpFn();" -User 'bt_ledger_lowpriv'
+        if ($out -notmatch "permission denied for function $lpFn") {
+            $lpBad += ("{0}: {1}" -f $lpFn, $out)
+        }
+    }
+    Psql -Sql "DROP ROLE IF EXISTS bt_ledger_lowpriv;" | Out-Null
+    if ($lpBad.Count -eq 0) {
+        Pass "43 enterprise_surface: fractal_ledger_reset_soft/_hard are refused to a role with no EXECUTE grant (permission denied)"
+    }
+    else {
+        Fail "43 enterprise_surface: expected 'permission denied' for a low-privilege role on the ledger resets, got: $($lpBad -join '; ')"
+    }
+
+    # The gate must not leak into later gates on a reused cluster.
+    & $applyGuc ''
 }
 
 function RunGates($gates) {
@@ -4000,14 +6962,20 @@ function RunGates($gates) {
     }
     # Gate 21 (fuzz smoke) is standalone like gate 01 -- links only
     # src\fractalsql_parse.c directly, no extension DLL, no postgres.exe,
-    # no cluster at all.
+    # no cluster at all. Same for the gate 39-42 unit probes (39/40/42
+    # entirely; 41's DB-less half runs inside the db block below, where
+    # its live half then runs after gate 33 against the live cluster).
     if ($gates -contains '21') {
         Gate21FuzzSmoke
     }
+    if ($gates -contains '39') { Gate39ExtractParse }
+    if ($gates -contains '40') { Gate40VectorsProbe }
+    if ($gates -contains '42') { Gate42ConcurrencyProbe }
+    if ($gates -contains '38') { Gate38McpHttps }   # standalone: needs no cluster
     # @(...): same $null-vs-empty-array StrictMode trap as Gate12Soak's
     # $failedWorkers below -- not yet hit here (would need e.g. -Gate 01
     # alone), but the identical shape of bug, fixed proactively.
-    $needDb = @($gates | Where-Object { $_ -ne '01' -and $_ -ne '21' })
+    $needDb = @($gates | Where-Object { $_ -notin @('01','21','38','39','40','42') })
     if ($needDb.Count -gt 0) {
         try { PgSetup } catch { Fail "PG$PgMajor cluster setup: $_"; return }
         # gate 03 creates bt_customers/bt_orders; several later gates
@@ -4049,6 +7017,14 @@ function RunGates($gates) {
                 '30' { Gate30NewPrimitives }
                 '31' { Gate31EnterpriseMock }
                 '32' { Gate32SovereignAgents }
+                '33' { Gate33McpSmoke }
+                '43' { Gate43EnterpriseSurface }
+                '44' { Gate44ErrorPaths }
+                '45' { Gate45EnterprisePaths }
+                '46' { Gate46PluginConfig }
+                '47' { Gate47FaultInjection }
+                '48' { Gate48Kits }
+                '41' { Gate41DbProbe }
             }
         }
         PgTeardown

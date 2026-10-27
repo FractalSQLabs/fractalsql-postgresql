@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0 AND BSD-2-Clause
+# SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
+
+"""Client driver for the fractalsql-postgresql-mcp direct-TLS mode
+(--https). Driven by build_test's MCP-gate (the .sh and the matching
+PowerShell gate): the gate itself generates the throwaway self-signed
+cert/key (via the openssl CLI) and skips the whole gate if openssl isn't
+on PATH; this driver only ever sees the resulting PEM paths.
+
+Deliberately narrow in scope: the transport's plaintext HTTP behavior
+(sessions, auth, framing, refusal shapes, concurrency) is covered by
+mcp/test/smoke.py / the MCP gate's other asserts. This driver proves the
+THREE things that are specific to --https and untested anywhere else:
+  1. fail-fast misconfiguration: --https with no cert/key, and --https
+     with a cert/key that doesn't load or doesn't match, all exit
+     nonzero immediately, never falling back to plaintext or hanging.
+  2. the listening port actually speaks TLS, not plaintext HTTP (a bare
+     HTTP request against it gets no valid HTTP response).
+  3. the full authenticated JSON-RPC round trip works over TLS, and the
+     Bearer-token check still applies underneath it (TLS is additive,
+     never a substitute for the token).
+
+Input (environment, all required unless noted):
+  MCP_SERVER_EXE            the fractalsql-postgresql-mcp binary just built
+  MCP_SERVER_CWD            the server process's working directory
+  FSQL_MCP_PG_CONN_URI / PG* envs   the harness's throwaway cluster conn
+  MCP_HTTPS_PORT            a free localhost port
+  MCP_HTTPS_CERT            PEM cert path (the gate's throwaway self-signed one)
+  MCP_HTTPS_KEY             PEM key path
+
+Exits 0 on all-pass, 1 otherwise; prints PASS/FAIL lines the gates
+relabel. DB-dependent assertions inside require the cluster, else skip."""
+from __future__ import annotations
+
+import http.client
+import json
+import os
+import socket
+import ssl
+import subprocess
+import sys
+import time
+
+_failures = 0
+
+
+def check(label: str, cond: bool) -> bool:
+    global _failures
+    print(("PASS " if cond else "FAIL ") + label)
+    if not cond:
+        _failures += 1
+    return bool(cond)
+
+
+def pg_env_present() -> bool:
+    return bool(os.environ.get("PGHOST") or os.environ.get("PGDATABASE")
+                or os.environ.get("FSQL_MCP_PG_CONN_URI"))
+
+
+def https_conn(port: int, timeout: float = 15.0) -> http.client.HTTPSConnection:
+    # The throwaway cert is self-signed for 127.0.0.1; this driver only
+    # ever talks to the server it just spawned, so disabling verification
+    # is the correct choice here (there is no CA to verify against) and
+    # not a stand-in for a real deployment's trust posture.
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return http.client.HTTPSConnection("127.0.0.1", port, timeout=timeout, context=ctx)
+
+
+def https_req(port, method, path, body=None, token=None, session=None, timeout=15.0):
+    headers = {}
+    if token is not None:
+        headers["Authorization"] = "Bearer " + token
+    if session is not None:
+        headers["Mcp-Session-Id"] = session
+    try:
+        conn = https_conn(port, timeout=timeout)
+        conn.request(method, path, body=body, headers=headers)
+        resp = conn.getresponse()
+        data = resp.read().decode("utf-8", "replace")
+        hdrs = {k.lower(): v for k, v in resp.getheaders()}
+        conn.close()
+        return resp.status, hdrs, data
+    except Exception:
+        return None, {}, ""
+
+
+def plaintext_probe(port: int, timeout: float = 3.0) -> bool:
+    """True if a bare HTTP request against the port gets back something
+    that looks like an HTTP response -- i.e. the port is NOT TLS-only."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+            sock.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+            data = sock.recv(256)
+        return data.startswith(b"HTTP/1.")
+    except Exception:
+        return False
+
+
+def cli_run(mcp_exe, cwd, extra_args, env, timeout=30):
+    return subprocess.run([mcp_exe] + extra_args, capture_output=True, text=True,
+                          cwd=cwd, env=env, timeout=timeout, input="")
+
+
+def main() -> int:
+    mcp_exe = os.environ["MCP_SERVER_EXE"]
+    cwd = os.environ["MCP_SERVER_CWD"]
+    port = int(os.environ["MCP_HTTPS_PORT"])
+    cert = os.environ["MCP_HTTPS_CERT"]
+    key = os.environ["MCP_HTTPS_KEY"]
+    base_env = dict(os.environ)
+    token = "https-smoke-tok"
+
+    common_env = dict(base_env, FSQL_MCP_AUTH_TOKEN=token, FSQL_MCP_HTTP_PORT=str(port),
+                      FSQL_MCP_HTTP_HOST="127.0.0.1", FSQL_MCP_HTTP_PATH="/mcp")
+
+    # 1a. fail-fast: --https with no cert/key configured at all.
+    r = cli_run(mcp_exe, cwd, ["--https", str(port)], dict(common_env))
+    check("--https with no cert/key configured exits nonzero immediately "
+          "(never silently serves plaintext)",
+          r.returncode != 0 and ("cert" in r.stderr.lower() or "key" in r.stderr.lower()))
+
+    # 1b. fail-fast: --https with a cert file that doesn't exist/load.
+    r = cli_run(mcp_exe, cwd, ["--https", str(port), "--tls-cert",
+                              os.path.join(cwd, "mcp_https_no_such_cert.pem"),
+                              "--tls-key", key], dict(common_env))
+    check("--https with an unloadable cert file exits nonzero (TLS init "
+          "failure, not a hang or a crash)", r.returncode != 0)
+
+    # 1c. fail-fast: a valid cert paired with a KEY file that isn't a real
+    # key at all (isolates SSL_CTX_use_PrivateKey_file's own failure from
+    # 1b's cert-load failure, a distinct code path/message in TlsLayer::make).
+    bad_key = os.path.join(cwd, "mcp_https_garbage_key.pem")
+    with open(bad_key, "w", encoding="utf-8") as fh:
+        fh.write("-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n")
+    r = cli_run(mcp_exe, cwd, ["--https", str(port), "--tls-cert", cert,
+                              "--tls-key", bad_key], dict(common_env))
+    check("--https with a cert that loads but a key file that doesn't "
+          "parse exits nonzero", r.returncode != 0)
+
+    # 1d. fail-fast: a valid cert paired with a valid key that just
+    # doesn't belong to it (the cert/key-mismatch branch -- both load fine
+    # individually, they just don't match each other). A second throwaway
+    # self-signed pair, same minimal-config recipe the gate uses for the
+    # first. Skipped-as-pass (not failed) when openssl can't generate it.
+    cert2 = os.path.join(cwd, "mcp_https_cert2.pem")
+    key2 = os.path.join(cwd, "mcp_https_key2.pem")
+    cnf2 = os.path.join(cwd, "mcp_https_openssl2.cnf")
+    with open(cnf2, "w", encoding="utf-8") as fh:
+        fh.write("[req]\ndistinguished_name = dn\nprompt = no\n[dn]\n")
+    cnf_env = dict(common_env, OPENSSL_CONF="")
+    genrc = subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+         "-subj", "/CN=127.0.0.1", "-config", cnf2, "-keyout", key2, "-out", cert2],
+        capture_output=True, text=True, env=cnf_env)
+    if genrc.returncode == 0:
+        r = cli_run(mcp_exe, cwd, ["--https", str(port), "--tls-cert", cert,
+                                  "--tls-key", key2], dict(common_env))
+        check("--https with a valid cert and a valid but NON-MATCHING key "
+              "exits nonzero (cert/key mismatch, not a load failure)",
+              r.returncode != 0)
+    else:
+        check("--https with a valid cert and a valid but NON-MATCHING key "
+              "exits nonzero (skipped: couldn't generate the second "
+              "throwaway cert/key pair)", True)
+
+    # 2+3. the real server: TLS-only listening, auth still enforced, and a
+    # full authenticated JSON-RPC round trip over the direct-TLS transport.
+    log_path = os.path.join(cwd, "mcp_https_server.log")
+    log = open(log_path, "w", encoding="utf-8")
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            [mcp_exe, "--https", str(port), "--tls-cert", cert, "--tls-key", key],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
+            cwd=cwd, env=common_env, text=True)
+        proc.stdin.close()
+
+        up = False
+        for _ in range(100):
+            s, _, _ = https_req(port, "GET", "/healthz", timeout=2.0)
+            if s == 200:
+                up = True
+                break
+            time.sleep(0.15)
+        if not check("--https: the transport comes up and GET /healthz "
+                     "answers over TLS unauthenticated", up):
+            print("---- server log tail ----")
+            log.flush()
+            print(open(log_path, encoding="utf-8").read()[-2000:])
+            return 1
+
+        check("--https: a bare plaintext HTTP request against the port "
+              "gets no valid HTTP response (TLS-only, not dual-stack)",
+              not plaintext_probe(port))
+
+        s, _, b = https_req(port, "POST", "/mcp", body='{"jsonrpc":"2.0"}')
+        check("--https: TLS does not bypass the Bearer-token check "
+              "(unauthenticated POST still 401)", s == 401 and "missing" in b)
+
+        init_params = {"protocolVersion": "2025-06-18",
+                       "clientInfo": {"name": "https-smoke", "version": "0"}}
+        s, h, _ = https_req(port, "POST", "/mcp", token=token, body=json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init_params}))
+        minted = h.get("mcp-session-id")
+        check("--https: initialize over TLS answers 200 and mints a session",
+              s == 200 and bool(minted))
+
+        if pg_env_present():
+            s, _, b = https_req(port, "POST", "/mcp", token=token, session=minted,
+                                body=json.dumps({"jsonrpc": "2.0", "id": 2,
+                                                 "method": "tools/call",
+                                                 "params": {"name": "fractalsql_get_version",
+                                                            "arguments": {}}}))
+            edition = None
+            if s == 200 and b.startswith("{"):
+                try:
+                    edition = (json.loads(b).get("result") or {}) \
+                        .get("structuredContent", {}).get("edition")
+                except Exception:
+                    edition = None
+            check("--https: a full authenticated tools/call round-trips the "
+                  "same engine over TLS", s == 200 and edition == "Community")
+
+            s, _, _ = https_req(port, "DELETE", "/mcp", token=token, session=minted)
+            check("--https: DELETE closes the TLS session cleanly (200)", s == 200)
+        else:
+            check("--https: the full authenticated tools/call round trip over "
+                  "TLS (skipped: no PG* env wired for the live cluster)", True)
+
+        proc.terminate()
+        https_req(port, "GET", "/healthz", timeout=5.0)
+        try:
+            rc = proc.wait(timeout=25)
+        except Exception:
+            proc.kill()
+            rc = proc.wait(timeout=10)
+        if os.name != "nt":
+            check("--https: the transport drains and exits cleanly on "
+                  "termination", rc == 0)
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+        log.close()
+
+    return 1 if _failures else 0
+
+
+if __name__ == "__main__":
+    try:
+        code = main()
+    except SystemExit as exc:
+        code = int(exc.code or 0)
+    print(f"https-smoke-client: {'ALL GREEN' if code == 0 else 'FAILED'}; "
+          f"{_failures} failure(s)")
+    sys.exit(code)

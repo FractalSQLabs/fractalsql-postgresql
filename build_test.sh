@@ -123,11 +123,124 @@
 #                      search_agent, fractal_agent_plan_explore,
 #                      fractal_agent_trajectory_predict, fractal_agent_
 #                      detect_loop, fractal_rag_agent)
+#   33  mcp_smoke        the FractalSQL MCP plugin (mcp/, docs/            ~8s
+#                      mcp-plugin.md) end to end over stdio:
+#                      initialize handshake, tools/list against the
+#                      pinned 79-tool postgreSQL catalog with the
+#                      non-empty description + inputSchema.properties
+#                      accessibility invariant (spec 1.7 mechanically),
+#                      then tools/call round trips per tier -- one
+#                      Discovery (telemetry + vector normalization),
+#                      one Cognition against $MOCK, one no-LLM Community
+#                      agent, the clean "enterprise tier not loaded"
+#                      error path, the schema/validation error class,
+#                      and the 1.5 row-ceiling truncation contract.
+#                      The shared engine lives in mcp/test/smoke.py (stdlib
+#                      python only, no MCP SDK); this gate is a thin wrapper
+#                      (fixture + env + dispatch) like gate 21's standalone
+#                      shape. Skips when make/g++ (the C++17 build), pkg-
+#                      config libpq/openssl, or python3 are absent.
+#   39  extract_parse  standalone C unit probe (tests/               ~1s
+#                      extract_parse_probe.c) linked against this
+#                      repo's OWN src/fractalsql_parse.c: covers
+#                      fsql_extract_best_point /
+#                      fsql_parse_embedding_array / fsql_extract_topk's
+#                      malformed-input error branches (missing key,
+#                      malformed number, missing closing brace, idx
+#                      out of range/wrap guard, non-JSON input) --
+#                      unreachable through any real SQL-level call,
+#                      where those parsers only ever see well-formed
+#                      core/mock output (same rationale as the SQLite
+#                      column's gate 39). Compiled with separately-
+#                      named _extract_parse_* objects so a --coverage
+#                      run MERGES the probe's parse.c hits with the
+#                      main build's instead of overwriting them.
+#                      Skips cleanly if no C compiler is present.
+#   40  vectors_probe  standalone C++17 unit probe (mcp/tests/        ~3s
+#                      vectors_probe.cpp, 43 checks) against mcp/src/
+#                      vectors.cpp + errors.cpp: the coercion/
+#                      validation branches only reachable with inputs
+#                      the live tools/call schema layer filters out.
+#                      No DB involved. Skips without g++/clang++.
+#   41  db_probe       standalone C++17 unit probe (mcp/tests/        ~6s
+#                      db_probe.cpp) against libpq: the DB-less
+#                      unconnected/refused-connection/SQLSTATE
+#                      classification branches always run with no
+#                      PG* env (16 checks); the connected branches
+#                      then run LIVE against the throwaway cluster on
+#                      the gate-41 live leg (see run_major: it runs
+#                      after gate 33, wiring the same PG* env gate 33
+#                      exports to the server). Live checks that need
+#                      no cluster are SKIPPED, not failed, without
+#                      one. Skips without g++/libpq headers.
+#   42  concurrency_probe  standalone C++17 unit probe (mcp/tests/    ~1s
+#                      concurrency_probe.cpp, 4 checks) for mcp/src/
+#                      concurrency.h's per-client-limit / global-
+#                      timeout / Token-release branches -- saturated
+#                      sequentially, no timing dependency, no DB.
+#                      Header-only, so only -I mcp/src is needed.
+#   43  enterprise_surface  the enterprise SURFACE invariant: of the   ~2s
+#                      twelve user-facing enterprise functions,
+#                      exactly ONE -- fractal_ledger_verify() -- is not
+#                      gated on the enterprise core library (it is a
+#                      pure storage-layer read of the persisted chain),
+#                      and the other ELEVEN raise 'enterprise tier not
+#                      loaded' with no core loaded. Forces the dormant
+#                      state deterministically (the enterprise_lib GUC
+#                      pointed at a nonexistent path) so it asserts the
+#                      same thing on a community checkout and on an
+#                      enterprise one. Does NOT self-skip on community:
+#                      the community checkout is the state it pins.
+#   44  error_paths    argument-validation / error-path sweep: ~270     ~40s
+#                      calls (NULL args, zero/negative sizes, ragged or
+#                      mismatched arrays, missing tables/columns, bad
+#                      enums, out-of-range indexes) each pinned to the
+#                      exact error it must raise, and each failed if it
+#                      crashes the backend. Mostly there to cover the
+#                      ereport branches the happy-path gates skip; it
+#                      found fractal_sql_agent(NULL) and
+#                      fractal_sql_agent(q, NULL, 0) crashing the backend.
+#   48  kits           the twenty-nine newer industry kits (demo/demo-       ~20s
+#                      vertical-{ev-battery-lifecycle,adas-safety-
+#                      validation,v2x-warranty-triage,critical-
+#                      inventory-routing,heavy-industry-predictive-
+#                      maintenance,climatech-grid-balancing,hazmat-
+#                      occupational-triage,scenario-planning-
+#                      simulation,avionics-fault-prediction,
+#                      satellite-constellation-coverage,telecom-
+#                      account-anomaly-screening,telecom-traffic-
+#                      routing,climatech-emissions-monitoring,
+#                      climatech-risk-exposure,rf-spectrum-sensing}
+#                      .sql): each is run through psql against the
+#                      scratch cluster with the mock reasoning
+#                      plugin, raises no SQL error (the scenario
+#                      kit's plan_explore needs an embedding
+#                      endpoint: at most one expected), prints no
+#                      NaN, and reproduces its headline result on
+#                      its deterministic fixture
+#   45  enterprise_paths  the enterprise-tier paths the dormant state     ~15s
+#                      cannot reach, via tests/mock_enterprise_core.c:
+#                      multimodal / pareto / audit argument validation,
+#                      and the ledger-tip authentication fractal_ledger_
+#                      load() runs (genesis, chain link, structural hash,
+#                      MAC present/short/wrong/valid, key set/unset)
+#                      against hand-built kind=1 chains with a real
+#                      HMAC-SHA256 computed in SQL. Found
+#                      fractal_audit_log(NULL, ...) crashing the backend.
+#   38  mcp_https     the MCP server's direct-TLS mode (--https):        ~4s
+#                      mcp/tests/mcp_https_smoke_client.py drives the
+#                      three fail-fast startup modes (missing cert/key,
+#                      garbage key, mismatched key -> nonzero exit),
+#                      proves the port speaks TLS not plaintext, and
+#                      round-trips an authenticated session under the
+#                      Bearer-token check. Standalone (no cluster);
+#                      live-DB leg self-skips without PG* env. Skips
+#                      without openssl/python3/make+g++/pkg-config.
 #
 # Gate sets:
 #   QUICK   = 01 02                                   post-edit sanity loop
 #   DEFAULT = 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23  pre-push / CI (one major)
-#             24 25 26 27 28 29 30 31 32
+#             24 25 26 27 28 29 30 31 32 33 38 39 40 41 42 43 44 45 46 47
 #   FUZZ    = 21                                       --fuzz, not part of DEFAULT (adds real wall-time)
 #
 # Cross-version: pass --cross to run DEFAULT against every installed
@@ -153,7 +266,14 @@
 #   so GCOV_PREFIX/GCOV_PREFIX_STRIP redirect the live writes
 #   to /tmp for the duration of the run; the result is copied back
 #   next to the .gcno afterward, once, as a plain file copy (safe).
-#   Report: coverage_html/index.html + a text summary on stdout.
+#   Report: coverage_html/index.html (+ coverage_html_mcp/ when the
+#   gate 40/41/42 probes ran the mcp sources instrumented) + a text
+#   summary on stdout. Branches are counted EXCLUDING exception-tagged
+#   (lower-case 'e'-prefixed block numbers) BRDA records, and
+#   --rc no_exception_branch=1 is passed to GENHTML ONLY (see the
+#   comments in run_coverage_report: passing it to lcov
+#   --capture/--extract instead zeroes BRF/BRH entirely on this
+#   lcov/geninfo version, a geninfo 2.0-1 bug in that combination).
 #
 # Environment:
 #   PG_MAJOR             target major (default: 16)
@@ -230,7 +350,7 @@ fsql_pg_dlsuffix() {
   return 0
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 33 38 39 40 41 42 43 44 45 46 47 48)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21)
 
@@ -258,13 +378,6 @@ UBSAN=0
 # into 30+ confusing failures. Auto-bumping removes the need to
 # remember FSQL_TEST_TIMEOUT_MULT=4 every time --asan is passed, which
 # is exactly the mistake that caused that cascade in practice.
-if [[ -n "${FSQL_TEST_TIMEOUT_MULT:-}" ]]; then
-  TIMEOUT_MULT="$FSQL_TEST_TIMEOUT_MULT"
-elif [[ "$ASAN" -eq 1 ]] || [[ "$UBSAN" -eq 1 ]]; then
-  TIMEOUT_MULT=4
-else
-  TIMEOUT_MULT=1
-fi
 
 # --- colours ----------------------------------------------------------
 if [[ -t 1 ]]; then G="\033[32m"; R="\033[31m"; Y="\033[33m"; Z="\033[0m"; else G=""; R=""; Y=""; Z=""; fi
@@ -272,7 +385,7 @@ pass() { local msg="$1"; printf "  [${G}PASS${Z}] %s\n" "$msg"; return 0; }
 fail() { local msg="$1"; printf "  [${R}FAIL${Z}] %s\n" "$msg"; FAILED=1; return 0; }
 skip() { local msg="$1"; printf "  [${Y}SKIP${Z}] %s\n" "$msg"; return 0; }
 
-usage() { sed -n '4,40p' "$0"; exit 0; }
+usage() { sed -n '4,264p' "$0"; exit 0; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -290,6 +403,17 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# Evaluated AFTER the argument loop: --asan/--ubsan set ASAN/UBSAN above, so
+# the auto-bump below can see them (it used to run before parsing, when both
+# were still 0, and never fired).
+if [[ -n "${FSQL_TEST_TIMEOUT_MULT:-}" ]]; then
+  TIMEOUT_MULT="$FSQL_TEST_TIMEOUT_MULT"
+elif [[ "$ASAN" -eq 1 ]] || [[ "$UBSAN" -eq 1 ]]; then
+  TIMEOUT_MULT=4
+else
+  TIMEOUT_MULT=1
+fi
 
 # --- per-major state (set by pg_setup) --------------------------------
 BIN=""; SO=""; MOCK=""; EVIL=""; CRASH=""; LYING=""; RETRY=""; EMBED=""; THINK=""; DATADIR=""; SOCKDIR=""; PORT=""; PSQL=()
@@ -368,6 +492,30 @@ resolve_san_rt() {
   return 0
 }
 
+# Builds mcp/fractalsql-postgresql-mcp from scratch the first time it is called
+# in a run. mcp/Makefile has no header-dependency tracking and cannot tell that
+# an object was built with different flags (an earlier --coverage/--asan or
+# differently-configured build), so reusing stale .o files fails to link
+# ("relocation R_X86_64_32 ... recompile with -fPIE") or, worse, links objects
+# compiled against an older class layout. One clean per run, then incremental.
+MCP_CLEANED=0
+build_mcp() {
+  local log="$1"
+  if [[ "$MCP_CLEANED" -eq 0 ]]; then
+    ( cd mcp && make clean >/dev/null 2>&1 )
+    MCP_CLEANED=1
+  fi
+  # --coverage: build the SERVER instrumented too (COVERAGE=1 in mcp/Makefile
+  # adds --coverage plus -fprofile-update=atomic, which the threaded HTTP
+  # transport needs). The smoke gates then run it, and its .gcda land under
+  # GCOV_PREFIX like everything else's.
+  if [[ "$COVERAGE" -eq 1 ]]; then
+    ( cd mcp && make COVERAGE=1 -j2 >"$log" 2>&1 )
+  else
+    ( cd mcp && make -j2 >"$log" 2>&1 )
+  fi
+}
+
 cleanup() {
   [[ -n "$DATADIR" ]] && [[ -d "$DATADIR" ]] && "$BIN/pg_ctl" -D "$DATADIR" -m immediate stop >/dev/null 2>&1
   [[ -n "$DATADIR" ]] && rm -rf "$DATADIR"
@@ -391,9 +539,130 @@ if [[ "$COVERAGE" -eq 1 ]]; then
   mkdir -p "$GCOV_PREFIX"
 fi
 
+# ereport(ERROR, ...) expands to `errstart(...) ? errfinish(...) : 0`, and
+# errstart() never returns false for ERROR level, so the "not logged" branch
+# of a statement that DID run can never be taken. This drops that one branch
+# from a line only when (a) the statement starts with ereport(, (b) the line
+# carries exactly two branches, and (c) exactly one of them was taken. An
+# ereport that was never reached keeps both of its branches and stays visible
+# as a real gap. Prints the number of branches dropped.
+drop_ereport_level_branches() {
+  local in="$1" out="$2"
+  awk -v outfile="$out" '
+    function flush(   i, n, ln, taken, tot, k, drop, brf, brh, j) {
+      for (i = 1; i <= nl; i++) keep[i] = 1
+      for (ln in cnt) {
+        if (src[ln] ~ /^[ \t]*ereport[ \t]*\(/) {
+          if (cnt[ln] != 2 || taken_n[ln] != 1) continue
+          for (k = 1; k <= nb[ln]; k++) {
+            i = bidx[ln, k]
+            if (bt[i] == "-" || bt[i] + 0 == 0) { keep[i] = 0; dropped++ }
+          }
+        } else if (src[ln] ~ /\)[ \t]*ereport[ \t]*\(/) {
+          # "if (cond) ereport(ERROR, ...)" on one line: the own elevel test of the ereport
+          # is the LAST two branches of the line.
+          if (nb[ln] < 4) continue
+          i = bidx[ln, nb[ln]]; j = bidx[ln, nb[ln] - 1]
+          if ((bt[i] == "-" || bt[i] + 0 == 0) && bt[j] != "-" && bt[j] + 0 > 0) { keep[i] = 0; dropped++ }
+        }
+      }
+      brf = 0; brh = 0
+      for (i = 1; i <= nl; i++) if (keep[i] && substr(L[i], 1, 5) == "BRDA:") {
+        split(substr(L[i], 6), p, ",")
+        brf++; if (p[4] != "-" && p[4] + 0 > 0) brh++
+      }
+      for (i = 1; i <= nl; i++) {
+        if (!keep[i]) continue
+        if (substr(L[i], 1, 4) == "BRF:") print "BRF:" brf > outfile
+        else if (substr(L[i], 1, 4) == "BRH:") print "BRH:" brh > outfile
+        else print L[i] > outfile
+      }
+    }
+    function reset() { nl = 0; delete cnt; delete taken_n; delete nb; delete bidx; delete bt; delete src; nsrc = 0 }
+    BEGIN { FS = "\n"; reset() }
+    {
+      line = $0
+      if (substr(line, 1, 3) == "SF:") {
+        file = substr(line, 4); n = 0
+        while ((getline sl < file) > 0) { n++; srcall[n] = sl }
+        close(file)
+        for (j = 1; j <= n; j++) src[j] = srcall[j]
+      }
+      L[++nl] = line
+      if (substr(line, 1, 5) == "BRDA:") {
+        split(substr(line, 6), p, ",")
+        if (substr(p[2], 1, 1) != "e") {
+          ln = p[1] + 0
+          cnt[ln]++; nb[ln]++; bidx[ln, nb[ln]] = nl; bt[nl] = p[4]
+          if (p[4] != "-" && p[4] + 0 > 0) taken_n[ln]++
+        }
+      }
+      if (line == "end_of_record") { flush(); reset() }
+    }
+    END { print dropped + 0 > "/dev/stderr" }
+  ' "$in" 2>"$out.dropped"
+  EREPORT_DROPPED="$(cat "$out.dropped" 2>/dev/null)"
+  rm -f "$out.dropped"
+}
+
 # Copy the redirected .gcda back next to the .gcno (one plain file
 # copy — not the hot-path gcov flushing that vboxsf chokes on) and
 # generate an lcov report. Called once after the gate matrix finishes.
+# drop_scope_exit_branches <in.info> <out.info>
+# The mcp/ server is heavy template C++ (nlohmann json, std::string): at the
+# CLOSING line of a scope -- a bare "}", "} );", "} } );" -- gcc/gcov report
+# a "branch" for every temporary's destructor and cleanup edge. They are
+# compiler-generated, carry no source-level decision, and are not tagged as
+# exception edges, so the 'e'-block filter alone leaves them in the
+# denominator (on a 4k-line server it was about 1,000 of 8,700 branches, e.g.
+# 76 "missed" on the single "}" that ends resources.cpp's table builder).
+# Drops BRDA records whose source line is only closing punctuation, plus those on
+# tool-table registration rows (see the comment at the second rule), and
+# recomputes BRF/BRH per file; prints the number dropped (and how many of those
+# were registration rows) on stderr.
+drop_scope_exit_branches() {
+  local in="$1" out="$2"
+  awk -v outfile="$out" '
+    function flush(   i, brf, brh, p) {
+      brf = 0; brh = 0
+      for (i = 1; i <= nl; i++) if (keep[i] && substr(L[i], 1, 5) == "BRDA:") {
+        split(substr(L[i], 6), p, ",")
+        brf++; if (p[4] != "-" && p[4] + 0 > 0) brh++
+      }
+      for (i = 1; i <= nl; i++) {
+        if (!keep[i]) continue
+        if (substr(L[i], 1, 4) == "BRF:") print "BRF:" brf > outfile
+        else if (substr(L[i], 1, 4) == "BRH:") print "BRH:" brh > outfile
+        else print L[i] > outfile
+      }
+    }
+    BEGIN { nl = 0 }
+    {
+      line = $0
+      if (substr(line, 1, 3) == "SF:") {
+        file = substr(line, 4); n = 0; delete src
+        while ((getline sl < file) > 0) { n++; src[n] = sl }
+        close(file)
+      }
+      L[++nl] = line; keep[nl] = 1
+      if (substr(line, 1, 5) == "BRDA:") {
+        split(substr(line, 6), p, ",")
+        if (src[p[1] + 0] ~ /^[ \t]*[})\];,]+[ \t})\];,]*$/) { keep[nl] = 0; dropped++ }
+        # A tool-table registration row: "t.push_back( ToolSpec{ name, category, ..., lambda } );".
+        # It is declarative (no decision in the row itself -- the handler lambda is on its own
+        # lines and stays counted), but the aggregate initialiser builds a std::vector of params,
+        # a std::function and several strings in one expression, and gcov attributes about six
+        # unwind/cleanup branches per row that no input can reach (78 rows, ~470 of them).
+        else if (index(src[p[1] + 0], "t.push_back( ToolSpec{") > 0) { keep[nl] = 0; dropped++; reg++ }
+      }
+      if (line == "end_of_record") { flush(); nl = 0; delete keep; delete L }
+    }
+    END { print dropped + 0, reg + 0 > "/dev/stderr" }
+  ' "$in" 2>"$out.dropped"
+  read -r SCOPE_EXIT_DROPPED REG_ROW_DROPPED < "$out.dropped" 2>/dev/null || true
+  rm -f "$out.dropped"
+}
+
 run_coverage_report() {
   local gcda_src
   gcda_src="$(find "$GCOV_PREFIX" -name 'fractalsql.gcda' 2>/dev/null | head -1)"
@@ -401,37 +670,75 @@ run_coverage_report() {
     fail "coverage: no .gcda produced (was --coverage gate 01 build ok?)"
     return
   fi
-  cp "$gcda_src" src/fractalsql.gcda
+  # Copy EVERY redirected .gcda back next to its own .gcno, not just the
+  # main build's fractalsql.gcda: gate 39 compiles its _extract_parse_*
+  # probe objects into src/, and gates 40/41/42 do the same for their
+  # _*_probe_* objects in mcp/src/. Each .gcda must land beside its
+  # matching .gcno (basenames are unique per directory) for the lcov
+  # captures below to pair them.
+  local g base
+  while IFS= read -r g; do
+    base="$(basename "$g")"
+    # Key on the matching .gcno, NOT on an existing .gcda: GCOV_PREFIX sends
+    # every live write to $GCOV_PREFIX, so the destination .gcda does not
+    # exist yet (the probes' _*_probe_*.gcda never do) and testing for it
+    # skipped every one of them -- "no mcp/src/*.gcda produced".
+    [[ -f "src/${base%.gcda}.gcno" ]] && cp "$g" "src/$base"
+    [[ -f "mcp/src/${base%.gcda}.gcno" ]] && cp "$g" "mcp/src/$base"
+    [[ -f "mcp/src/adapters/${base%.gcda}.gcno" ]] && cp "$g" "mcp/src/adapters/$base"
+  done < <(find "$GCOV_PREFIX" -name '*.gcda')
 
   if ! command -v lcov >/dev/null 2>&1; then
     skip "coverage: lcov not installed, skipping report"
     return
   fi
-  lcov --capture --directory src --output-file /tmp/fractalsql_bt_coverage_raw.info \
-       --rc branch_coverage=1 >/tmp/fractalsql_bt_lcov.log 2>&1 \
-    || { fail "coverage: lcov capture failed — see /tmp/fractalsql_bt_lcov.log"; return; }
+  lcov --capture --directory src --output-file "$TMPROOT/fractalsql_bt_coverage_raw.info" \
+       --rc branch_coverage=1 >"$TMPROOT/fractalsql_bt_lcov.log" 2>&1 \
+    || { fail "coverage: lcov capture failed — see $TMPROOT/fractalsql_bt_lcov.log"; return; }
 
-  # Extract just our TU: --list's aggregate Rate% goes haywire (seen:
+  # Extract just our TUs: --list's aggregate Rate% goes haywire (seen:
   # a nonsensical >1000% function rate) when the capture also includes
   # the handful of lines pulled in from system headers like postgres.h/
   # palloc.h -- those aren't our code and nobody's asking about their
-  # coverage anyway.
-  lcov --extract /tmp/fractalsql_bt_coverage_raw.info '*/src/fractalsql.c' \
-       --output-file /tmp/fractalsql_bt_coverage.info \
-       --rc branch_coverage=1 >>/tmp/fractalsql_bt_lcov.log 2>&1
+  # coverage anyway. Wider than plain '*/src/fractalsql.c' now that
+  # gate 39 adds its own coverage of src/fractalsql_parse.c (src/ and
+  # src/fractalsql_vector.c are the only other paths under */src/ the
+  # capture can see).
+  lcov --extract "$TMPROOT/fractalsql_bt_coverage_raw.info" '*/src/*' \
+       --output-file "$TMPROOT/fractalsql_bt_coverage_ext.info" \
+       --rc branch_coverage=1 >>"$TMPROOT/fractalsql_bt_lcov.log" 2>&1
+  drop_ereport_level_branches "$TMPROOT/fractalsql_bt_coverage_ext.info" "$TMPROOT/fractalsql_bt_coverage.info"
 
   echo ""
-  echo "=== coverage (src/fractalsql.c) ==="
-  # Computed directly from the .info file's own LF/LH/FNF/FNH/BRF/BRH
-  # totals rather than `lcov --list`'s table -- lcov 2.0-1's --list
-  # renderer miscomputes its Rate% column against this intermediate
+  echo "=== coverage (src/*.c) ==="
+  [[ "${EREPORT_DROPPED:-0}" -gt 0 ]] && echo "  (excluding ${EREPORT_DROPPED} never-takeable ereport log-level branches on lines whose ereport did run)"
+  # Computed directly from the .info file's own LF/LH/FNF/FNH totals
+  # rather than `lcov --list`'s table -- lcov 2.0-1's --list renderer
+  # miscomputes its Rate% column against this intermediate
   # gcov-JSON-derived .info (seen: a nonsensical 1170% function rate)
   # even though the underlying LF:/LH:/etc. totals, and genhtml's own
   # report built from the same file, are both correct.
+  #
+  # Branches, though, are summed directly from the raw BRDA: lines
+  # rather than trusted from the .info's own BRF:/BRH: fields,
+  # EXCLUDING exception-tagged branches (an 'e' prefix on BRDA's
+  # block-number field -- GCC natively tags its exception-unwind
+  # landing pads that way; plain C has none today, but gate 39's own
+  # probe objects land in the same captures and this keeps the text
+  # summary agreeing with genhtml's --rc no_exception_branch=1 report
+  # by construction). This mirrors the SQLite column's same
+  # methodology, ported here in full -- see the mcp/ capture section
+  # below for the round-48/49 numbers it is worth.
   awk -F: '
     /^LF:/ { lf += $2 } /^LH:/ { lh += $2 }
     /^FNF:/ { fnf += $2 } /^FNH:/ { fnh += $2 }
-    /^BRF:/ { brf += $2 } /^BRH:/ { brh += $2 }
+    /^BRDA:/ {
+      split($2, p, ",")
+      if (substr(p[2], 1, 1) != "e") {
+        brf++
+        if (p[4] != "-" && p[4]+0 > 0) brh++
+      }
+    }
     END {
       printf "  lines:     %d/%d", lh, lf
       if (lf > 0) printf " (%.1f%%)", 100*lh/lf
@@ -442,14 +749,83 @@ run_coverage_report() {
       printf "  branches:  %d/%d", brh, brf
       if (brf > 0) printf " (%.1f%%)", 100*brh/brf
       print ""
-    }' /tmp/fractalsql_bt_coverage.info
+    }' "$TMPROOT/fractalsql_bt_coverage.info"
 
+  # no_exception_branch=1 is applied to genhtml ONLY: see the IMPORTANT
+  # note in the mcp/ capture section below (passing it to lcov
+  # --capture/--extract instead zeroes BRF/BRH entirely for this
+  # lcov/geninfo version -- a geninfo 2.0-1 bug in that combination).
   if command -v genhtml >/dev/null 2>&1; then
-    genhtml /tmp/fractalsql_bt_coverage.info --output-directory coverage_html \
-            --rc branch_coverage=1 >/tmp/fractalsql_bt_genhtml.log 2>&1 \
+    genhtml "$TMPROOT/fractalsql_bt_coverage.info" --output-directory coverage_html \
+            --rc branch_coverage=1 --rc no_exception_branch=1 >"$TMPROOT/fractalsql_bt_genhtml.log" 2>&1 \
       && pass "coverage: report at coverage_html/index.html" \
-      || fail "coverage: genhtml failed — see /tmp/fractalsql_bt_genhtml.log"
+      || fail "coverage: genhtml failed — see $TMPROOT/fractalsql_bt_genhtml.log"
   fi
+
+  # mcp/src coverage: the MCP server itself (built `make COVERAGE=1` by
+  # build_mcp, run by gates 33/38) plus the gate 40/41/42 probes. The mcp/
+  # Makefile's COVERAGE=1 branch adds -fprofile-update=atomic: the server is
+  # threaded, and plain --coverage races in gcda counter updates, after which
+  # geninfo fails with "Unexpected negative count". The probes below pass
+  # --coverage -fprofile-update=atomic inline for gate 42's threaded shape.
+  if ! find mcp/src -name '*.gcda' 2>/dev/null | grep -q .; then
+    skip "coverage: no mcp/src/*.gcda produced (gates 33/38/40/41/42 didn't run the MCP server or probes under --coverage)"
+  else
+    lcov --capture --directory mcp/src --output-file "$TMPROOT/fractalsql_bt_mcp_coverage_raw.info" \
+         --rc branch_coverage=1 --ignore-errors mismatch >>"$TMPROOT/fractalsql_bt_lcov.log" 2>&1 \
+      || { fail "coverage: mcp lcov capture failed; see $TMPROOT/fractalsql_bt_lcov.log"; return; }
+
+    # Extract just our probes' own view of mcp/src: the capture also
+    # picks up mcp/vendor/json.hpp (nlohmann, not ours) when any of it
+    # got inlined; neither is our code.
+    lcov --extract "$TMPROOT/fractalsql_bt_mcp_coverage_raw.info" '*/mcp/src/*' \
+         --output-file "$TMPROOT/fractalsql_bt_mcp_coverage.info" \
+         --rc branch_coverage=1 --ignore-errors mismatch >>"$TMPROOT/fractalsql_bt_lcov.log" 2>&1
+    # Compiler scope-exit (destructor) edges on closing-brace lines carry no
+    # source decision: see drop_scope_exit_branches. The filtered file is the
+    # one reported and rendered; the raw one stays in $TMPROOT for triage.
+    drop_scope_exit_branches "$TMPROOT/fractalsql_bt_mcp_coverage.info" "$TMPROOT/fractalsql_bt_mcp_coverage_f.info"
+
+    echo ""
+    echo "=== coverage (mcp/src: the instrumented MCP server run by gates 33/38, plus the gate 40/41/42 probes) ==="
+    echo "  (branch counts exclude exception edges, $(( ${SCOPE_EXIT_DROPPED:-0} - ${REG_ROW_DROPPED:-0} )) compiler records on closing-brace lines"
+    echo "   and ${REG_ROW_DROPPED:-0} records on tool-table registration rows, t.push_back( ToolSpec{ ... } ))"
+    # Same BRDA-based branch counting as the src/*.c section above --
+    # here it is NOT a no-op: mcp/src is heavy template C++ (nlohmann
+    # json), whose exception-unwind landing pads dominate the raw BRF:
+    # denominator unless the 'e'-tagged set is excluded. See that
+    # section plus the SQLite column's round-48 note (its agency.cpp
+    # branch rate went 48.3% -> 82.7% on this exclusion alone).
+    awk -F: '
+      /^LF:/ { lf += $2 } /^LH:/ { lh += $2 }
+      /^FNF:/ { fnf += $2 } /^FNH:/ { fnh += $2 }
+      /^BRDA:/ {
+        split($2, p, ",")
+        if (substr(p[2], 1, 1) != "e") {
+          brf++
+          if (p[4] != "-" && p[4]+0 > 0) brh++
+        }
+      }
+      END {
+        printf "  lines:     %d/%d", lh, lf
+        if (lf > 0) printf " (%.1f%%)", 100*lh/lf
+        print ""
+        printf "  functions: %d/%d", fnh, fnf
+        if (fnf > 0) printf " (%.1f%%)", 100*fnh/fnf
+        print ""
+        printf "  branches:  %d/%d", brh, brf
+        if (brf > 0) printf " (%.1f%%)", 100*brh/brf
+        print ""
+      }' "$TMPROOT/fractalsql_bt_mcp_coverage_f.info"
+
+    if command -v genhtml >/dev/null 2>&1; then
+      genhtml "$TMPROOT/fractalsql_bt_mcp_coverage_f.info" --output-directory coverage_html_mcp \
+              --rc branch_coverage=1 --rc no_exception_branch=1 >>"$TMPROOT/fractalsql_bt_genhtml.log" 2>&1 \
+        && pass "coverage: mcp report at coverage_html_mcp/index.html" \
+        || fail "coverage: mcp genhtml failed — see $TMPROOT/fractalsql_bt_genhtml.log"
+    fi
+  fi
+
   rm -rf "$GCOV_PREFIX"
   return 0
 }
@@ -547,7 +923,7 @@ pg_setup() {
     local asan_rt; asan_rt="$(resolve_san_rt libasan.so)"
     [[ -n "$asan_rt" ]] && [[ -f "$asan_rt" ]] || { echo "FAIL: could not resolve libasan.so runtime" >&2; return 2; }
     export "$preload_var"="$asan_rt"
-    export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1"
+    export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1:log_path=/tmp/fractalsql_bt_asan"
   elif [[ "$UBSAN" -eq 1 ]]; then
     local ubsan_rt; ubsan_rt="$(resolve_san_rt libubsan.so)"
     if [[ -n "$ubsan_rt" ]] && [[ -f "$ubsan_rt" ]]; then
@@ -687,7 +1063,10 @@ gate_01_build() {
   # gcov does), so it's left enabled here.
   [[ "$ASAN" -eq 1 ]]  && san_arg="ASAN=1"
   [[ "$UBSAN" -eq 1 ]] && san_arg="UBSAN=1"
-  if make $cov_arg $san_arg PG_CONFIG="$bin/pg_config" >/tmp/fractalsql_bt_build_$v.log 2>&1 && [[ -f "fractalsql$FSQL_DLSUFFIX" ]]; then
+  # FAULT_INJECT=1: test builds only -- compiles in src/fsql_fault.h so gate
+  # 47 can fail individual SPI/core calls. The shipped build never sets it.
+  local fi_arg="FAULT_INJECT=1"
+  if make $cov_arg $san_arg $fi_arg PG_CONFIG="$bin/pg_config" >/tmp/fractalsql_bt_build_$v.log 2>&1 && [[ -f "fractalsql$FSQL_DLSUFFIX" ]]; then
     pass "01 build (PG$v)"
   else
     fail "01 build (PG$v) — see /tmp/fractalsql_bt_build_$v.log"
@@ -698,7 +1077,7 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$("${PSQL[@]}" -c "SELECT fractal_version();" 2>&1)
-  [[ "$ver" = "2.0.19" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.19)"
+  [[ "$ver" = "2.0.20" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.20)"
   # fractal_search convergence: cosine similarity to query ~1
   local r; r=$("${PSQL[@]}" -c "
      WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
@@ -737,6 +1116,38 @@ gate_03_schema_context() {
   else
     fail "03 schema_context: auto-discovery='$auto'"
   fi
+
+  # Composite-FK schema context: a multi-column FK with both referential
+  # actions. The FK section of append_table_context prints pg_get_constraintdef
+  # output verbatim (src/fractalsql.c ~3357), so the emitted line must carry
+  # BOTH the (pa, pb) column pair -- proving a composite FK isn't rendered as
+  # a single-column one -- and both ON DELETE / ON UPDATE actions.
+  # Child columns stay NULLable: ON UPDATE SET NULL writes NULL into them by
+  # design, so NOT NULL here would be a self-contradictory (though
+  # create-time-accepted) schema. Cleaned up at gate end.
+  "${PSQL[@]}" -c "
+     DROP TABLE IF EXISTS bt_fk_child, bt_fk_parent;
+     CREATE TABLE bt_fk_parent (col_a int, col_b int, id serial PRIMARY KEY);
+     ALTER TABLE bt_fk_parent ADD CONSTRAINT bt_fk_parent_ab_uniq UNIQUE (col_a, col_b);
+     CREATE TABLE bt_fk_child (pa int, pb int);
+     ALTER TABLE bt_fk_child ADD CONSTRAINT bt_fk_child_ab_fk
+       FOREIGN KEY (pa, pb) REFERENCES bt_fk_parent (col_a, col_b)
+       ON DELETE CASCADE ON UPDATE SET NULL;
+  " >/dev/null 2>&1
+  local fk_ctx; fk_ctx=$("${PSQL[@]}" -c "SELECT fractal_schema_context(ARRAY['bt_fk_parent','bt_fk_child']);" 2>&1)
+  grep <<< "$fk_ctx" -q "FOREIGN KEY (pa, pb)" \
+    && pass "03 schema_context: composite-FK multi-column (pa, pb) line rendered" \
+    || fail "03 schema_context: composite-FK (pa, pb) columns missing: '$fk_ctx'"
+  grep <<< "$fk_ctx" -q "REFERENCES bt_fk_parent" \
+    && pass "03 schema_context: composite-FK REFERENCES line present" \
+    || fail "03 schema_context: composite-FK REFERENCES missing: '$fk_ctx'"
+  grep <<< "$fk_ctx" -q "ON DELETE CASCADE" \
+    && pass "03 schema_context: composite-FK ON DELETE CASCADE rendered" \
+    || fail "03 schema_context: ON DELETE CASCADE missing: '$fk_ctx'"
+  grep <<< "$fk_ctx" -q "ON UPDATE SET NULL" \
+    && pass "03 schema_context: composite-FK ON UPDATE SET NULL rendered" \
+    || fail "03 schema_context: ON UPDATE SET NULL missing: '$fk_ctx'"
+  "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_fk_child, bt_fk_parent;" >/dev/null 2>&1
   return 0
 }
 
@@ -764,6 +1175,12 @@ gate_04_text_to_sql() {
   t2s_expect "WITH d AS (DELETE FROM bt_orders RETURNING *) SELECT * FROM d"   "data-modifying CTE"     "04 modifying-CTE"
   t2s_expect "SELECT nope FROM bt_orders"                                      "does not analyze"       "04 bad-column"
   t2s_expect "this is not sql at all ##"                                       "does not parse"         "04 unparseable"
+  # The empty-candidate contract (sibling v2.0.8's "the model response
+  # contained no SQL" case, test-enabling sentinel added to the mock): a
+  # ZERO-LENGTH success response from the plugin is a validation failure
+  # ("expected exactly one SQL statement, found 0"), fed back and retried
+  # -- not an empty statement passed on or executed.
+  t2s_expect "FSQL_BT_EMPTY_RESPONSE"                                          "found 0"     "04 empty-candidate"
   local n; n=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_orders;" 2>&1)
   [[ "$n" = "0" ]] && pass "04 never-executes (bt_orders still empty)" || fail "04 never-executes: row count=$n"
   # auto-discovery mode (table_names omitted/NULL): the full GENERATE ->
@@ -915,6 +1332,132 @@ gate_09_guc_superuser() {
   grep <<< "$r" -qiE "permission denied|must be a?n? ?superuser" \
     && pass "09 guc_superuser: non-superuser rejected from setting reasoning_plugin" \
     || fail "09 guc_superuser: expected rejection, got: $r"
+  # The whole fractalsql.http_* provider family (url, token, model,
+  # embed_url, embed_model, think, think_provider, native_url, num_ctx,
+  # allow_plaintext) is GUC_SUPERUSER_ONLY: a non-superuser must not be
+  # able to READ the deployment's provider configuration, while the rest
+  # of the config surface stays readable. The boundary is PER-KEY -- the
+  # positive control below proves the gate is not a blanket refusal.
+  local rRead; rRead=$("${lowpriv_psql[@]}" -c "SELECT current_setting('fractalsql.http_model', true);" 2>&1)
+  grep <<< "$rRead" -qiE "permission denied|must be a?n? ?superuser" \
+    && pass "09 guc_superuser: non-superuser rejected from reading http_model" \
+    || fail "09 guc_superuser: expected a privilege error reading http_model, got: $rRead"
+  local rRead2; rRead2=$("${lowpriv_psql[@]}" -c "SELECT current_setting('fractalsql.text_to_sql_max_attempts', true);" 2>&1)
+  grep -qE '^[0-9]+$' <<< "$rRead2" \
+    && pass "09 guc_superuser: the boundary is per-key -- a non-superuser still reads a non-superuser-only key" \
+    || fail "09 guc_superuser: expected text_to_sql_max_attempts to stay readable, got: $rRead2"
+
+  # ---- T-G: the typed config surface (fractalsql_set_config() /
+  # fractalsql_get_config(), src/fractalsql.c's fsql_cfg_keys[] table).
+  # This is the SQL-callable wrapper over the fractalsql.* GUCs, and
+  # it is what promises typed validation, a per-key privilege boundary,
+  # a scope boundary, and an error naming the known keys.
+  local rG; rG=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('nope');" 2>&1)
+  grep -q 'unknown config key "nope"' <<< "$rG" && grep -q "Known keys:" <<< "$rG" \
+    && pass "09 cfg: an unknown key is an error that lists the known keys (get)" \
+    || fail "09 cfg: expected an unknown-key error naming the known keys, got: $rG"
+  local rG2; rG2=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('nope','x');" 2>&1)
+  grep -q 'unknown config key "nope"' <<< "$rG2" \
+    && pass "09 cfg: an unknown key is an error, never a silent no-op (set)" \
+    || fail "09 cfg: expected an unknown-key error, got: $rG2"
+
+  # Both spellings of a key are accepted, case-insensitively -- the bare
+  # name ("http_url") and the GUC's own name ("fractalsql.http_url"). The
+  # bare form used to be matched case-SENSITIVELY (fsql_cfg_lookup()
+  # folded only the prefixed spelling), which contradicted both the
+  # function's own contract and the SQL COMMENT on the two functions.
+  local rG3; rG3=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('text_to_sql_max_attempts');" 2>&1)
+  local rG4; rG4=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('fractalsql.text_to_sql_max_attempts');" 2>&1)
+  [[ "$rG3" = "$rG4" ]] && grep -qE '^[0-9]+$' <<< "$rG3" \
+    && pass "09 cfg: the bare key and the GUC spelling return the same value" \
+    || fail "09 cfg: expected the two spellings to agree, got bare='$rG3' prefixed='$rG4'"
+  local rG5; rG5=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('TEXT_TO_SQL_MAX_ATTEMPTS');" 2>&1)
+  local rG6; rG6=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('FRACTALSQL.text_to_sql_max_attempts');" 2>&1)
+  [[ "$rG5" = "$rG3" && "$rG6" = "$rG3" ]] \
+    && pass "09 cfg: both key spellings are matched case-insensitively" \
+    || fail "09 cfg: expected case-insensitive matching, got bare-upper='$rG5' prefixed-upper='$rG6' (expected '$rG3')"
+
+  # A bool key canonicalizes to on/off and the value written IS the GUC's
+  # own value -- current_setting() has to agree with it in the SAME
+  # session (the write is session-scoped, so a separate connection would
+  # read a fresh backend's untouched default).
+  local rG7; rG7=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('agent_partial_reasoning_fail','yes') || '=' || fractalsql_get_config('agent_partial_reasoning_fail') || '=' || current_setting('fractalsql.agent_partial_reasoning_fail');" 2>&1)
+  [[ "$rG7" = "on=on=on" ]] \
+    && pass "09 cfg: a bool key canonicalizes 'yes' to 'on' and the value lands in the GUC itself" \
+    || fail "09 cfg: expected on=on=on, got: $rG7"
+  local rG8; rG8=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('agent_partial_reasoning_fail','tru');" 2>&1)
+  grep -q "expects a boolean" <<< "$rG8" && grep -q "Accepted spellings" <<< "$rG8" \
+    && pass "09 cfg: a bool key rejects an unrecognised spelling and names the accepted ones" \
+    || fail "09 cfg: expected a boolean rejection, got: $rG8"
+
+  # Typed validation: int, enum, and the documented order -- the VALUE is
+  # validated before the privilege and scope checks, so a bad value is
+  # reported as a bad value even for a key a session may not change.
+  local rG9; rG9=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('http_num_ctx','notanint');" 2>&1)
+  grep -q "expects an integer" <<< "$rG9" \
+    && pass "09 cfg: an int key rejects a non-integer" \
+    || fail "09 cfg: expected an integer rejection, got: $rG9"
+  local rG10; rG10=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('http_num_ctx','1048577');" 2>&1)
+  grep -q "must be between 0 and 1048576" <<< "$rG10" \
+    && pass "09 cfg: an int key rejects a value outside its range" \
+    || fail "09 cfg: expected a range rejection, got: $rG10"
+  local rG11; rG11=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('text_to_sql_allowed_statements','drop');" 2>&1)
+  grep -q "must be one of: select|select_insert_update" <<< "$rG11" \
+    && pass "09 cfg: an enum key rejects a value outside its member list" \
+    || fail "09 cfg: expected an enum rejection, got: $rG11"
+  local rG12; rG12=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('text_to_sql_max_attempts','99');" 2>&1)
+  grep -q "must be between 1 and 10" <<< "$rG12" \
+    && pass "09 cfg: an invalid value is reported BEFORE the scope check (text_to_sql_max_attempts is reload-scoped)" \
+    || fail "09 cfg: expected the value error to win over the scope error, got: $rG12"
+
+  # The scope boundary: a reload-scoped (PGC_SIGHUP) key cannot be changed
+  # in a session, and the error names the ALTER SYSTEM + pg_reload_conf()
+  # path instead of silently doing nothing.
+  local rG13; rG13=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('text_to_sql_max_attempts','3');" 2>&1)
+  grep -q "is reload-scoped and cannot be changed in a session" <<< "$rG13" \
+    && grep -q "ALTER SYSTEM SET" <<< "$rG13" && grep -q "pg_reload_conf" <<< "$rG13" \
+    && pass "09 cfg: a reload-scoped key refuses a session change and names the ALTER SYSTEM + pg_reload_conf path" \
+    || fail "09 cfg: expected the reload-scoped refusal with the ALTER SYSTEM hint, got: $rG13"
+  # ... while a session-settable key (PGC_USERSET / PGC_SUSET) IS writable
+  # in a session, and the canonical value comes back.
+  local rG14; rG14=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('enterprise_ledger_key','cfgtest');" 2>&1)
+  [[ "$rG14" = "cfgtest" ]] \
+    && pass "09 cfg: a session-settable key (enterprise_ledger_key) is writable in a session" \
+    || fail "09 cfg: expected the value to be accepted, got: $rG14"
+
+  # NULL arguments are argument faults, not "unset".
+  local rG15; rG15=$("${PSQL[@]}" -c "SELECT fractalsql_set_config(NULL,'x');" 2>&1)
+  grep -q "the key must not be NULL" <<< "$rG15" \
+    && pass "09 cfg: set rejects a NULL key" \
+    || fail "09 cfg: expected the NULL-key rejection, got: $rG15"
+  local rG16; rG16=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('text_to_sql_max_attempts',NULL);" 2>&1)
+  grep -q "the value must not be NULL" <<< "$rG16" \
+    && pass "09 cfg: set rejects a NULL value" \
+    || fail "09 cfg: expected the NULL-value rejection, got: $rG16"
+  local rG17; rG17=$("${PSQL[@]}" -c "SELECT fractalsql_get_config(NULL);" 2>&1)
+  grep -q "the key must not be NULL" <<< "$rG17" \
+    && pass "09 cfg: get rejects a NULL key" \
+    || fail "09 cfg: expected the NULL-key rejection, got: $rG17"
+
+  # The config API enforces the SAME per-key privilege boundary the GUCs
+  # carry -- and, like the GUCs, it is per-key, not blanket.
+  local rL1; rL1=$("${lowpriv_psql[@]}" -c "SELECT fractalsql_set_config('http_url','http://x');" 2>&1)
+  grep -q "is a superuser-only setting" <<< "$rL1" \
+    && pass "09 cfg: a non-superuser cannot SET a superuser-only key through the config API" \
+    || fail "09 cfg: expected the superuser-only rejection, got: $rL1"
+  local rL2; rL2=$("${lowpriv_psql[@]}" -c "SELECT fractalsql_get_config('http_url');" 2>&1)
+  grep -q "is a superuser-only setting" <<< "$rL2" \
+    && pass "09 cfg: a non-superuser cannot READ a superuser-only key through the config API" \
+    || fail "09 cfg: expected the superuser-only rejection, got: $rL2"
+  local rL3; rL3=$("${lowpriv_psql[@]}" -c "SELECT fractalsql_get_config('text_to_sql_max_attempts');" 2>&1)
+  grep -qE '^[0-9]+$' <<< "$rL3" \
+    && pass "09 cfg: the config API's privilege boundary is per-key -- a non-superuser still reads a non-superuser-only key" \
+    || fail "09 cfg: expected text_to_sql_max_attempts to stay readable, got: $rL3"
+  local rL4; rL4=$("${lowpriv_psql[@]}" -c "SELECT fractalsql_set_config('agent_partial_reasoning_fail','on');" 2>&1)
+  [[ "$rL4" = "on" ]] \
+    && pass "09 cfg: a non-superuser may set a non-superuser-only, session-settable key" \
+    || fail "09 cfg: expected the set to be accepted, got: $rL4"
+
   "${PSQL[@]}" -c "DROP ROLE bt_lowpriv2;" >/dev/null 2>&1
   return 0
 }
@@ -1095,6 +1638,64 @@ gate_13_siu_mode() {
                   || fail "13 siu_mode: row count=$n"
 
   pg_set_guc fractalsql.text_to_sql_allowed_statements "'select'" "select"
+
+  # ---- T-I: the check hook on fractalsql.text_to_sql_allowed_statements.
+  # The GUC carries a check hook (src/fractalsql.c's
+  # check_t2s_allowed_statements), so an invalid value is rejected AT SET
+  # TIME rather than merely refused later.
+  #
+  # A session SET cannot reach the hook: the GUC is PGC_SIGHUP, so
+  # PostgreSQL refuses the SET first ("cannot be changed now") and the
+  # hook never runs. ALTER SYSTEM is the one path that validates at set
+  # time, because that is where Postgres parses and checks the value it
+  # is about to persist.
+  local rI1; rI1=$("${PSQL[@]}" -c "SET fractalsql.text_to_sql_allowed_statements = 'bogus';" 2>&1)
+  grep -q "cannot be changed now" <<< "$rI1" \
+    && pass "13 check-hook: a session SET of the PGC_SIGHUP GUC is refused by PostgreSQL itself" \
+    || fail "13 check-hook: expected 'cannot be changed now', got: $rI1"
+  local rI2; rI2=$("${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.text_to_sql_allowed_statements = 'bogus';" 2>&1)
+  grep -q 'invalid value for parameter "fractalsql\.text_to_sql_allowed_statements"' <<< "$rI2" \
+    && grep -q 'Allowed values are "select" and "select_insert_update"' <<< "$rI2" \
+    && pass "13 check-hook: ALTER SYSTEM rejects an invalid value and names the accepted ones" \
+    || fail "13 check-hook: expected the check hook's rejection, got: $rI2"
+  # The rejected value must not have been persisted, and the server must
+  # still be alive and serving the previous value.
+  if [[ -f "$DATADIR/postgresql.auto.conf" ]]; then
+    if ! grep -q "bogus" "$DATADIR/postgresql.auto.conf"; then
+      pass "13 check-hook: the rejected value never reached postgresql.auto.conf"
+    else
+      fail "13 check-hook: the rejected value was persisted to postgresql.auto.conf"
+    fi
+  else
+    skip "13 check-hook: postgresql.auto.conf not found -- skipped the persistence check"
+  fi
+  "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1
+  sleep 2
+  local rI3; rI3=$("${PSQL[@]}" -c "SELECT current_setting('fractalsql.text_to_sql_allowed_statements');" 2>&1)
+  [[ "$rI3" = "select" ]] \
+    && pass "13 check-hook: the effective value is unchanged after the rejected ALTER SYSTEM" \
+    || fail "13 check-hook: expected the effective value to still be 'select', got: $rI3"
+  local rI4; rI4=$("${PSQL[@]}" -c "SELECT 1;" 2>&1)
+  [[ "$rI4" = "1" ]] \
+    && pass "13 check-hook: the server survived the rejected ALTER SYSTEM" \
+    || fail "13 check-hook: expected the server to be alive, got: $rI4"
+  "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.text_to_sql_allowed_statements;" >/dev/null 2>&1
+  "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1
+
+  # The check hook is deliberately NOT applied to
+  # fractalsql.enterprise_lib: a rejecting hook there would fail the
+  # config reload of every backend that has the library loaded (the
+  # postmaster re-reads the same file), so an arbitrary path has to be
+  # accepted there and the refusal is raised at USE time instead --
+  # which is gate 31's job. Assert the asymmetry explicitly.
+  local rI5; rI5=$("${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_lib = '/nonexistent/fractalsql_ent_probe.so';" 2>&1)
+  if ! grep -qiE "error|invalid value" <<< "$rI5"; then
+    pass "13 check-hook: enterprise_lib deliberately has no check hook (an arbitrary path is accepted at set time)"
+  else
+    fail "13 check-hook: expected enterprise_lib to accept any path, got: $rI5"
+  fi
+  "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.enterprise_lib;" >/dev/null 2>&1
+  "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1
   return 0
 }
 
@@ -1124,6 +1725,39 @@ gate_14_retry() {
 
   local n; n=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_orders;" 2>&1)
   [[ "$n" = "0" ]] && pass "14 retry: never-executes held across retries" || fail "14 retry: row count=$n"
+
+  # --- review exhaustion: t2s_run_review's own exhausted-attempts branch
+  #     (src/fractalsql.c: "exhausted %d attempt(s), last review verdict").
+  #     Review PASSES only when the critique response starts with PASS
+  #     (pg_strncasecmp(p, "PASS", 4) in t2s_run_review) -- and the standard
+  #     MOCK plugin's REVIEW response can NEVER satisfy that, by
+  #     construction: ensure_review_ctx() loads with RESPONSE_MODE unset
+  #     (see its own comment), so mock_generate() always renders the
+  #     canned file content as a ```sql-fenced chat response beginning
+  #     "```s..." -- no sentinel content can ever produce a PASS prefix.
+  #     max_attempts=1 therefore turns the first (and only) review FAIL
+  #     directly into the exhaustion error.
+  pg_set_guc fractalsql.text_to_sql_max_attempts 1 1 \
+    || { fail "14 review-exhaustion: max_attempts GUC did not take effect"; return; }
+  pg_set_guc fractalsql.text_to_sql_use_review on on \
+    || { fail "14 review-exhaustion: use_review GUC did not take effect"; return; }
+  pg_swap_plugin "$MOCK" \
+    || { fail "14 review-exhaustion: plugin swap did not take effect"; pg_set_guc fractalsql.text_to_sql_use_review off off; return; }
+  echo "SELECT 1" > /tmp/fractalsql_bt_sql.txt
+  local rr; rr=$("${PSQL[@]}" -c "SELECT fractal_text_to_sql('q', ARRAY['bt_customers','bt_orders']);" 2>&1)
+  if grep <<< "$rr" -qE "server closed the connection|could not connect"; then
+    fail "14 review-exhaustion: backend crashed -- $rr"
+  elif grep <<< "$rr" -q "exhausted 1 attempt(s), last review verdict" && grep <<< "$rr" -q '```sql'; then
+    pass "14 review-exhaustion: review FAIL twice over -> 'exhausted 1 attempt(s), last review verdict' with the mock's fenced critique"
+  else
+    fail "14 review-exhaustion: expected the review-exhaustion rejection, got: $rr"
+  fi
+  grep <<< "$rr" -q "Last candidate SQL: SELECT 1" \
+    && pass "14 review-exhaustion: errdetail carries the last candidate SQL" \
+    || fail "14 review-exhaustion: errdetail missing: '$rr'"
+  rm -f /tmp/fractalsql_bt_sql.txt
+  pg_set_guc fractalsql.text_to_sql_use_review off off
+  # max_attempts and the plugin are left at 1/$MOCK by the restores below.
 
   pg_set_guc fractalsql.text_to_sql_max_attempts 1 1
   pg_swap_plugin "$MOCK"
@@ -1226,6 +1860,82 @@ gate_15_embed() {
   [[ "$status" = "done" ]] && pass "15 embed: vectorizer status shows done, no failures" \
     || fail "15 embed: expected status 'done', got: $status"
 
+  # --- vectorizer-failed-rows: the process_queue failure path
+  #     (sql/fractalsql--1.0.sql's EXCEPTION WHEN OTHERS block: every
+  #     failing row must END status='failed' with error=SQLERRM and an
+  #     updated_at, visible through fractal_vectorizer_status's
+  #     last_failure_at/last_error columns) -- plus the claim/retry logic
+  #     that decides what "recovering" means. Disrupt ONE condition: blank
+  #     fractalsql.http_embed_url the way this gate itself swaps GUCs
+  #     (pg_set_guc = ALTER SYSTEM + reload + poll; save the pinned value
+  #     and restore it below). With the URL unset, ensure_embed_ctx()
+  #     (src/fractalsql.c:1706) raises "fractal_embed:
+  #     fractalsql.http_embed_url is not configured" before any dispatch --
+  #     deterministic, no HTTP involved. Two new trigger-enqueued rows
+  #     exercise it.
+  pg_set_guc fractalsql.http_embed_url "''" "" \
+    || { fail "15 vectorizer-failed-rows: could not blank fractalsql.http_embed_url"; return; }
+  "${PSQL[@]}" -c "INSERT INTO bt_embed_docs (body) VALUES ('c'), ('d');" >/dev/null 2>&1
+  local rfail
+  rfail=$("${PSQL[@]}" -c "SELECT fractal_vectorizer_process_queue();" 2>&1)
+  local nfail; nfail=$("${PSQL[@]}" -c "
+    SELECT count(*) FROM fractal_vectorizer_queue
+     WHERE vectorizer_id = $vzid AND status = 'failed'
+       AND COALESCE(error, '') <> '';" 2>&1)
+  [[ "$nfail" = "2" ]] \
+    && pass "15 vectorizer-failed-rows: both queued rows end status='failed' with a non-empty error" \
+    || fail "15 vectorizer-failed-rows: expected 2 failed rows with an error string, got: $nfail ($rfail)"
+  local ftxt; ftxt=$("${PSQL[@]}" -c "
+    SELECT bool_and(error LIKE '%http_embed_url is not configured%')
+      FROM fractal_vectorizer_queue
+     WHERE vectorizer_id = $vzid AND status = 'failed';" 2>&1)
+  [[ "$ftxt" = "t" ]] \
+    && pass "15 vectorizer-failed-rows: error carries the engine's own 'http_embed_url is not configured' message" \
+    || fail "15 vectorizer-failed-rows: expected the ensure_embed_ctx error text in the queue rows, got: $ftxt"
+  local vstat; vstat=$("${PSQL[@]}" -c "
+    SELECT count(*) FROM fractal_vectorizer_status
+     WHERE vectorizer_id = $vzid AND status = 'failed'
+       AND last_failure_at IS NOT NULL
+       AND last_error LIKE '%http_embed_url is not configured%';" 2>&1)
+  # The view groups BY status (one row per queued-status group for this
+  # vectorizer — done/failed/... coexist), so assert on the failed GROUP's
+  # presence, not on any one emitted line (the docker gate caught the
+  # line-shape assumption: the done row sorts first, the failed row's
+  # display truncates, and the line-greps were order-fragile).
+  [[ "$vstat" = "1" ]] \
+    && pass "15 vectorizer-failed-rows: fractal_vectorizer_status shows the failed group with last_failure_at and last_error set" \
+    || fail "15 vectorizer-failed-rows: expected the failed group row in fractal_vectorizer_status, got: $vstat"
+
+  # Recovery: the claim loop only ever picks status='pending' rows (the FOR
+  # r IN SELECT ... WHERE q.status = 'pending' in process_queue), so a bare
+  # re-run never retries the failed rows -- it returns 0 and leaves them
+  # failed. Restoring the embed config alone is therefore not enough; the
+  # operator path is a pending-reset UPDATE (the exact shape of
+  # process_queue's own stale_after reclaim UPDATE), after which the same
+  # rows complete with the canned embedding.
+  local nretry; nretry=$("${PSQL[@]}" -c "SELECT fractal_vectorizer_process_queue();" 2>&1)
+  [[ "$nretry" = "0" ]] \
+    && pass "15 vectorizer-failed-rows: a bare re-run does NOT retry failed rows (claim only picks 'pending'; returned 0)" \
+    || fail "15 vectorizer-failed-rows: expected process_queue to not retry failed rows (0), got: $nretry"
+
+  # Restore the pinned embed URL FIRST: by itself it recovers nothing
+  # (asserted above), and it is what lets the pending-reset rows below
+  # actually succeed with the canned embedding.
+  pg_set_guc fractalsql.http_embed_url "'http://unused/embeddings'" "http://unused/embeddings" \
+    || { fail "15 vectorizer-failed-rows: could not restore fractalsql.http_embed_url"; return; }
+  "${PSQL[@]}" -c "
+    UPDATE fractal_vectorizer_queue
+       SET status = 'pending', processing_started_at = NULL
+     WHERE vectorizer_id = $vzid AND status = 'failed';" >/dev/null 2>&1
+  local nrec; nrec=$("${PSQL[@]}" -c "SELECT fractal_vectorizer_process_queue();" 2>&1)
+  [[ "$nrec" = "2" ]] \
+    && pass "15 vectorizer-failed-rows: after restoring the config + a pending-reset, the recovered rows process to done" \
+    || fail "15 vectorizer-failed-rows: expected 2 recovered rows after the pending-reset, got: $nrec"
+  local ndone; ndone=$("${PSQL[@]}" -c "SELECT count(*) FROM bt_embed_docs WHERE embedding = '{0.1,0.2,0.3}';" 2>&1)
+  [[ "$ndone" = "4" ]] \
+    && pass "15 vectorizer-failed-rows: all 4 rows carry the canned embedding after recovery" \
+    || fail "15 vectorizer-failed-rows: expected 4 embedded rows after recovery, got: $ndone"
+
   "${PSQL[@]}" -c "DELETE FROM fractal_vectorizers WHERE source_table = 'bt_embed_docs';" >/dev/null 2>&1
   "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_embed_docs;" >/dev/null 2>&1
   pg_swap_plugin "$MOCK"
@@ -1303,11 +2013,123 @@ gate_16_embed_authz() {
     && pass "16 embed_authz: no embedding was written by the unauthorized outsider's call" \
     || fail "16 embed_authz: an embedding was written despite the outsider lacking SELECT: $leaked"
 
+  # ---- the CONFUSED-DEPUTY half (the PROCESSOR's read) ----
+  #
+  # The asserts above prove the CALLER's own privileges are enforced: the
+  # dynamic SELECT runs as the caller, so an outsider gets Postgres's own
+  # "permission denied". The other half of the H fix is the read that
+  # happens with the PROCESSOR's privileges. fractal_vectorizer_process_queue()
+  # is SECURITY INVOKER, so it reads the content column with whoever ran
+  # the batch -- and in the default deployment that is the MCP server's
+  # own role, a SUPERUSER (docker-compose.yml: PGUSER: postgres), while
+  # the vectorizer row may have been registered by, and the queue row
+  # INSERTed by, a DIFFERENT unprivileged role. fractal_vectorizers and
+  # fractal_vectorizer_queue are both PUBLIC-writable, so without a gate
+  # an unprivileged role could name ANY real relation and have the
+  # superuser's process_queue() read that relation's content column and
+  # ship it to the embedding provider -- the read is UNAUTHORIZED even
+  # though the SQL that triggers it is legitimate.
+  #
+  # The gate now asks the vectorizer's CREATOR -- the role that
+  # legitimately asked for this content to be embedded -- whether IT is
+  # entitled to SELECT the content column. The creator is unforgeable
+  # (pinned by fractal_vectorizer_pin_creator) and the target is
+  # immutable (fractal_vectorizer_guard_identity), so the pair cannot be
+  # steered at a target its creator is not entitled to.
   "${PSQL[@]}" -c "
-     DELETE FROM fractal_vectorizers WHERE source_table = 'bt_embed_owned';
-     DROP TABLE IF EXISTS bt_embed_owned;
+     DROP ROLE IF EXISTS bt_dep_lowpriv;
+     CREATE ROLE bt_dep_lowpriv LOGIN;
+     GRANT USAGE ON SCHEMA public TO bt_dep_lowpriv;
+     DROP TABLE IF EXISTS bt_dep_secret;
+     CREATE TABLE bt_dep_secret (id int PRIMARY KEY, body text, embedding float8[]);
+     INSERT INTO bt_dep_secret(id, body) VALUES (1, 'the secret body');
+     REVOKE ALL ON bt_dep_secret FROM PUBLIC;
+     GRANT SELECT (id, embedding) ON bt_dep_secret TO bt_dep_lowpriv;
+  " >/dev/null 2>&1
+
+  local lowpriv_psql=("$BIN/psql" -h "$SOCKDIR" -p "$PORT" -U bt_dep_lowpriv -d postgres -X -tA)
+
+  # The registry row names a table the low-priv role does not own and
+  # cannot read the content column of -- and ASKS to be attributed to a
+  # superuser, so the pinning trigger has to refuse the attribution.
+  local depid; depid=$("${lowpriv_psql[@]}" -c "
+     INSERT INTO fractal_vectorizers
+            (source_table, source_pk_col, text_col, embedding_col, created_by)
+     VALUES ('bt_dep_secret', 'id', 'body', 'embedding', 'postgres')
+     RETURNING id;" 2>&1 | head -1)
+  case "$depid" in
+    ''|*[!0-9]*)
+      fail "16 embed_authz: the low-priv role could not register a vectorizer row: $depid" ;;
+    *)
+      local dep_owner; dep_owner=$("${PSQL[@]}" -c "
+         SELECT created_by FROM fractal_vectorizers WHERE id = $depid;" 2>&1)
+      [[ "$dep_owner" = "bt_dep_lowpriv" ]] \
+        && pass "16 embed_authz: the registry row's creator is pinned to the inserting role (a forged superuser attribution is ignored)" \
+        || fail "16 embed_authz: expected created_by=bt_dep_lowpriv (pinned), got: $dep_owner" ;;
+  esac
+
+  if [[ "$depid" =~ ^[0-9]+$ ]]; then
+    # The queue row is INSERTed by the same unprivileged role -- the
+    # registry and the queue are both PUBLIC-writable.
+    "${lowpriv_psql[@]}" -c "
+       INSERT INTO fractal_vectorizer_queue (vectorizer_id, source_pk_value)
+       VALUES ($depid, '1');" >/dev/null 2>&1
+
+    # The PROCESSOR is the superuser: exactly the default deployment.
+    "${PSQL[@]}" -c "SELECT fractal_vectorizer_process_queue();" >/dev/null 2>&1
+
+    local dep_err; dep_err=$("${PSQL[@]}" -c "
+       SELECT last_error FROM fractal_vectorizer_status
+        WHERE vectorizer_id = $depid AND status = 'failed';" 2>&1)
+    grep -q "is not entitled to SELECT the content column" <<< "$dep_err" \
+      && pass "16 embed_authz: the superuser's process_queue() refuses the low-priv creator's deputy read of the content column" \
+      || fail "16 embed_authz: expected the entitlement refusal, got: $dep_err"
+
+    local dep_leak; dep_leak=$("${PSQL[@]}" -c "
+       SELECT embedding FROM bt_dep_secret WHERE embedding IS NOT NULL;" 2>&1)
+    [[ -z "$dep_leak" ]] \
+      && pass "16 embed_authz: nothing was embedded, so the secret body never left the database" \
+      || fail "16 embed_authz: an embedding was written despite the refused deputy read: $dep_leak"
+
+    # The target and the creator are immutable against UPDATE, so a
+    # privileged role cannot re-point an existing vectorizer at another
+    # relation after the fact.
+    local dep_retarget; dep_retarget=$("${PSQL[@]}" -c "
+       UPDATE fractal_vectorizers SET created_by = 'postgres' WHERE id = $depid;" 2>&1)
+    grep -q "immutable" <<< "$dep_retarget" \
+      && pass "16 embed_authz: the registry row's creator cannot be re-attributed by an UPDATE" \
+      || fail "16 embed_authz: expected the immutability guard to reject the re-attribution, got: $dep_retarget"
+
+    # Positive control: once the creator IS entitled to the content
+    # column, the entitlement gate must stop firing -- otherwise the
+    # refusal above would prove nothing.
+    "${PSQL[@]}" -c "GRANT SELECT (body) ON bt_dep_secret TO bt_dep_lowpriv;" >/dev/null 2>&1
+    local dep_entitled; dep_entitled=$("${PSQL[@]}" -c "
+       SELECT has_column_privilege('bt_dep_lowpriv', 'bt_dep_secret'::regclass, 'body', 'SELECT');" 2>&1)
+    [[ "$dep_entitled" = "t" ]] \
+      && pass "16 embed_authz: the creator's column-level entitlement is what the gate reads" \
+      || fail "16 embed_authz: expected has_column_privilege=true after the grant, got: $dep_entitled"
+
+    "${lowpriv_psql[@]}" -c "
+       UPDATE fractal_vectorizer_queue SET status = 'pending', error = NULL
+        WHERE vectorizer_id = $depid;" >/dev/null 2>&1
+    "${PSQL[@]}" -c "SELECT fractal_vectorizer_process_queue();" >/dev/null 2>&1
+    local dep_err2; dep_err2=$("${PSQL[@]}" -c "
+       SELECT coalesce(max(last_error), '') FROM fractal_vectorizer_status
+        WHERE vectorizer_id = $depid AND status = 'failed';" 2>&1)
+    if grep -q "is not entitled to SELECT the content column" <<< "$dep_err2"; then
+      fail "16 embed_authz: the entitlement gate still fired after granting the creator SELECT on the content column"
+    else
+      pass "16 embed_authz: once the creator is entitled, the entitlement gate stops firing (the refusal above was the gate, not a broken batch)"
+    fi
+  fi
+
+  "${PSQL[@]}" -c "
+     DELETE FROM fractal_vectorizers WHERE source_table = 'bt_dep_secret';
+     DROP TABLE IF EXISTS bt_dep_secret;
      DROP ROLE IF EXISTS bt_embed_owner;
      DROP ROLE IF EXISTS bt_embed_outsider;
+     DROP ROLE IF EXISTS bt_dep_lowpriv;
   " >/dev/null 2>&1
   return 0
 }
@@ -1537,6 +2359,29 @@ gate_19_sfs_bounds() {
     && pass "19 sfs_bounds: fractal_search_debug shares the same bounds check" \
     || fail "19 sfs_bounds: expected fractal_search_debug to reject diffusion_factor=33, got: $r"
 
+  # fractal_search_debug's full search-state telemetry: the result jsonb is
+  # the vendored core's raw fsql_search_ptr JSON round-tripped through
+  # jsonb_in, and its UNCONDITIONAL keys (one printf format in the core:
+  # {"dim":%d,"n_corpus":%zu,"best_fit":...,"best_point":...}) must all
+  # survive. Gate 02 only asserts best_point; this proves the debug payload
+  # is the full state, not a reduced shape.
+  r=$("${PSQL[@]}" -c "SELECT fractal_search_debug(ARRAY[0.6,0.8]::float8[], 30, 50, 2);" 2>&1)
+  if grep <<< "$r" -q '"dim"' && grep <<< "$r" -q '"n_corpus"' && grep <<< "$r" -q '"best_fit"' && grep <<< "$r" -q '"best_point"'; then
+    pass "19 sfs_bounds: fractal_search_debug returns the full search-state telemetry (dim/n_corpus/best_fit/best_point)"
+  else
+    fail "19 sfs_bounds: fractal_search_debug missing telemetry keys: $r"
+  fi
+
+  # Wrong-typed query arg: float8[] cannot be resolved from text[] (no
+  # implicit array-element cast), so postgres's own type resolver rejects
+  # before the C function ever runs. The C-side ARR_ELEMTYPE guard in
+  # float8_array_to_doubles ("query must be float8[], got %s") is only
+  # reachable from internal callers, not SQL typing.
+  r=$("${PSQL[@]}" -c "SELECT fractal_search_debug('{0.1,0.2}'::text[], 30, 50, 2);" 2>&1)
+  grep <<< "$r" -q "does not exist" \
+    && pass "19 sfs_bounds: fractal_search_debug rejects a wrong-typed query arg (PG type resolution)" \
+    || fail "19 sfs_bounds: expected a type-resolution rejection, got: $r"
+
   # Injection-shaped table_name into fractal_search_explore -- same
   # class of test gate 10 already gives fractal_schema_context, closing
   # the gap for search_explore specifically.
@@ -1666,6 +2511,22 @@ gate_20_api_func() {
      DELETE FROM fractal_vectorizers WHERE source_table = 'bt_stale_reclaim';
      DROP TABLE IF EXISTS bt_stale_reclaim;
   " >/dev/null 2>&1
+
+  # --- 6: FSQL_MAX_INPUT_BYTES over-cap rejection (src/fractalsql.c:239).
+  #     grep FSQL_MAX_INPUT_BYTES shows exactly ONE use site in this repo:
+  #     the dispatch budget in fractal_embed() itself (its strlen check at
+  #     :3198) -- fractal_text_to_sql() has NO byte cap to reject with (its
+  #     input is the question string plus in-engine-built schema context;
+  #     there is no engine-side over-cap error text to assert), so the
+  #     overload call here goes to fractal_embed() only. 4 MiB + 1 chars,
+  #     built with repeat() per this harness's no-python convention, and
+  #     rejected BEFORE any plugin dispatch -- deterministic even though the
+  #     URL/embed GUCs are still configured for part 5 above.
+  local rov; rov=$("${PSQL[@]}" -c "SELECT fractal_embed(repeat('A', 4*1024*1024 + 1));" 2>&1)
+  grep <<< "$rov" -q "fractal_embed: input exceeds the 4 MiB limit" \
+    && pass "20 api_func: a 4 MiB + 1 embed input is rejected with the engine's own over-cap error" \
+    || fail "20 api_func: expected 'input exceeds the 4 MiB limit', got: $rov"
+
   pg_swap_plugin "$MOCK" >/dev/null
   return 0
 }
@@ -1955,6 +2816,193 @@ gate_22_v2_functions() {
     || fail "22 v2_functions: expected an alpha_weight rejection, got: $r17"
 
   "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_telemetry_docs, bt_combined_docs;" >/dev/null 2>&1
+
+  # --- 7: rejection-class sweep for the v2.x primitives, extending the
+  #     happy paths gates 22/29/30 already prove. Every string asserted
+  #     here is this repo's own error text (src/fractalsql.c /
+  #     src/fractalsql_vector.c), not the SQLite sibling's wording.
+  local r
+  # optimize_portfolio: k<=0 and k>n_assets both hit the same validation
+  # ("k must satisfy 1 <= k <= n_assets"); cov stays consistent so the
+  # cov-length check passes and it is really the k branch that fires.
+  # (NULL mu is NOT covered: fractal_optimize_portfolio is declared
+  # non-STRICT and has no PG_ARGISNULL guard at its entry, so a NULL mu
+  # would SIGSEGV the backend -- a real robustness gap, but not something
+  # this harness can assert as a clean deterministic rejection.)
+  r=$("${PSQL[@]}" -c "SELECT fractal_optimize_portfolio(ARRAY[0.1,0.05]::float8[], ARRAY[0.04,0.01,0.01,0.03]::float8[], 0, 1);" 2>&1)
+  grep <<< "$r" -q "k must satisfy 1 <= k <= n_assets" \
+    && pass "22 rejection: optimize_portfolio rejects k<=0" \
+    || fail "22 rejection: expected the k<=0 rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_optimize_portfolio(ARRAY[0.1,0.05]::float8[], ARRAY[0.04,0.01,0.01,0.03]::float8[], 3, 1);" 2>&1)
+  grep <<< "$r" -q "k must satisfy 1 <= k <= n_assets" \
+    && pass "22 rejection: optimize_portfolio rejects k>n_assets" \
+    || fail "22 rejection: expected the k>n_assets rejection, got: $r"
+
+  # tda_persistence_diagram: dim=0; point count not a multiple of dim; a
+  # too-few-points (n_points=1) instance rejected by the core (the "2 <=
+  # n_points <= 512" bound); max_dim outside {0,1}.
+  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0]::float8[], 0);" 2>&1)
+  grep <<< "$r" -q "dim must be > 0" \
+    && pass "22 rejection: tda_persistence_diagram rejects dim<=0" \
+    || fail "22 rejection: expected a dim<=0 rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,1.0]::float8[], 3);" 2>&1)
+  grep <<< "$r" -q "points length (2) must be a multiple of dim (3)" \
+    && pass "22 rejection: tda_persistence_diagram rejects a point list that is not a multiple of dim" \
+    || fail "22 rejection: expected a points-length rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0]::float8[], 2);" 2>&1)
+  grep <<< "$r" -q "2 <= n_points" \
+    && pass "22 rejection: tda_persistence_diagram rejects a single-point cloud (n_points >= 2)" \
+    || fail "22 rejection: expected a too-few-points rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0,2.0,2.0]::float8[], 2, 2);" 2>&1)
+  grep <<< "$r" -q "max_dim in {0,1}" \
+    && pass "22 rejection: tda_persistence_diagram rejects max_dim=2 (core supports only {0,1})" \
+    || fail "22 rejection: expected a max_dim rejection, got: $r"
+
+  # periodogram: max_peaks <= 0; series shorter than the core's n >= 4 floor.
+  r=$("${PSQL[@]}" -c "SELECT fractal_periodogram(ARRAY[1.0,2.0,3.0,4.0]::float8[], 0);" 2>&1)
+  grep <<< "$r" -q "max_peaks must be > 0" \
+    && pass "22 rejection: periodogram rejects max_peaks<=0" \
+    || fail "22 rejection: expected a max_peaks rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_periodogram(ARRAY[1.0,2.0,3.0]::float8[], 4);" 2>&1)
+  grep <<< "$r" -q "need n >= 4" \
+    && pass "22 rejection: periodogram rejects a too-short series" \
+    || fail "22 rejection: expected a need-n>=4 rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_periodogram(ARRAY[[1.0,2.0],[3.0,4.0]]::float8[], 4);" 2>&1)
+  grep <<< "$r" -q "query must be 1-D non-null float8\[\]" \
+    && pass "22 rejection: periodogram rejects a 2-D (malformed) series" \
+    || fail "22 rejection: expected the 1-D-non-null rejection, got: $r"
+
+  # cycle_detect: empty fingerprints array; a NULL element inside it; mixed
+  # fingerprint lengths. (The negative hamming_threshold branch is gate 30's
+  # already.) Bytea payloads are opaque -- a "garbage" fingerprint of a
+  # constant length is a valid stream element by contract, so the
+  # non-hex/non-JSON malformed shapes the sibling rejects simply do not
+  # exist as pg rejections here.
+  r=$("${PSQL[@]}" -c "SELECT count(*) FROM fractal_cycle_detect(ARRAY[]::bytea[], 0);" 2>&1)
+  grep <<< "$r" -q "fingerprints array must not be empty" \
+    && pass "22 rejection: cycle_detect rejects an empty fingerprints array" \
+    || fail "22 rejection: expected an empty-array rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT count(*) FROM fractal_cycle_detect(ARRAY['ab'::bytea, NULL]::bytea[], 0);" 2>&1)
+  grep <<< "$r" -q "fingerprints array must not contain NULLs" \
+    && pass "22 rejection: cycle_detect rejects a NULL fingerprint element" \
+    || fail "22 rejection: expected a NULL-element rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT count(*) FROM fractal_cycle_detect(ARRAY['ab'::bytea, 'abc'::bytea]::bytea[], 0);" 2>&1)
+  grep <<< "$r" -q "every fingerprint must be the same length" \
+    && pass "22 rejection: cycle_detect rejects mixed-length fingerprints" \
+    || fail "22 rejection: expected a length-mismatch rejection, got: $r"
+
+  # state_fingerprint: a 2-D (malformed) vec -- the shared float8_array_
+  # to_doubles helper's own message says "query" even for this function's
+  # vec argument. (n_bits<=0 is gate 30's already.)
+  r=$("${PSQL[@]}" -c "SELECT fractal_state_fingerprint(ARRAY[[1.0,2.0],[3.0,4.0]]::float8[], 8, 42);" 2>&1)
+  grep <<< "$r" -q "query must be 1-D non-null float8\[\]" \
+    && pass "22 rejection: state_fingerprint rejects a 2-D vec" \
+    || fail "22 rejection: expected a 1-D-non-null rejection, got: $r"
+
+  # The native vector type's dimension cap -- the REAL cap is
+  # FRACTALVEC_MAX_DIM = 32767 (src/fractalsql_vector.c), enforced inline
+  # during text input ("dimension exceeds maximum 32767") and by
+  # check_dim_range for degenerate dims ("dimension must be between 1 and
+  # 32767"). fractal_vector_add's happy path is gate 29's; this covers its
+  # input-parse rejection surface.
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_add('[]'::fractal_vector, '[1,2,3]'::fractal_vector);" 2>&1)
+  grep <<< "$r" -q "fractal_vector dimension must be between 1 and 32767, got 0" \
+    && pass "22 rejection: fractal_vector rejects a zero-dimension ('[]') input" \
+    || fail "22 rejection: expected the zero-dim rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_add('[1,2'::fractal_vector, '[1,2,3]'::fractal_vector);" 2>&1)
+  grep <<< "$r" -q "expected ']'" \
+    && pass "22 rejection: fractal_vector_add rejects an unclosed vector literal" \
+    || fail "22 rejection: expected an unclosed-literal rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_dims(('[' || repeat('1,', 32767) || '1]')::fractal_vector);" 2>&1)
+  grep <<< "$r" -q "dimension exceeds maximum 32767" \
+    && pass "22 rejection: fractal_vector rejects dim>32767 (32768-element literal)" \
+    || fail "22 rejection: expected the 32767-cap rejection, got: $r"
+  # NULL required vector args: the portfolio entries are deliberately
+  # non-STRICT (their optional args use SQL-side NULL defaults), so a NULL
+  # mu/cov can legally arrive — and the C entry used to deref it (backend
+  # SIGSEGV; the in-function guard now rejects cleanly). One case per
+  # entry; mu-null on _portfolio, mu-null on both multimodal entries, and
+  # cov-null on _portfolio.
+  r=$("${PSQL[@]}" -c "SELECT fractal_optimize_portfolio(NULL, '{0.5,0.5,0.5,0.5}'::float8[], 1);" 2>&1)
+  grep <<< "$r" -q "fractal_optimize_portfolio: mu must not be NULL" \
+    && pass "22 rejection: fractal_optimize_portfolio rejects a NULL mu" \
+    || fail "22 rejection: expected the NULL-mu rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_optimize_portfolio('{0.25,0.25,0.5,0}'::float8[], NULL, 1);" 2>&1)
+  grep <<< "$r" -q "fractal_optimize_portfolio: cov must not be NULL" \
+    && pass "22 rejection: fractal_optimize_portfolio rejects a NULL cov" \
+    || fail "22 rejection: expected the NULL-cov rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_optimize_portfolio_multimodal(NULL, '{0.25,0.25,0.5,0}'::float8[], 2, 1, 0.25, 0.9, 42, false, 'diffusion');" 2>&1)
+  grep <<< "$r" -q "fractal_optimize_portfolio_multimodal: mu must not be NULL" \
+    && pass "22 rejection: fractal_optimize_portfolio_multimodal rejects a NULL mu" \
+    || fail "22 rejection: expected the multimodal NULL-mu rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_optimize_portfolio_multimodal_pareto(NULL, '{0.25,0.25,0.5,0}'::float8[], 2, 1, 8, 42, false, 'diffusion');" 2>&1)
+  grep <<< "$r" -q "fractal_optimize_portfolio_multimodal_pareto: mu must not be NULL" \
+    && pass "22 rejection: fractal_optimize_portfolio_multimodal_pareto rejects a NULL mu" \
+    || fail "22 rejection: expected the pareto NULL-mu rejection, got: $r"
+
+  # ---- T-H: fractal_vector_to_json() / fractal_vector_from_text(). A
+  # JSON and a text front end for the native vector type. The JSON is
+  # built on the type's OWN text rendering, deliberately NOT on a float8[]
+  # round trip (which would widen 0.1f to 0.10000000149011612) -- that
+  # difference is the point, so it is asserted rather than assumed.
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_to_json('[1,2,3]'::fractal_vector)::text;" 2>&1)
+  [[ "$(tr -d '[:space:]' <<< "$r")" = "[1,2,3]" ]] \
+    && pass "22 vector-json: to_json renders a vector as a JSON array" \
+    || fail "22 vector-json: expected '[1, 2, 3]', got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_to_json('[0.1,0.2,0.3]'::fractal_vector) = '[0.1,0.2,0.3]'::fractal_vector::text::jsonb;" 2>&1)
+  [[ "$r" = "t" ]] \
+    && pass "22 vector-json: to_json is exactly the type's own text rendering parsed as JSON" \
+    || fail "22 vector-json: expected the JSON to match the type's own text rendering, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_to_json('[0.1]'::fractal_vector) <> to_jsonb('[0.1]'::fractal_vector::float8[]);" 2>&1)
+  [[ "$r" = "t" ]] \
+    && pass "22 vector-json: the JSON is deliberately NOT the float8[] round trip (which would widen 0.1f)" \
+    || fail "22 vector-json: expected the JSON to differ from the float8[] round trip, got: $r"
+
+  # from_text: exactly two accepted forms -- a JSON/pgvector-style array
+  # and a plain comma-separated list -- each with and without spaces after
+  # the commas.
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_text('[1,2,3]')::text;" 2>&1)
+  [[ "$r" = "[1,2,3]" ]] \
+    && pass "22 vector-text: from_text parses the array form" \
+    || fail "22 vector-text: expected '[1,2,3]', got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_text('1,2,3')::text;" 2>&1)
+  [[ "$r" = "[1,2,3]" ]] \
+    && pass "22 vector-text: from_text parses the plain list form" \
+    || fail "22 vector-text: expected '[1,2,3]' from the list form, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_text('[1, 2, 3]')::text;" 2>&1)
+  [[ "$r" = "[1,2,3]" ]] \
+    && pass "22 vector-text: from_text tolerates spaces after the commas" \
+    || fail "22 vector-text: expected '[1,2,3]', got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_text('1, 2, 3')::text;" 2>&1)
+  [[ "$r" = "[1,2,3]" ]] \
+    && pass "22 vector-text: from_text tolerates spaces in the list form" \
+    || fail "22 vector-text: expected '[1,2,3]', got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_text(NULL) IS NULL, fractal_vector_to_json(NULL::fractal_vector) IS NULL;" 2>&1)
+  [[ "$r" = "t|t" ]] \
+    && pass "22 vector-text: NULL in, NULL out (both helpers are STRICT)" \
+    || fail "22 vector-text: expected t|t, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_text('');" 2>&1)
+  grep <<< "$r" -q "an empty string is not a vector" \
+    && pass "22 vector-text: an empty string is rejected" \
+    || fail "22 vector-text: expected the empty-string rejection, got: $r"
+  # The rejection has to name the offending text EXACTLY: PL/pgSQL's RAISE
+  # placeholder is a bare "%", so a "%s" in the format string used to
+  # leave a stray literal "s" inside the quoted text ("[1,2,x]s").
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_text('[1,2,x]');" 2>&1)
+  grep <<< "$r" -q 'could not parse "\[1,2,x\]" as a vector array' \
+    && pass "22 vector-text: a malformed array is rejected and the offending text is quoted exactly" \
+    || fail "22 vector-text: expected the array-form parse rejection, got: $r"
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_text('1,2,x');" 2>&1)
+  grep <<< "$r" -q 'could not parse "1,2,x" as a vector' \
+    && pass "22 vector-text: a malformed list is rejected and the offending text is quoted exactly" \
+    || fail "22 vector-text: expected the list-form parse rejection, got: $r"
+  # The round trip is compared on the type's own text rendering --
+  # fractal_vector has no "=" operator, and the rendering is the exact
+  # thing the round trip has to preserve.
+  r=$("${PSQL[@]}" -c "SELECT fractal_vector_from_text(fractal_vector_to_json('[0.1,0.2,0.3]'::fractal_vector)::text)::text = '[0.1,0.2,0.3]'::fractal_vector::text;" 2>&1)
+  [[ "$r" = "t" ]] \
+    && pass "22 vector-text: a JSON round trip through the type's own rendering is lossless" \
+    || fail "22 vector-text: expected the round trip to be lossless, got: $r"
   return 0
 }
 
@@ -2017,6 +3065,75 @@ gate_23_agents() {
   grep <<< "$r2" -q 'no rows in' \
     && pass "23 agents: anomaly_triage raises a clean ERROR when the filter matches no rows" \
     || fail "23 agents: expected a no-rows ERROR, got: $r2"
+
+  # --- 2b: agent_partial_reasoning_fail pair (PL/pgSQL engines) --------
+  # The standard flag-off/flag-on pair (the sqlite repo's gate-29
+  # convention), exercised on engine A. TWO DIFFERENT failure shapes, kept
+  # apart on purpose -- the drift half needs no plugin at all, so the pair
+  # isolates exactly the raise-vs-partial difference:
+  #   (a) a SETUP mistake -- the reasoning plugin does not load at all
+  #       (SQLSTATE 55000). This is NEVER softened: with the flag on the
+  #       engine still raises (a missing plugin is a configuration mistake,
+  #       not a transient endpoint failure -- the sibling sqlite engine
+  #       hard-errors on it too).
+  #   (b) a TRANSIENT endpoint failure -- the mock plugin LOADS, but its
+  #       dispatch fails (the FSQL_BT_FORCE_FAIL sentinel). This IS
+  #       softened: the engine returns its computed data half with the LLM
+  #       column NULL and a SEPARATE reasoning_step_failed column carrying
+  #       the error text (the two-column contract, matching the sibling's
+  #       {"<llm>":null,"reasoning_step_failed":"<error>"} JSON shape).
+  pg_set_guc fractalsql.reasoning_plugin "'/nonexistent/fractalsql_bt_broken.so'" "/nonexistent/fractalsql_bt_broken.so" \
+    || { fail "23 agents: could not point reasoning_plugin at the broken path"; pg_swap_plugin "$MOCK" >/dev/null; return; }
+
+  local r2b; r2b=$("${PSQL[@]}" -c "
+     SELECT threat_score FROM fractal_agent_anomaly_triage(
+       'bt_agents_logs','metric','ts','host','host-1',32);" 2>&1)
+  grep <<< "$r2b" -q 'reasoning' \
+    && pass "23 agents: agent_partial_reasoning_fail off -- the reasoning failure raises through the engine" \
+    || fail "23 agents: expected the reasoning failure to raise with the flag off, got: $r2b"
+
+  pg_set_guc fractalsql.agent_partial_reasoning_fail on on \
+    || { fail "23 agents: could not set agent_partial_reasoning_fail=on"; pg_swap_plugin "$MOCK" >/dev/null; return; }
+
+  # (a) the setup mistake is NOT softened by the flag.
+  local r2b2; r2b2=$("${PSQL[@]}" -c "
+     SELECT threat_score FROM fractal_agent_anomaly_triage(
+       'bt_agents_logs','metric','ts','host','host-1',32);" 2>&1)
+  grep <<< "$r2b2" -q 'reasoning plugin' \
+    && pass "23 agents: a missing reasoning plugin is a setup mistake -- it still raises with the flag on" \
+    || fail "23 agents: expected the setup mistake to raise even with the flag on, got: $r2b2"
+
+  # (b) the transient dispatch failure IS softened, into the two-column
+  # contract: threat_score is still the REAL computed drift float,
+  # triage_summary is NULL, and reasoning_step_failed carries the raw error
+  # text (no 'reasoning_step_failed: ' prefix -- the column name says it).
+  pg_swap_plugin "$MOCK" >/dev/null
+  echo "FSQL_BT_FORCE_FAIL" > /tmp/fractalsql_bt_sql.txt
+  local r2c; r2c=$("${PSQL[@]}" -c "
+     SELECT (threat_score IS NOT NULL),
+            (triage_summary IS NULL),
+            (reasoning_step_failed IS NOT NULL),
+            (reasoning_step_failed <> ''),
+            (reasoning_step_failed NOT LIKE 'reasoning_step_failed:%')
+       FROM fractal_agent_anomaly_triage(
+       'bt_agents_logs','metric','ts','host','host-1',32);" 2>&1)
+  grep <<< "$r2c" -q '^t|t|t|t|t$' \
+    && pass "23 agents: agent_partial_reasoning_fail on -- data half (real drift float) + NULL LLM column + reasoning_step_failed error column" \
+    || fail "23 agents: expected the partial row (drift float + NULL triage_summary + reasoning_step_failed), got: $r2c"
+
+  # flag off + the same transient failure: the failure propagates again.
+  pg_set_guc fractalsql.agent_partial_reasoning_fail off off \
+    || { fail "23 agents: could not reset agent_partial_reasoning_fail=off"; pg_swap_plugin "$MOCK" >/dev/null; return; }
+  local r2d; r2d=$("${PSQL[@]}" -c "
+     SELECT threat_score FROM fractal_agent_anomaly_triage(
+       'bt_agents_logs','metric','ts','host','host-1',32);" 2>&1)
+  grep <<< "$r2d" -q 'dispatch failed' \
+    && pass "23 agents: agent_partial_reasoning_fail off -- a transient reasoning failure still raises" \
+    || fail "23 agents: expected the transient reasoning failure to raise with the flag off, got: $r2d"
+
+  # Restore the resting state the rest of the gate (and gate 24+) expects.
+  pg_swap_plugin "$MOCK" >/dev/null
+  echo "gap-analysis-canary" > /tmp/fractalsql_bt_sql.txt
 
   # --- 3: fractal_agent_allocate happy path --------------------------
   # allocation is the REAL optimizer jsonb {sharpe, weights}; sharpe is the REAL
@@ -2133,6 +3250,37 @@ gate_23_agents() {
   grep <<< "$r7e" -q "metric must be 'cosine' or 'l2'" \
     && pass "23 agents: outlier_intercept rejects an unknown metric (no silent fallback)" \
     || fail "23 agents: expected a metric rejection, got: $r7e"
+
+  # --- 7b: the metric column is exposed (sibling parity) --------------
+  # The metric the engine actually used must be visible in the returned
+  # columns, not only inside the nested payload -- the sibling's shape is
+  # {"intercepted":..,"metric":..,"reason":..}.
+  local r7f; r7f=$("${PSQL[@]}" -c "
+     SELECT metric FROM fractal_agent_outlier_intercept(
+       ARRAY[1,0,0]::float8[], 'bt_agents_badstates','emb', 0.5);" 2>&1)
+  grep <<< "$r7f" -q '^cosine$' \
+    && pass "23 agents: outlier_intercept exposes the metric it actually used (metric column)" \
+    || fail "23 agents: expected metric=cosine in the outlier_intercept row, got: $r7f"
+
+  local r7g; r7g=$("${PSQL[@]}" -c "
+     SELECT metric FROM fractal_agent_outlier_intercept(
+       ARRAY[0.05,0,0]::float8[], 'bt_agents_badstates','emb', 0.5, 'l2');" 2>&1)
+  grep <<< "$r7g" -q '^l2$' \
+    && pass "23 agents: outlier_intercept reports the caller-chosen l2 metric in the metric column" \
+    || fail "23 agents: expected metric=l2 in the outlier_intercept row, got: $r7g"
+
+  # --- 7c: a NULL input vector is an ARGUMENT fault, not a data fault --
+  # The engine rejects the NULL itself with invalid_parameter_value
+  # (22023) instead of letting it reach the vector math, where it would
+  # surface as a generic low-level data error.
+  local r7h; r7h=$("${PSQL[@]}" -c "
+     DO \$\$ BEGIN
+       PERFORM * FROM fractal_agent_route_task(NULL::float8[], 'bt_agents_caps','emb','capability_name', 10);
+     EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'sqlstate=%', SQLSTATE;
+     END \$\$;" 2>&1)
+  grep <<< "$r7h" -q 'sqlstate=22023' \
+    && pass "23 agents: a NULL input vector is an argument error (22023), not a vector-math data error" \
+    || fail "23 agents: expected a 22023 argument error for a NULL input vector, got: $r7h"
 
   # --- 8: fractal_agent_recall_hybrid happy path + guard --------------
   # Real session_ids + real content from the fixture (NOT the stub's
@@ -2648,6 +3796,26 @@ gate_23_agents() {
   grep <<< "$r18d" -q 'series is required' \
     && pass "23 agents: regime_triage raises a clean ERROR when series is NULL" \
     || fail "23 agents: expected a series-required ERROR, got: $r18d"
+  # An EXPLICIT NULL for the trailing optional numeric parameter must fall
+  # back to the documented default (0.5), like the sibling's da_opt_double.
+  # PostgreSQL substitutes a DEFAULT only for an OMITTED argument, so
+  # without the COALESCE the comparison `abs(dv) > drift_threshold` yields
+  # NULL, drift_detected comes back NULL (not true) and the prompt text is
+  # left with a hole. The series is the SAME shape as the passing assertion
+  # above -- only the third argument differs (NULL instead of 0.5) -- so the
+  # assertion isolates the COALESCE and nothing else. (A two-level step
+  # series is NOT usable here: the core drift estimator rejects a degenerate
+  # series with rc=-1 before the threshold is ever compared.)
+  local r18e; r18e=$("${PSQL[@]}" -c "
+     SELECT drift_detected::text FROM fractal_agent_regime_triage(
+       (SELECT array_agg(v ORDER BY t) FROM (
+          SELECT t, CASE WHEN t<48 THEN 4.0+1.5*sin(t*0.31)+(random()-0.5)*0.8
+                         ELSE 4.0+3.0*sin(t*1.4)+(random()-0.5)*0.4 END AS v
+          FROM generate_series(1,96) t) s),
+       64, NULL);" 2>&1)
+  grep <<< "$r18e" -q '^true$' \
+    && pass "23 agents: regime_triage applies the 0.5 default when drift_threshold is an explicit NULL" \
+    || fail "23 agents: expected drift_detected=t for an explicit-NULL drift_threshold, got: '$r18e'"
 
   # Restore session state: diversify was enabled by recommend_diverse and
   # feedback_audit (feedback_audit self-disables, but belt-and-suspenders).
@@ -2730,6 +3898,929 @@ gate_21_fuzz_smoke() {
     fi
     rm -f "$bin"
   done
+  return 0
+}
+
+
+# Table runner shared by gates 44 and 45. Reads "label<TAB>expect<TAB>sql"
+# rows from stdin: expect = "E:<text>" (an ERROR whose message contains the
+# fixed string <text>), "OK" (no ERROR) or "NONE" (either). A row also fails
+# if the backend crashes or the connection drops. A "@mock" row swaps the
+# reasoning mock back in. $1 = gate number for messages; sets TBL_N/TBL_BAD.
+TBL_N=0; TBL_BAD=0
+sql_table_run() {
+  local gate="$1" label expect sql out i
+  TBL_N=0; TBL_BAD=0
+  while IFS=$'\t' read -r label expect sql; do
+    [[ -z "$label" ]] && continue
+    if [[ "$label" = "@mock" ]]; then pg_swap_plugin "$MOCK" >/dev/null; continue; fi
+    # "@plugin<TAB>VAR": swap the reasoning plugin to the path in $VAR (MOCK, EMBED, ...).
+    # "@guc<TAB>name<TAB>value": ALTER SYSTEM SET fractalsql.<name> = value, then wait for it.
+    if [[ "$label" = "@plugin" ]]; then pg_swap_plugin "${!expect}" >/dev/null; continue; fi
+    if [[ "$label" = "@guc" ]]; then
+      pg_set_guc "fractalsql.$expect" "'$sql'" "$sql" >/dev/null \
+        || fail "$gate error_paths: could not set fractalsql.$expect"
+      continue
+    fi
+    TBL_N=$((TBL_N + 1))
+    # </dev/null: psql would otherwise consume the rest of this loop's input.
+    out=$("${PSQL[@]}" -c "$sql" 2>&1 </dev/null | awk '
+      /^WARNING:/ { skip = 1; next }                 # drop a WARNING and its HINT/DETAIL/CONTEXT tail
+      skip && /^(HINT|DETAIL|CONTEXT|QUERY):/ { next }
+      { skip = 0; print }')
+    # Record mode (FSQL_TBL_DISCOVER=<file>): write each row's actual output
+    # instead of asserting, to (re)pin a table's expected messages.
+    if [[ -n "${FSQL_TBL_DISCOVER:-}" ]]; then
+      printf '%s => %s\n' "$label" "$(tr '\n' ' ' <<<"$out" | tr -cd '\11\40-\176' | cut -c1-230)" >> "$FSQL_TBL_DISCOVER"
+      grep -q "server closed the connection\|in recovery mode\|not yet accepting" <<<"$out" \
+        && for i in $(seq 1 60); do "${PSQL[@]}" -c "SELECT 1" >/dev/null 2>&1 </dev/null && break; sleep 0.5; done
+      continue
+    fi
+    if grep -q "server closed the connection\|terminated by signal\|in recovery mode\|not yet accepting" <<<"$out"; then
+      fail "$gate error_paths: '$label' CRASHED the backend: $(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+      TBL_BAD=$((TBL_BAD + 1))
+      for i in $(seq 1 $((60 * TIMEOUT_MULT))); do "${PSQL[@]}" -c "SELECT 1" >/dev/null 2>&1 </dev/null && break; sleep 0.5; done
+      continue
+    fi
+    case "$expect" in
+      E:*) grep -qF -- "${expect#E:}" <<<"$out" && grep -q "^ERROR:" <<<"$out" \
+             || { fail "$gate error_paths: '$label' expected ERROR containing '${expect#E:}', got: $(tr '\n' ' ' <<<"$out" | cut -c1-160)"; TBL_BAD=$((TBL_BAD + 1)); } ;;
+      OK)  grep -q "^ERROR:" <<<"$out" \
+             && { fail "$gate error_paths: '$label' expected success, got: $(tr '\n' ' ' <<<"$out" | cut -c1-160)"; TBL_BAD=$((TBL_BAD + 1)); } ;;
+      *)   ;;
+    esac
+  done
+}
+
+# Gate 44: error-path / argument-validation sweep. One table of calls, each
+# with the outcome it must produce: "E:<text>" = must raise an ERROR whose
+# message contains <text> (fixed-string match); "OK" = must complete without
+# an ERROR; "NONE" = either is acceptable. EVERY row additionally fails if the
+# backend crashes or the connection drops -- the property the engine's
+# non-STRICT entry points (PG_GETARG_* on a NULL datum) are most exposed to.
+# Exists chiefly for branch coverage of the argument-validation/ereport paths
+# that the happy-path gates never reach, and doubles as a regression table:
+# it found fractal_sql_agent(NULL) and fractal_sql_agent(q, NULL, 0) taking
+# the backend down. fractal_optimize_portfolio_multimodal[_pareto] and the
+# audit functions check the enterprise tier before anything else, so only
+# their NULL-argument guards are reachable here; gate 45 covers the rest
+# against the mock enterprise core.
+gate_44_error_paths() {
+  "${PSQL[@]}" -c "
+     DROP TABLE IF EXISTS bt_g44;
+     CREATE TABLE bt_g44 (id int, emb float8[]);
+     INSERT INTO bt_g44 VALUES (1, ARRAY[0.1,0.2]), (2, ARRAY[0.3,0.2]), (3, ARRAY[0.9,0.8]);
+     DROP TABLE IF EXISTS bt_g44x, bt_g44e;
+     CREATE TABLE bt_g44x (id serial PRIMARY KEY, emb float8[]);
+     INSERT INTO bt_g44x (emb) VALUES (ARRAY[0.1,0.2,0.3,0.4]), (ARRAY[0.4,0.3,0.2,0.1]), (ARRAY[0.9,0.8,0.7,0.6]);
+     CREATE TABLE bt_g44e (id serial PRIMARY KEY, emb float8[], txt text);
+     INSERT INTO bt_g44e (emb, txt) VALUES (ARRAY[0.1,0.2,0.3], 'a'), (ARRAY[0.3,0.2,0.1], 'b'), (ARRAY[0.9,0.8,0.7], 'c');
+     DROP TABLE IF EXISTS bt_g44n, bt_g44d, bt_g44z, bt_g44t, bt_g44v, bt_g44w;
+     CREATE TABLE bt_g44n (id serial PRIMARY KEY, emb float8[]);
+     INSERT INTO bt_g44n (emb) VALUES (NULL), (ARRAY[0.1,0.2]), (NULL);
+     CREATE TABLE bt_g44d (id serial PRIMARY KEY, emb float8[]);
+     INSERT INTO bt_g44d (emb) VALUES (ARRAY[0.1,0.2]), (ARRAY[0.1,0.2,0.3]);
+     CREATE TABLE bt_g44z (id serial PRIMARY KEY, emb float8[]);
+     CREATE TABLE bt_g44t (id serial PRIMARY KEY, emb text);
+     INSERT INTO bt_g44t (emb) VALUES ('x'), ('y');
+     CREATE TABLE bt_g44v (id serial PRIMARY KEY, emb fractal_vector);
+     INSERT INTO bt_g44v (emb) VALUES ('[0.1,0.2]'), ('[0.3,0.2]'), ('[0.9,0.8]');
+     CREATE TABLE bt_g44w (id serial PRIMARY KEY, emb fractal_vector);
+     INSERT INTO bt_g44w (emb) VALUES ('[0.1,0.2]'), ('[0.1,0.2,0.3]');
+  " >/dev/null 2>&1
+  # The embed-dependent rows (agents, fractal_embed) need the embed mock and a
+  # configured endpoint; the "@mock" row below swaps the reasoning mock back
+  # in for the rows after it (fractal_sql_agent).
+  pg_swap_plugin "$EMBED" >/dev/null
+  pg_set_guc fractalsql.http_embed_url "'http://unused/embeddings'" "http://unused/embeddings" \
+    || { fail "44 error_paths: http_embed_url GUC did not take effect"; return; }
+
+  sql_table_run 44 <<'FSQL_TBL_ROWS'
+search_agent null query	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_search_agent(NULL,'bt_g44e','emb')
+search_agent null table	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_search_agent('q',NULL,'emb')
+search_agent null col	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_search_agent('q','bt_g44e',NULL)
+search_agent pop 0	E:fractalsql: search failed	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',0,15)
+search_agent iter 0	OK	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',50,0)
+search_agent null pop	OK	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',NULL,NULL)
+rag null q	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_rag_agent(NULL,'bt_g44e','emb')
+rag null tbl	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_rag_agent('q',NULL,'emb')
+rag null col	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_rag_agent('q','bt_g44e',NULL)
+rag bad filter	OK	SELECT * FROM fractal_rag_agent('q','bt_g44e','emb','not json')
+plan null state	OK	SELECT * FROM fractal_agent_plan_explore(NULL,'bt_g44e','emb',3)
+plan null tbl	OK	SELECT * FROM fractal_agent_plan_explore('s',NULL,'emb',3)
+plan null col	OK	SELECT * FROM fractal_agent_plan_explore('s','bt_g44e',NULL,3)
+plan null br	OK	SELECT * FROM fractal_agent_plan_explore('s','bt_g44e','emb',NULL)
+plan br 0	E:fractalsql: plan_explore search failed (rc=-1)	SELECT * FROM fractal_agent_plan_explore('s','bt_g44e','emb',0)
+traj null tbl	OK	SELECT * FROM fractal_agent_trajectory_predict(NULL,'emb',1,3)
+traj null col	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e',NULL,1,3)
+traj null id	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',NULL,3)
+traj null steps	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',1,NULL)
+traj steps 0	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',1,0)
+traj steps big	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',1,100000)
+traj missing id	E:fractal_agent_trajectory_predict: no row in bt_g44e with id = 999999	SELECT * FROM fractal_agent_trajectory_predict('bt_g44e','emb',999999,3)
+loop null id	E:fractalsql: agent_id, state_log, and dim are required	SELECT * FROM fractal_agent_detect_loop(NULL,ARRAY[1,2]::float8[],1)
+loop null log	E:fractalsql: agent_id, state_log, and dim are required	SELECT * FROM fractal_agent_detect_loop('a',NULL,1)
+loop null dim	E:fractalsql: agent_id, state_log, and dim are required	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],NULL)
+loop dim 0	E:fractalsql: dim must be > 0	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],0)
+loop bits 0	E:fractalsql: n_bits must be > 0	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,0)
+loop bits huge	OK	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,100000)
+loop ragged	E:fractalsql: state_log length (3) is not a multiple of dim (2)	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2,3]::float8[],2)
+loop neg thresh	E:fractalsql: hamming_threshold must be >= 0	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,64,0.0,-1)
+loop null opts	OK	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2,1,2,1,2]::float8[],2,NULL,NULL,NULL)
+loop empty log	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_agent_detect_loop('a','{}'::float8[],1)
+loop null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,NULL]::float8[],1)
+loop 2d array	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[[1,2],[3,4]]::float8[],1)
+fingerprint bits 0	E:fractalsql: n_bits must be > 0	SELECT fractal_state_fingerprint(ARRAY[1,2]::float8[],0)
+fingerprint empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_state_fingerprint('{}'::float8[],8)
+cycle null elem	E:fractalsql: fingerprints array must not contain NULLs	SELECT * FROM fractal_cycle_detect(ARRAY['\x01',NULL]::bytea[])
+cycle ragged	E:fractalsql: every fingerprint must be the same length (index 0 was 1 b	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x0102']::bytea[])
+cycle neg thresh	E:fractalsql: hamming_threshold must be >= 0	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x01']::bytea[],-1)
+cycle empty	E:fractalsql: fingerprints array must not be empty	SELECT * FROM fractal_cycle_detect('{}'::bytea[])
+cycle repeat	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x02','\x01','\x02','\x01','\x02']::bytea[])
+cycle thresh	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x00','\x01','\x00','\x01','\x00','\x01']::bytea[],2)
+cycle 2d	OK	SELECT * FROM fractal_cycle_detect(ARRAY[['\x01','\x02'],['\x03','\x04']]::bytea[])
+dfa null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_dimension_dfa(ARRAY[1,NULL,3]::float8[])
+dfa empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_dimension_dfa('{}'::float8[])
+boxcount dim 0	E:fractalsql: points length (4) must be a positive multiple of dim (0)	SELECT fractal_dimension_boxcount(ARRAY[1,2,3,4]::float8[],0)
+boxcount ragged	E:fractalsql: points length (3) must be a positive multiple of dim (2)	SELECT fractal_dimension_boxcount(ARRAY[1,2,3]::float8[],2)
+boxcount few	E:fractalsql: fractal_dimension_boxcount rc=-1 (need >= 8 points, non-de	SELECT fractal_dimension_boxcount(ARRAY[1,2]::float8[],2)
+cp thresh	E:fractalsql: fractal_change_point_detect rc=-1 (need n >= 2*win, thresh	SELECT fractal_change_point_detect(ARRAY[1,2,3,4,5,6,7,8]::float8[],2,-1.0,16)
+cp max_points 0	E:fractalsql: max_points must be > 0	SELECT fractal_change_point_detect(ARRAY[1,2,3,4,5,6,7,8]::float8[],2,2.0,0)
+cp short	E:fractalsql: fractal_change_point_detect rc=-1 (need n >= 2*win, thresh	SELECT fractal_change_point_detect(ARRAY[1,2,3]::float8[],16,2.0,16)
+cp null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_change_point_detect(ARRAY[1,NULL,3]::float8[],2,2.0,16)
+periodogram short	E:fractalsql: fractal_periodogram rc=-1 (need n >= 4)	SELECT * FROM fractal_periodogram(ARRAY[1,2,3]::float8[],4)
+periodogram peaks 0	E:fractalsql: max_peaks must be > 0	SELECT * FROM fractal_periodogram(ARRAY[1,2,3,4,5,6,7,8]::float8[],0)
+periodogram null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_periodogram(ARRAY[1,NULL,3,4,5]::float8[],4)
+tda dim 0	E:fractalsql: dim must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],0)
+tda ragged	E:fractalsql: points length (3) must be a multiple of dim (2)	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3]::float8[],2)
+tda max_dim	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,-1)
+tda thresh	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,1,-1.0)
+tda bars	E:fractalsql: max_h0_bars must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,1,1.0,0)
+drift win	E:fractalsql: window must be > 0	SELECT fractal_dimension_drift(ARRAY[1,2,3,4]::float8[],0)
+drift short	E:fractalsql: fractal_dimension_drift rc=-1 (need n >= window + 16, wind	SELECT fractal_dimension_drift(ARRAY[1,2,3,4]::float8[],64)
+portfolio k 0	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],0)
+portfolio k big	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],5)
+portfolio cov len	E:fractalsql: cov length (3) must be n_assets^2 (n_assets=2, expected 4)	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0]::float8[],1)
+portfolio bad mode	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'bogus')	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,NULL,false,'bogus')
+portfolio null k	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],NULL)
+portfolio null mu	E:fractalsql: fractal_optimize_portfolio: mu must not be NULL	SELECT fractal_optimize_portfolio(NULL,ARRAY[1,0,0,1]::float8[],1)
+portfolio null cov	E:fractalsql: fractal_optimize_portfolio: cov must not be NULL	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2]::float8[],NULL,1)
+portfolio null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_optimize_portfolio(ARRAY[0.1,NULL]::float8[],ARRAY[1,0,0,1]::float8[],1)
+portfolio ok	OK	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,7)
+portfolio ok obl	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'cauchy')	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,7,true,'cauchy')
+mm null mu	E:fractalsql: fractal_optimize_portfolio_multimodal: mu must not be NULL	SELECT fractal_optimize_portfolio_multimodal(NULL,ARRAY[1,0,0,1]::float8[],1)
+mm null cov	E:fractalsql: fractal_optimize_portfolio_multimodal: cov must not be NUL	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],NULL,1)
+pareto null mu	E:fractalsql: fractal_optimize_portfolio_multimodal_pareto: mu must not 	SELECT fractal_optimize_portfolio_multimodal_pareto(NULL,ARRAY[1,0,0,1]::float8[],1)
+pareto null cov	E:fractalsql: fractal_optimize_portfolio_multimodal_pareto: cov must not	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],NULL,1)
+subset null vals	E:fractalsql: item_values, upper_bounds, and k must not be NULL	SELECT fractal_optimize_subset(NULL,ARRAY[1,1]::float8[],1)
+subset null ub	E:fractalsql: item_values, upper_bounds, and k must not be NULL	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],NULL,1)
+subset null k	E:fractalsql: item_values, upper_bounds, and k must not be NULL	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1,1]::float8[],NULL)
+subset k 0	E:fractalsql: k must satisfy 1 <= k <= n_items (2)	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1,1]::float8[],0)
+subset ub len	E:fractalsql: upper_bounds length (1) must match item_values length (2)	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1]::float8[],1)
+subset prev len	E:fractalsql: prev_weights length (1) must match item_values length (2)	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1,1]::float8[],1,ARRAY[1]::float8[])
+subset neg pen	E:fractalsql: fractal_optimize_subset rc=-1 (check upper_bounds in [0,1]	SELECT fractal_optimize_subset(ARRAY[1,2]::float8[],ARRAY[1,1]::float8[],1,NULL,-1.0)
+subset ok prev	OK	SELECT fractal_optimize_subset(ARRAY[1,2,3]::float8[],ARRAY[1,1,1]::float8[],2,ARRAY[0.5,0.5,0]::float8[],0.1,3)
+subset ok nulls	OK	SELECT fractal_optimize_subset(ARRAY[1,2,3]::float8[],ARRAY[1,1,1]::float8[],2,NULL,NULL,NULL)
+vascular null	OK	SELECT fractal_vascular_network(NULL,ARRAY[0,1]::int4[],ARRAY[1.0]::float8[])
+vascular null edges	OK	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],NULL,ARRAY[1.0]::float8[])
+vascular null arc	OK	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,1]::int4[],NULL)
+vascular coords len	E:fractalsql: node_coords length must be a multiple of 3	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0]::float8[],ARRAY[0,1]::int4[],ARRAY[1.0]::float8[])
+vascular edges odd	E:fractalsql: edges length must be a multiple of 2	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,1,0]::int4[],ARRAY[1.0]::float8[])
+vascular arc len	E:fractalsql: edge_arc_length length (2) must equal edges length / 2 (1)	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,1]::int4[],ARRAY[1.0,2.0]::float8[])
+vascular idx range	E:fractalsql: fractal_vascular_network rc=-1	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,9]::int4[],ARRAY[1.0]::float8[])
+vascular neg idx	E:fractalsql: index array entries must be >= 0 (got -1)	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[-1,1]::int4[],ARRAY[1.0]::float8[])
+vascular neg arc	E:fractalsql: fractal_vascular_network rc=-1	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,1]::int4[],ARRAY[-1.0]::float8[])
+folding null	OK	SELECT fractal_cortical_folding(NULL,ARRAY[0,1,2]::int4[])
+folding null faces	OK	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],NULL)
+folding verts len	E:fractalsql: vertices length must be a multiple of 3	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0]::float8[],ARRAY[0,1,2]::int4[])
+folding faces len	E:fractalsql: faces length must be a multiple of 3	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],ARRAY[0,1]::int4[])
+folding idx range	E:fractalsql: fractal_cortical_folding rc=-1 (need >= 4 non-coplanar ver	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],ARRAY[0,1,9]::int4[])
+nerve null	OK	SELECT fractal_nerve_plexus_metric(NULL,2,ARRAY[0,1]::int4[])
+nerve null dim	OK	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],NULL,ARRAY[0,1]::int4[])
+nerve null edges	OK	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],2,NULL)
+nerve dim 0	E:fractalsql: node_coords length (4) must be a positive multiple of dim 	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],0,ARRAY[0,1]::int4[])
+nerve ragged	E:fractalsql: node_coords length (3) must be a positive multiple of dim 	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1]::float8[],2,ARRAY[0,1]::int4[])
+nerve edges odd	E:fractalsql: edges length must be a multiple of 2	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],2,ARRAY[0,1,0]::int4[])
+nerve idx range	E:fractalsql: fractal_nerve_plexus_metric rc=-1	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],2,ARRAY[0,7]::int4[])
+morph null	OK	SELECT fractal_morphological_complexity(NULL,2)
+morph null dim	OK	SELECT fractal_morphological_complexity(ARRAY[0,0,1,0]::float8[],NULL)
+morph dim 0	E:fractalsql: points length (4) must be a positive multiple of dim (0)	SELECT fractal_morphological_complexity(ARRAY[0,0,1,0]::float8[],0)
+morph ragged	E:fractalsql: points length (3) must be a positive multiple of dim (2)	SELECT fractal_morphological_complexity(ARRAY[0,0,1]::float8[],2)
+store_morph null	OK	SELECT fractal_store_morphology(NULL,ARRAY[1,2]::float8[])
+store_morph null arr	OK	SELECT fractal_store_morphology(1,NULL)
+store_morph empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_store_morphology(1,'{}'::float8[])
+mine null	OK	SELECT * FROM fractal_mine_topology_negatives(NULL,3)
+mine null k	OK	SELECT * FROM fractal_mine_topology_negatives(ARRAY[1,2]::float8[],NULL)
+mine k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_mine_topology_negatives(ARRAY[1,2]::float8[],0)
+mine empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_mine_topology_negatives('{}'::float8[],3)
+telemetry null tbl	OK	SELECT * FROM fractal_search_telemetry(NULL,'emb',ARRAY[1,2]::float8[],1)
+telemetry null col	OK	SELECT * FROM fractal_search_telemetry('bt_g44',NULL,ARRAY[1,2]::float8[],1)
+telemetry null q	OK	SELECT * FROM fractal_search_telemetry('bt_g44','emb',NULL,1)
+telemetry null k	OK	SELECT * FROM fractal_search_telemetry('bt_g44','emb',ARRAY[1,2]::float8[],NULL)
+telemetry k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_search_telemetry('bt_g44','emb',ARRAY[1,2]::float8[],0)
+telemetry no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_search_telemetry('bt_nope','emb',ARRAY[1,2]::float8[],1)
+telemetry no col	E:column "nope" does not exist	SELECT * FROM fractal_search_telemetry('bt_g44','nope',ARRAY[1,2]::float8[],1)
+telemetry empty q	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_search_telemetry('bt_g44','emb','{}'::float8[],1)
+telemetry dim mismatch	E:fractalsql: bt_g44.emb row 0 has dim 2, expected 3 (match the query)	SELECT * FROM fractal_search_telemetry('bt_g44','emb',ARRAY[1,2,3]::float8[],1)
+telemetry ok	OK	SELECT * FROM fractal_search_telemetry('bt_g44','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid null tbl	OK	SELECT * FROM fractal_hybrid_clinical_search(NULL,'emb',ARRAY[1,2]::float8[],ARRAY['(0,1)'],1)
+hybrid null col	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44',NULL,ARRAY[1,2]::float8[],ARRAY['(0,1)'],1)
+hybrid null q	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',NULL,ARRAY['(0,1)'],1)
+hybrid null ids	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],NULL,1)
+hybrid null k	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY['(0,1)'],NULL)
+hybrid k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY['(0,1)'],0)
+hybrid bad ctid	E:fractalsql: doc_ids cohort matched no rows in bt_g44.emb	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY['zzz'],1)
+hybrid empty ids	E:fractalsql: doc_ids must be a 1-D non-null text[] of ctid strings	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],'{}'::text[],1)
+hybrid null id elem	E:fractalsql: doc_ids must be a 1-D non-null text[] of ctid strings	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY[NULL]::text[],1)
+hybrid no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_hybrid_clinical_search('bt_nope','emb',ARRAY[1,2]::float8[],ARRAY['(0,1)'],1)
+hybrid ok	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[0.1,0.2]::float8[],ARRAY['(0,1)','(0,2)'],2)
+traj_search null tbl	OK	SELECT * FROM fractal_search_trajectory(NULL,'emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],1)
+traj_search null col	OK	SELECT * FROM fractal_search_trajectory('bt_g44',NULL,ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],1)
+traj_search null base	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',NULL::float8[],ARRAY[1,2]::float8[],1)
+traj_search null cur	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[1,2]::float8[],NULL::float8[],1)
+traj_search null k	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],NULL)
+traj_search k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],0)
+traj_search dim mismatch	E:fractalsql: baseline_vector dim (2) must match current_vector dim (3)	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[1,2]::float8[],ARRAY[1,2,3]::float8[],1)
+traj_search no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_search_trajectory('bt_nope','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],1)
+traj_search ok	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+traj_search_fv null tbl	OK	SELECT * FROM fractal_search_trajectory(NULL,'emb','[1,2]'::fractal_vector,'[1,2]'::fractal_vector,1)
+traj_search_fv null base	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb',NULL::fractal_vector,'[1,2]'::fractal_vector,1)
+traj_search_fv k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_search_trajectory('bt_g44','emb','[1,2]'::fractal_vector,'[1,2]'::fractal_vector,0)
+traj_search_fv ok	OK	SELECT * FROM fractal_search_trajectory('bt_g44','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2]'::fractal_vector,2)
+cross null tbl	OK	SELECT * FROM fractal_cross_modal_search(NULL,'emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],0.5,1)
+cross null m	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',NULL::float8[],ARRAY[1,2]::float8[],0.5,1)
+cross null c	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],NULL::float8[],0.5,1)
+cross null alpha	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],NULL,1)
+cross alpha lo	E:fractalsql: alpha_weight must be in [0,1]	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],-0.1,1)
+cross alpha hi	E:fractalsql: alpha_weight must be in [0,1]	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],1.1,1)
+cross k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2]::float8[],0.5,0)
+cross dim mismatch	E:fractalsql: bt_g44x.emb row 0 has dim 4, expected 5 (match the query)	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[1,2]::float8[],ARRAY[1,2,3]::float8[],0.5,1)
+cross ok	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],0.5,2)
+cross_fv null tbl	OK	SELECT * FROM fractal_cross_modal_search(NULL,'emb','[1,2]'::fractal_vector,'[1,2]'::fractal_vector,0.5,1)
+cross_fv alpha	E:fractalsql: alpha_weight must be in [0,1]	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb','[1,2]'::fractal_vector,'[1,2]'::fractal_vector,2.0,1)
+cross_fv ok	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2]'::fractal_vector,0.5,2)
+explore bad col	E:column "nope" does not exist	SELECT * FROM fractal_search_explore('bt_g44','nope',ARRAY[1,2]::float8[])
+explore no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_search_explore('bt_nope','emb',ARRAY[1,2]::float8[])
+explore bad opts	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[1,2]::float8[],'[1]'::jsonb)
+explore pop	E:fractalsql: population_size 0 out of range [1, 100000]	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[1,2]::float8[],'{"population_size":0}')
+explore ok	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"iterations":3,"population_size":5}')
+explore str opt	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"iterations":"x"}')
+search iter 0	E:fractalsql: iterations 0 out of range [1, 10000]	SELECT fractal_search(ARRAY[1,2]::float8[],0)
+search pop 0	E:fractalsql: population_size 0 out of range [1, 100000]	SELECT fractal_search(ARRAY[1,2]::float8[],5,0)
+search empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_search('{}'::float8[])
+search_dbg diff	E:fractalsql: diffusion_factor 99 out of range [1, 32]	SELECT fractal_search_debug(ARRAY[1,2]::float8[],5,5,99)
+embed null	E:fractal_embed: input must not be NULL	SELECT fractal_embed(NULL)
+embed empty	E:fractal_embed: dispatch failed (rc=-1): fractalsql: invalid arguments 	SELECT fractal_embed('')
+schema bad tbl	E:fractal_schema_context: table "bt_nope" not found or not visible	SELECT fractal_schema_context(ARRAY['bt_nope'])
+schema empty arr	E:fractal_schema_context: no visible tables found	SELECT fractal_schema_context('{}'::text[])
+schema null elem	E:fractal_schema_context: no visible tables found	SELECT fractal_schema_context(ARRAY[NULL]::text[])
+schema hint	OK	SELECT length(fractal_schema_context(ARRAY['bt_g44'],'embedding'))>0
+t2s null tables elem	E:fractal_schema_context: no visible tables found	SELECT fractal_text_to_sql('q',ARRAY[NULL]::text[])
+getcfg unknown	E:fractalsql_get_config: unknown config key "nope"	SELECT fractalsql_get_config('nope')
+getcfg secret	OK	SELECT fractalsql_get_config('enterprise_ledger_key')
+getcfg prefixed	OK	SELECT fractalsql_get_config('fractalsql.http_url')
+getcfg null	E:fractalsql_get_config: the key must not be NULL	SELECT fractalsql_get_config(NULL)
+getcfg all keys	OK	SELECT k,fractalsql_get_config(k) FROM unnest(ARRAY['reasoning_plugin','http_url','http_model','http_allow_plaintext','http_embed_url','http_embed_model','http_think','http_think_provider','http_native_url','http_num_ctx','text_to_sql_max_attempts','text_to_sql_allowed_statements','text_to_sql_use_review','enterprise_lib','enterprise_require_signature','agent_partial_reasoning_fail']) k
+setcfg unknown	E:fractalsql_set_config: unknown config key "nope"	SELECT fractalsql_set_config('nope','x')
+setcfg null val	E:fractalsql_set_config: the value must not be NULL	SELECT fractalsql_set_config('agent_partial_reasoning_fail',NULL)
+setcfg bad bool	E:fractalsql_set_config: "agent_partial_reasoning_fail" expects a boolea	SELECT fractalsql_set_config('agent_partial_reasoning_fail','maybe')
+setcfg ok	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','on')
+setcfg reload	E:fractalsql_set_config: "fractalsql.http_url" is reload-scoped and cann	SELECT fractalsql_set_config('http_url','http://x')
+setcfg secret	NONE	SELECT fractalsql_set_config('enterprise_ledger_key','abc')
+setcfg max_attempts bad	E:fractalsql_set_config: "text_to_sql_max_attempts" expects an integer	SELECT fractalsql_set_config('text_to_sql_max_attempts','abc')
+setcfg prefixed	OK	SELECT fractalsql_set_config('fractalsql.agent_partial_reasoning_fail','off')
+ledger verify kind	OK	SELECT fractal_ledger_verify(3)
+ledger verify null	OK	SELECT fractal_ledger_verify(NULL)
+ledger verify 1	OK	SELECT fractal_ledger_verify(1)
+ledger verify 2	OK	SELECT fractal_ledger_verify(2)
+diversify bad win	E:fractalsql: fsql_diversify_set_params rc=-1:	SELECT fractal_diversify_set_params(-1)
+diversify bad stall	E:fractalsql: fsql_diversify_set_params rc=-1:	SELECT fractal_diversify_set_params(NULL,-1.0)
+diversify bad sigma	OK	SELECT fractal_diversify_set_params(NULL,NULL,0.0)
+diversify bad weight	E:fractalsql: fsql_diversify_set_params rc=-1:	SELECT fractal_diversify_set_params(NULL,NULL,NULL,-1.0)
+feedback bad kind	E:fractalsql: kind must be one of 'dwell', 'positive', 'negative' (got '	SELECT fractal_feedback_report(1,'bogus')
+feedback null	E:fractalsql: kind must be one of 'dwell', 'positive', 'negative' (got '	SELECT fractal_feedback_report(NULL,'click')
+feedback dwell	OK	SELECT fractal_feedback_report(1,'dwell',-5)
+feedback ok	E:fractalsql: kind must be one of 'dwell', 'positive', 'negative' (got '	SELECT fractal_feedback_report(1,'click')
+isolate null	OK	SELECT fractal_isolate_background(NULL)
+isolate bad	E:fractalsql: result_handle must be >= 0	SELECT fractal_isolate_background(-1)
+explain	OK	SELECT fractal_explain_result()
+collapse	OK	SELECT fractal_detect_collapse()
+vec from_text bad	E:fractal_vector_from_text: could not parse "abc" as a vector: invalid i	SELECT fractal_vector_from_text('abc')
+vec from_text empty	E:fractal_vector_from_text: could not parse "[]" as a vector array: frac	SELECT fractal_vector_from_text('[]')
+vec from_text nan	OK	SELECT fractal_vector_from_text('[NaN,1]')
+vec from_array null elem	E:fractal_vector: source float8[] must be 1-D non-null	SELECT fractal_vector_from_float8_array(ARRAY[1,NULL]::float8[])
+vec from_array empty	E:fractal_vector: source float8[] must be 1-D non-null	SELECT fractal_vector_from_float8_array('{}'::float8[])
+vec dim mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_l2_distance('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec add mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_add('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec sub mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_sub('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec cos mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_cosine_distance('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec cos zero	OK	SELECT fractal_vector_cosine_distance('[0,0]'::fractal_vector,'[1,2]'::fractal_vector)
+vec cossim zero	OK	SELECT fractal_vector_cosine_similarity('[0,0]'::fractal_vector,'[0,0]'::fractal_vector)
+vec ip mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_negative_inner_product('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec l2sq mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_l2_squared('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector)
+vec lp p0	E:fractal_vector_lp_distance: p must be > 0	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[1,2]'::fractal_vector,0)
+vec lp mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[1,2,3]'::fractal_vector,2)
+vec lp inf	OK	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[3,5]'::fractal_vector,'Infinity')
+vec lp 1	OK	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[3,5]'::fractal_vector,1)
+vec lp 3	OK	SELECT fractal_vector_lp_distance('[1,2]'::fractal_vector,'[3,5]'::fractal_vector,3)
+vec normalize zero	OK	SELECT fractal_vector_normalize('[0,0]'::fractal_vector)
+vec scale nan	OK	SELECT fractal_vector_scale('[1,2]'::fractal_vector,'NaN')
+vec scale inf	OK	SELECT fractal_vector_scale('[1,2]'::fractal_vector,'Infinity')
+vec typmod bad	E:fractal_vector dimension mismatch: column is fractal_vector(3), value 	SELECT '[1,2]'::fractal_vector(3)
+vec typmod zero	E:fractal_vector dimension must be between 1 and 32767, got 0	SELECT '[1,2]'::fractal_vector(0)
+vec typmod huge	E:fractal_vector dimension must be between 1 and 32767, got 100000	SELECT '[1,2]'::fractal_vector(100000)
+vec typmod ok	OK	SELECT '[1,2]'::fractal_vector(2)
+vec cast explicit	E:fractal_vector dimension mismatch: column is fractal_vector(3), value 	SELECT fractal_vector('[1,2]'::fractal_vector,3,true)
+vec quant zero	OK	SELECT fractal_vector_quantize_int8('[0,0]'::fractal_vector)
+vec quant ok	OK	SELECT fractal_vector_quantize_int8('[0.5,-1]'::fractal_vector)
+vec hamming empty	E:fractal_vector_hamming_distance rc=-1	SELECT fractal_vector_hamming_distance('\x'::bytea,'\x'::bytea)
+vec to_json	OK	SELECT fractal_vector_to_json('[1,2]'::fractal_vector)
+vec recv send	OK	SELECT fractal_vector_send('[1,2]'::fractal_vector)
+vec in bad bracket	E:fractal_vector: expected '[' at start of "1,2"	SELECT '1,2'::fractal_vector
+vec in trailing	E:fractal_vector: unexpected trailing data in "[1,2]x"	SELECT '[1,2]x'::fractal_vector
+vec in dims big	OK	SELECT fractal_vector_dims(('['||(SELECT string_agg('1',',') FROM generate_series(1,17000))||']')::fractal_vector)
+vec in too long	E:fractal_vector: dimension exceeds maximum 32767	SELECT ('['||(SELECT string_agg('1',',') FROM generate_series(1,100000))||']')::fractal_vector
+vec typmod_in bad	E:fractal_vector: invalid dimension "abc"	SELECT 'x'::fractal_vector(abc)
+vec in leading ws	OK	SELECT '   [1,2]'::fractal_vector
+vec in inner ws	OK	SELECT '[ 1 , 2 ]   '::fractal_vector
+vec in empty	E:fractal_vector dimension must be between 1 and 32767, got 0	SELECT '[]'::fractal_vector
+vec in empty ws	E:fractal_vector dimension must be between 1 and 32767, got 0	SELECT '[  ]'::fractal_vector
+vec in blank	E:fractal_vector: expected '[' at start of "   "	SELECT '   '::fractal_vector
+vec in empty str	E:fractal_vector: expected '[' at start of ""	SELECT ''::fractal_vector
+vec in bad number	E:fractal_vector: invalid number in "[1,abc]"	SELECT '[1,abc]'::fractal_vector
+vec in trailing comma	E:fractal_vector: invalid number in "[1,]"	SELECT '[1,]'::fractal_vector
+vec in no close	E:fractal_vector: expected ']' in "[1,2"	SELECT '[1,2'::fractal_vector
+vec in no close ws	E:fractal_vector: expected ']' in "[1 2]"	SELECT '[1 2]'::fractal_vector
+vec in 64 elems	OK	SELECT fractal_vector_dims(('['||(SELECT string_agg('1',',') FROM generate_series(1,64))||']')::fractal_vector)
+vec in 65 elems	OK	SELECT fractal_vector_dims(('['||(SELECT string_agg('1',',') FROM generate_series(1,65))||']')::fractal_vector)
+vec in 200 elems	OK	SELECT fractal_vector_dims(('['||(SELECT string_agg('1',',') FROM generate_series(1,200))||']')::fractal_vector)
+vec in exp inf	NONE	SELECT '[1e999,-1e999]'::fractal_vector
+vec typmod two args	E:fractal_vector typmod takes exactly one non-NULL parameter	SELECT '[1,2]'::fractal_vector(1,2)
+vec typmod junk	E:fractal_vector: invalid dimension "2x"	SELECT '[1,2]'::fractal_vector('2x')
+vec typmod empty str	E:fractal_vector: invalid dimension ""	SELECT '[1,2]'::fractal_vector('')
+vec typmod negative	E:fractal_vector dimension must be between 1 and 32767, got -1	SELECT '[1,2]'::fractal_vector(-1)
+vec typmod null	NONE	SELECT '[1,2]'::fractal_vector(NULL)
+vec hamming long eq	OK	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),decode(repeat('ab',200),'hex'))
+vec hamming long diff	OK	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),decode(repeat('ba',200),'hex'))
+vec hamming long mismatch	E:fractal_vector_hamming_distance: length mismatch (200 vs 201 bytes)	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),decode(repeat('ab',201),'hex'))
+vec hamming short vs long	E:fractal_vector_hamming_distance: length mismatch (1 vs 200 bytes)	SELECT fractal_vector_hamming_distance('\x01'::bytea,decode(repeat('ab',200),'hex'))
+vec hamming long vs short	E:fractal_vector_hamming_distance: length mismatch (200 vs 1 bytes)	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),'\x01'::bytea)
+vec quant binary long	OK	SELECT length(fractal_vector_quantize_binary(('['||(SELECT string_agg(((i%2)*2-1)::text,',') FROM generate_series(1,1100) i)||']')::fractal_vector))
+vec quant int8 long	OK	SELECT (fractal_vector_quantize_int8(('['||(SELECT string_agg((i-70)::text,',') FROM generate_series(1,140) i)||']')::fractal_vector)).scale
+vectorizer create no table	E:relation "bt_nope" does not exist	SELECT fractal_vectorizer_create('bt_nope','t','e')
+vectorizer create no col	E:column "nope" of relation "bt_g44e" does not exist	SELECT fractal_vectorizer_create('bt_g44e','nope','emb')
+vectorizer pause missing	E:fractal_vectorizer_pause: no vectorizer with id 999999	SELECT fractal_vectorizer_pause(999999)
+vectorizer resume missing	E:fractal_vectorizer_resume: no vectorizer with id 999999	SELECT fractal_vectorizer_resume(999999)
+vectorizer drop missing	E:fractal_vectorizer_drop: no vectorizer with id 999999	SELECT fractal_vectorizer_drop(999999)
+vectorizer null	E:fractal_vectorizer_pause: no vectorizer with id <NULL>	SELECT fractal_vectorizer_pause(NULL)
+vectorizer queue 0	OK	SELECT fractal_vectorizer_process_queue(0)
+vectorizer queue neg	E:LIMIT must not be negative	SELECT fractal_vectorizer_process_queue(-1)
+rag ok	OK	SELECT count(*)>=0 FROM fractal_rag_agent('q','bt_g44e','emb')
+rag meta filter	OK	SELECT count(*)>=0 FROM fractal_rag_agent('q','bt_g44e','emb','{"id":1}')
+search_agent ok	OK	SELECT count(*)>=0 FROM fractal_search_agent('q','bt_g44e','emb')
+search_agent small	E:fractalsql: search failed	SELECT count(*)>=0 FROM fractal_search_agent('q','bt_g44e','emb',1,1)
+plan ok	OK	SELECT count(*) FROM fractal_agent_plan_explore('q','bt_g44e','emb',2)
+plan no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_agent_plan_explore('q','bt_nope','emb',2)
+plan no col	E:column "nope" does not exist	SELECT * FROM fractal_agent_plan_explore('q','bt_g44e','nope',2)
+traj ok	OK	SELECT predicted_state_vector IS NOT NULL FROM fractal_agent_trajectory_predict('bt_g44e','emb',1,2)
+embed ok	OK	SELECT array_length(fractal_embed('hello'),1)
+embed huge	E:fractal_embed: input exceeds the 4 MiB limit	SELECT fractal_embed(repeat('A', 4*1024*1024 + 1))
+vectorizer create ok	OK	SELECT fractal_vectorizer_create('bt_g44e','txt','emb')
+cycle empty elems	E:fractalsql: fsql_cycle_detect_init rc=-1	SELECT * FROM fractal_cycle_detect(ARRAY['\x','\x']::bytea[])
+cycle thresh huge	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x01']::bytea[],100000)
+cycle long ok	OK	SELECT * FROM fractal_cycle_detect(ARRAY[decode(repeat('ab',200),'hex'),decode(repeat('ab',200),'hex'),decode(repeat('ab',200),'hex'),decode(repeat('ab',200),'hex')]::bytea[])
+cycle long mismatch	E:fractalsql: every fingerprint must be the same length (index 0 was 200	SELECT * FROM fractal_cycle_detect(ARRAY[decode(repeat('ab',200),'hex'),decode(repeat('ab',201),'hex')]::bytea[])
+cycle first null	E:fractalsql: fingerprints array must not contain NULLs	SELECT * FROM fractal_cycle_detect(ARRAY[NULL,'\x01']::bytea[])
+cycle long null	E:fractalsql: fingerprints array must not contain NULLs	SELECT * FROM fractal_cycle_detect(ARRAY[decode(repeat('ab',200),'hex'),NULL]::bytea[])
+cycle short mismatch long	E:fractalsql: every fingerprint must be the same length (index 0 was 1 b	SELECT * FROM fractal_cycle_detect(ARRAY['\x01',decode(repeat('ab',200),'hex')]::bytea[])
+cycle abab	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x010203','\x040506','\x010203','\x040506','\x010203','\x040506','\x010203','\x040506']::bytea[])
+cycle thresh near	OK	SELECT * FROM fractal_cycle_detect(ARRAY['\x00','\x01','\x00','\x01','\x00','\x01']::bytea[],4)
+loop one state	E:fractalsql: state_log must contain at least 2 states	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],2)
+loop repeating	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(v) FROM (SELECT CASE WHEN i%2=0 THEN 1.0 ELSE 2.0 END AS v FROM generate_series(1,80) i) s),2)
+loop wander	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(sin(i*1.7)+i*0.05) FROM generate_series(1,96) i),2)
+loop thresh	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(sin(i*1.3)) FROM generate_series(1,64) i),4,64,1.0,8)
+setcfg http_num_ctx=abc	E:fractalsql_set_config: "http_num_ctx" expects an integer	SELECT fractalsql_set_config('http_num_ctx','abc')
+setcfg http_num_ctx=99999999999999999999	E:fractalsql_set_config: "http_num_ctx" expects an integer	SELECT fractalsql_set_config('http_num_ctx','99999999999999999999')
+setcfg http_num_ctx=-5	E:fractalsql_set_config: "http_num_ctx" must be between 0 and 1048576	SELECT fractalsql_set_config('http_num_ctx','-5')
+setcfg http_num_ctx=2000000	E:fractalsql_set_config: "http_num_ctx" must be between 0 and 1048576	SELECT fractalsql_set_config('http_num_ctx','2000000')
+setcfg http_num_ctx=4096	E:fractalsql_set_config: "fractalsql.http_num_ctx" is reload-scoped and 	SELECT fractalsql_set_config('http_num_ctx','4096')
+setcfg text_to_sql_max_attempts=0	E:fractalsql_set_config: "text_to_sql_max_attempts" must be between 1 an	SELECT fractalsql_set_config('text_to_sql_max_attempts','0')
+setcfg text_to_sql_max_attempts=11	E:fractalsql_set_config: "text_to_sql_max_attempts" must be between 1 an	SELECT fractalsql_set_config('text_to_sql_max_attempts','11')
+setcfg text_to_sql_max_attempts=3x	E:fractalsql_set_config: "text_to_sql_max_attempts" expects an integer	SELECT fractalsql_set_config('text_to_sql_max_attempts','3x')
+setcfg text_to_sql_max_attempts=3	E:fractalsql_set_config: "fractalsql.text_to_sql_max_attempts" is reload	SELECT fractalsql_set_config('text_to_sql_max_attempts','3')
+setcfg text_to_sql_allowed_statements=bogus	E:fractalsql_set_config: "text_to_sql_allowed_statements" must be one of	SELECT fractalsql_set_config('text_to_sql_allowed_statements','bogus')
+setcfg text_to_sql_allowed_statements=select	E:fractalsql_set_config: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractalsql_set_config('text_to_sql_allowed_statements','select')
+setcfg text_to_sql_allowed_statements=select_insert_update	E:fractalsql_set_config: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractalsql_set_config('text_to_sql_allowed_statements','select_insert_update')
+setcfg text_to_sql_use_review=maybe	E:fractalsql_set_config: "text_to_sql_use_review" expects a boolean	SELECT fractalsql_set_config('text_to_sql_use_review','maybe')
+setcfg text_to_sql_use_review=on	E:fractalsql_set_config: "fractalsql.text_to_sql_use_review" is reload-s	SELECT fractalsql_set_config('text_to_sql_use_review','on')
+setcfg http_allow_plaintext=no	E:fractalsql_set_config: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractalsql_set_config('http_allow_plaintext','no')
+setcfg http_allow_plaintext=y	E:fractalsql_set_config: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractalsql_set_config('http_allow_plaintext','y')
+setcfg too long	E:fractalsql_set_config: "http_url" is too long	SELECT fractalsql_set_config('http_url',repeat('x',9000))
+setcfg upper key	E:fractalsql_set_config: "fractalsql.http_url" is reload-scoped and cann	SELECT fractalsql_set_config('FractalSQL.HTTP_URL','http://x')
+setcfg long key	E:fractalsql_set_config: unknown config key "kkkkkkkkkkkkkkkkkkkkkkkkkkk	SELECT fractalsql_set_config(repeat('k',200),'x')
+setcfg bool on	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','on')
+setcfg bool 1	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','1')
+setcfg bool true	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','true')
+setcfg bool yes	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','yes')
+setcfg bool t	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','t')
+setcfg bool y	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','y')
+setcfg bool TRUE	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','TRUE')
+setcfg bool off	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','off')
+setcfg bool 0	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','0')
+setcfg bool false	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','false')
+setcfg bool no	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','no')
+setcfg bool f	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','f')
+setcfg bool n	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','n')
+setcfg bool Off	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','Off')
+getcfg reasoning_plugin	OK	SELECT fractalsql_get_config('reasoning_plugin')
+getcfg http_model	OK	SELECT fractalsql_get_config('http_model')
+getcfg http_embed_url	OK	SELECT fractalsql_get_config('http_embed_url')
+getcfg http_think	OK	SELECT fractalsql_get_config('http_think')
+getcfg enterprise_lib	OK	SELECT fractalsql_get_config('enterprise_lib')
+getcfg http_token	OK	SELECT fractalsql_get_config('http_token')
+telemetry empty	E:fractalsql: no corpus rows to search	SELECT * FROM fractal_search_telemetry('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid empty	E:fractalsql: doc_ids cohort matched no rows in bt_g44z.emb	SELECT * FROM fractal_hybrid_clinical_search('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44z),ARRAY['(0,1)']),2)
+explore empty	E:fractalsql: bt_g44z.emb has no rows to explore	SELECT count(*) FROM fractal_search_explore('bt_g44z','emb',ARRAY[0.1,0.2]::float8[])
+traj_search empty	E:fractalsql: no corpus rows to search	SELECT * FROM fractal_search_trajectory('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross empty	E:fractalsql: no corpus rows to search	SELECT * FROM fractal_cross_modal_search('bt_g44z','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+telemetry null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_search_telemetry('bt_g44n','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid null vec	E:fractalsql: NULL vector at cohort row 0	SELECT * FROM fractal_hybrid_clinical_search('bt_g44n','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44n),ARRAY['(0,1)']),2)
+explore null vec	E:fractalsql: NULL vector at row 0	SELECT count(*) FROM fractal_search_explore('bt_g44n','emb',ARRAY[0.1,0.2]::float8[])
+traj_search null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_search_trajectory('bt_g44n','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_cross_modal_search('bt_g44n','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+telemetry ragged dims	E:fractalsql: bt_g44d.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_search_telemetry('bt_g44d','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid ragged dims	E:fractalsql: bt_g44d.emb cohort row 1 has dim 3, expected 2 (match the 	SELECT * FROM fractal_hybrid_clinical_search('bt_g44d','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44d),ARRAY['(0,1)']),2)
+explore ragged dims	E:fractalsql: bt_g44d.emb row 1 has dim 3, expected 2 (match the query)	SELECT count(*) FROM fractal_search_explore('bt_g44d','emb',ARRAY[0.1,0.2]::float8[])
+traj_search ragged dims	E:fractalsql: bt_g44d.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_search_trajectory('bt_g44d','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross ragged dims	E:fractalsql: bt_g44d.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_cross_modal_search('bt_g44d','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+telemetry text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_search_telemetry('bt_g44t','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid text col	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_hybrid_clinical_search('bt_g44t','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44t),ARRAY['(0,1)']),2)
+explore text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT count(*) FROM fractal_search_explore('bt_g44t','emb',ARRAY[0.1,0.2]::float8[])
+traj_search text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_search_trajectory('bt_g44t','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_cross_modal_search('bt_g44t','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+telemetry mixed fvec dims	E:fractalsql: bt_g44w.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_search_telemetry('bt_g44w','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid mixed fvec dims	E:fractalsql: bt_g44w.emb cohort row 1 has dim 3, expected 2 (match the 	SELECT * FROM fractal_hybrid_clinical_search('bt_g44w','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44w),ARRAY['(0,1)']),2)
+explore mixed fvec dims	E:fractalsql: bt_g44w.emb row 1 has dim 3, expected 2 (match the query)	SELECT count(*) FROM fractal_search_explore('bt_g44w','emb',ARRAY[0.1,0.2]::float8[])
+traj_search mixed fvec dims	E:fractalsql: bt_g44w.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_search_trajectory('bt_g44w','emb',ARRAY[0.1,0.2]::float8[],ARRAY[0.3,0.2]::float8[],2)
+cross mixed fvec dims	E:fractalsql: bt_g44w.emb row 1 has dim 3, expected 2 (match the query)	SELECT * FROM fractal_cross_modal_search('bt_g44w','emb',ARRAY[0.1]::float8[],ARRAY[0.2]::float8[],0.5,2)
+search_agent empty	E:fractalsql: no rows found in bt_g44z.emb	SELECT * FROM fractal_search_agent('q','bt_g44z','emb')
+rag empty	E:fractalsql: no rows found in bt_g44z.emb	SELECT * FROM fractal_rag_agent('q','bt_g44z','emb')
+plan empty	E:fractalsql: no rows found in bt_g44z.emb	SELECT * FROM fractal_agent_plan_explore('q','bt_g44z','emb',2)
+search_agent null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_search_agent('q','bt_g44n','emb')
+rag null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_rag_agent('q','bt_g44n','emb')
+plan null vec	E:fractalsql: NULL vector at row 0	SELECT * FROM fractal_agent_plan_explore('q','bt_g44n','emb',2)
+search_agent ragged dims	E:fractalsql: bt_g44d.emb row 0 has dim 2, expected 3 (match the query)	SELECT * FROM fractal_search_agent('q','bt_g44d','emb')
+rag ragged dims	E:fractalsql: bt_g44d.emb row 0 has dim 2, expected 3 (match the query)	SELECT * FROM fractal_rag_agent('q','bt_g44d','emb')
+plan ragged dims	E:fractalsql: bt_g44d.emb row 0 has dim 2, expected 3 (match the query)	SELECT * FROM fractal_agent_plan_explore('q','bt_g44d','emb',2)
+search_agent text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_search_agent('q','bt_g44t','emb')
+rag text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_rag_agent('q','bt_g44t','emb')
+plan text col	E:fractalsql: bt_g44t.emb vector_col must be float8[] or fractal_vector,	SELECT * FROM fractal_agent_plan_explore('q','bt_g44t','emb',2)
+telemetry fvec	OK	SELECT * FROM fractal_search_telemetry('bt_g44v','emb',ARRAY[0.1,0.2]::float8[],2)
+hybrid fvec	OK	SELECT * FROM fractal_hybrid_clinical_search('bt_g44v','emb',ARRAY[0.1,0.2]::float8[],(SELECT array_agg(ctid::text) FROM bt_g44v),2)
+explore fvec	OK	SELECT count(*) FROM fractal_search_explore('bt_g44v','emb',ARRAY[0.1,0.2]::float8[])
+explore mmr low	OK	SELECT count(*) FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"mmr_lambda":-1}')
+explore mmr high	OK	SELECT count(*) FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"mmr_lambda":2}')
+traj baseline null	E:fractal_agent_trajectory_predict: baseline vector is NULL	SELECT * FROM fractal_agent_trajectory_predict('bt_g44n','emb',1,2)
+traj current null	E:fractal_agent_trajectory_predict: current vector is NULL	SELECT * FROM fractal_agent_trajectory_predict('bt_g44n','emb',2,2)
+traj dim mismatch	E:fractal_agent_trajectory_predict: baseline dim 2 != current dim 3	SELECT * FROM fractal_agent_trajectory_predict('bt_g44d','emb',1,2)
+traj empty table	E:fractal_agent_trajectory_predict: no row in bt_g44z with id = 1	SELECT * FROM fractal_agent_trajectory_predict('bt_g44z','emb',1,2)
+traj no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_agent_trajectory_predict('bt_nope','emb',1,2)
+traj fvec	OK	SELECT * FROM fractal_agent_trajectory_predict('bt_g44v','emb',1,2)
+traj fvec mixed	E:fractal_agent_trajectory_predict: baseline dim 2 != current dim 3	SELECT * FROM fractal_agent_trajectory_predict('bt_g44w','emb',1,2)
+mine ok	OK	SELECT * FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2]::float8[],2)
+store_morph ok	OK	SELECT fractal_store_morphology(1,ARRAY[0.1,0.2]::float8[])
+mine after store	OK	SELECT * FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2]::float8[],2)
+mine dim differs	OK	SELECT * FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2,0.3]::float8[],2)
+store_morph null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_store_morphology(2,ARRAY[0.1,NULL]::float8[])
+store_morph neg	E:fractalsql: doc_id must be >= 0	SELECT fractal_store_morphology(-1,ARRAY[0.1,0.2]::float8[])
+@mock		
+sql_agent null q	E:fractal_sql_agent: question must not be NULL	SELECT * FROM fractal_sql_agent(NULL)
+sql_agent neg retries	E:fractal_sql_agent: max_retries must be >= 1 (got -1)	SELECT * FROM fractal_sql_agent('q',NULL,-1)
+sql_agent ok	NONE	SELECT * FROM fractal_sql_agent('q')
+vascular 2d edges	E:fractalsql: index array must be 1-D non-null int4[]	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[[0,1],[1,0]]::int4[],ARRAY[1.0,1.0]::float8[])
+vascular null elem edges	E:fractalsql: index array must be 1-D non-null int4[]	SELECT fractal_vascular_network(ARRAY[0,0,0,1,0,0]::float8[],ARRAY[0,NULL]::int4[],ARRAY[1.0]::float8[])
+nerve 2d edges	E:fractalsql: index array must be 1-D non-null int4[]	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],2,ARRAY[[0,1],[1,0]]::int4[])
+feedback neg handle	E:fractalsql: result_handle must be >= 0	SELECT fractal_feedback_report(-1,'positive')
+isolate neg handle	NONE	SELECT fractal_isolate_background(-1)
+diversify dq	OK	SELECT fractal_diversify_current_dq()
+diversify p99	OK	SELECT fractal_diversify_overhead_p99_us()
+hybrid 2d ids	E:fractalsql: doc_ids must be a 1-D non-null text[]	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[0.1,0.2]::float8[],ARRAY[['(0,1)','(0,2)'],['(0,3)','(0,4)']],2)
+hybrid null elem ids	E:fractalsql: doc_ids must be a 1-D non-null text[]	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[0.1,0.2]::float8[],ARRAY['(0,1)',NULL],2)
+hybrid empty ids	E:fractalsql: doc_ids must be a 1-D non-null text[]	SELECT * FROM fractal_hybrid_clinical_search('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{}'::text[],2)
+trajectory fv k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_search_trajectory('bt_g44v','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2]'::fractal_vector,0)
+trajectory fv dims	E:fractalsql: baseline_vector dim (2) must match current_vector dim (3)	SELECT * FROM fractal_search_trajectory('bt_g44v','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2,0.1]'::fractal_vector,2)
+cross fv k 0	E:fractalsql: k must be > 0	SELECT * FROM fractal_cross_modal_search('bt_g44v','emb','[0.1,0.2]'::fractal_vector,'[0.3,0.2]'::fractal_vector,0.5,0)
+agent trajectory text col	NONE	SELECT * FROM fractal_agent_trajectory_predict('bt_g44t','emb',1,3)
+FSQL_TBL_ROWS
+  local n=$TBL_N bad=$TBL_BAD
+  [[ "$bad" -eq 0 ]] && pass "44 error_paths: all $n argument-validation / error-path / NULL-argument calls behaved as specified (no backend crash)"
+
+  "${PSQL[@]}" -c "SELECT fractal_vectorizer_drop(v.id) FROM fractal_vectorizers v WHERE v.source_table = 'bt_g44e';" >/dev/null 2>&1 </dev/null
+  "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_g44, bt_g44x, bt_g44e, bt_g44n, bt_g44d, bt_g44z, bt_g44t, bt_g44v, bt_g44w; DELETE FROM fractalsql_feature_store;" >/dev/null 2>&1 </dev/null
+  pg_swap_plugin "$MOCK" >/dev/null
+  return 0
+}
+
+# Gate 45: the enterprise-tier code paths that the dormant (community) state
+# cannot reach, driven through tests/mock_enterprise_core.c -- the same mock
+# gate 31 uses. Two halves:
+#   (a) the validation / error branches of fractal_optimize_portfolio_
+#       multimodal, _pareto and the audit functions, which check the tier
+#       BEFORE their arguments and so are unreachable from gate 44;
+#   (b) the ledger-tip authentication that fractal_ledger_load() runs before
+#       handing the persisted chain to the core (ledger_verify_latest):
+#       genesis/link/hash/MAC checks against hand-built kind=1 chains, with a
+#       real HMAC-SHA256 computed in SQL so the "valid" cases are genuinely
+#       valid (and so a regression that rejects good data fails too).
+# Self-contained: builds its own mock, points enterprise_lib at it, and puts
+# enterprise_lib / the ledger key back afterwards.
+gate_45_enterprise_paths() {
+  local mock_so="$TMPROOT/fractalsql_bt_g45_ent_${PG_MAJOR}.so"
+  rm -f "$mock_so" "$mock_so.sig"
+  cc -shared -fPIC -std=c99 -Iinclude tests/mock_enterprise_core.c -o "$mock_so" \
+    2>/tmp/fractalsql_bt_gate45_build.log \
+    || { cat /tmp/fractalsql_bt_gate45_build.log >&2; fail "45 enterprise_paths: mock .so failed to build"; return 0; }
+  "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;" >/dev/null 2>&1 </dev/null
+  if ! pg_set_guc fractalsql.enterprise_lib "'$mock_so'" "$mock_so"; then
+    fail "45 enterprise_paths: could not point enterprise_lib at the mock"; rm -f "$mock_so"; return 0
+  fi
+
+  # ---- (a) argument validation behind the tier check ------------------
+  sql_table_run 45 <<'FSQL_TBL_ROWS'
+mm null mu	E:fractalsql: fractal_optimize_portfolio_multimodal: mu must not be NULL	SELECT fractal_optimize_portfolio_multimodal(NULL,ARRAY[1,0,0,1]::float8[],1)
+mm null cov	E:fractalsql: fractal_optimize_portfolio_multimodal: cov must not be NUL	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],NULL,1)
+mm null k	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],NULL)
+mm k 0	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],0)
+mm cov len	E:fractalsql: cov length (3) must be n_assets^2 (n_assets=2, expected 4)	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0]::float8[],1)
+mm restarts 0	E:fractalsql: n_restarts must satisfy 1 <= n_restarts <= 64	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,0)
+mm overlap	NONE	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,2.0)
+mm quality	NONE	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,0.1,2.0)
+mm bad mode	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'bogus')	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,0.1,0.9,1,false,'bogus')
+mm ok	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'cauchy')	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,3,0.15,0.9,5,true,'cauchy')
+mm ok nulls	OK	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,NULL,NULL,NULL,NULL,NULL,NULL)
+pareto null mu	E:fractalsql: fractal_optimize_portfolio_multimodal_pareto: mu must not 	SELECT fractal_optimize_portfolio_multimodal_pareto(NULL,ARRAY[1,0,0,1]::float8[],1)
+pareto null cov	E:fractalsql: fractal_optimize_portfolio_multimodal_pareto: cov must not	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],NULL,1)
+pareto null k	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],NULL)
+pareto k 0	E:fractalsql: k must satisfy 1 <= k <= n_assets (2)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],0)
+pareto cov len	E:fractalsql: cov length (3) must be n_assets^2 (n_assets=2, expected 4)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0]::float8[],1)
+pareto restarts 0	E:fractalsql: n_restarts must satisfy 1 <= n_restarts <= 64	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,0)
+pareto front 0	E:fractalsql: max_front must satisfy 1 <= max_front <= n_restarts (2)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,0)
+pareto front big	E:fractalsql: max_front must satisfy 1 <= max_front <= n_restarts (2)	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,99)
+pareto bad mode	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'bogus')	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],1,2,2,1,false,'bogus')
+pareto ok	E:fractalsql: diffusion_mode must be 'gaussian' or 'levy' (got 'cauchy')	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,3,3,5,true,'cauchy')
+pareto ok nulls	OK	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2,NULL,NULL,NULL,NULL,NULL)
+audit_unpack null	OK	SELECT fractal_audit_unpack(NULL)
+audit_unpack short	E:invalid input syntax for type json	SELECT fractal_audit_unpack('\x00')
+audit_unpack garbage	E:invalid input syntax for type json	SELECT fractal_audit_unpack(decode(repeat('ab',64),'hex'))
+audit_log null	E:fractalsql: fractal_audit_log: entry_type and payload must not be NULL	SELECT fractal_audit_log(NULL,'{}')
+audit_log null payload	E:fractalsql: fractal_audit_log: entry_type and payload must not be NULL	SELECT fractal_audit_log('x',NULL)
+audit_log ok	OK	SELECT fractal_audit_log('g45.test', '{"n":1}'::jsonb)
+audit_log big	OK	SELECT fractal_audit_log('g45.test', jsonb_build_object('p', repeat('x', 200000)))
+audit_log keyed	OK	SET fractalsql.enterprise_ledger_key = 'g45-key'; SELECT fractal_audit_log('g45.keyed', '{"n":2}'::jsonb)
+audit_unpack json	OK	SELECT fractal_audit_unpack(convert_to('{"a":1}', 'UTF8'))
+audit_unpack not json	E:invalid input syntax for type json	SELECT fractal_audit_unpack(convert_to('not json', 'UTF8'))
+audit_unpack empty	E:invalid input syntax for type json	SELECT fractal_audit_unpack('\x'::bytea)
+audit_unpack big	OK	SELECT length(fractal_audit_unpack(convert_to('"' || repeat('x', 300000) || '"', 'UTF8'))::text)
+mm ok k=n	OK	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],2)
+pareto ok k=n	OK	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2]::float8[],ARRAY[1,0,0,1]::float8[],2)
+mm null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,NULL]::float8[],ARRAY[1,0,0,1]::float8[],1)
+pareto null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,NULL]::float8[],ARRAY[1,0,0,1]::float8[],1)
+FSQL_TBL_ROWS
+  [[ "$TBL_BAD" -eq 0 ]] \
+    && pass "45 enterprise_paths: all $TBL_N multimodal / pareto / audit validation calls behaved as specified (mock core loaded)"
+
+  # ---- (b) ledger tip authentication ----------------------------------
+  # Constraint-free ledger fixture (same shape and index as gate 31's) so
+  # rows the extension's own DDL would refuse (NULL hashes, short MACs) can
+  # be staged. bt_hmac() is a plain HMAC-SHA256 over the built-in sha256().
+  "${PSQL[@]}" -c "
+    DROP TABLE IF EXISTS fractalsql_ledger;
+    CREATE TABLE fractalsql_ledger (
+      id bigserial PRIMARY KEY, kind integer NOT NULL, blob bytea NOT NULL,
+      mac bytea, prev_hash bytea, entry_hash bytea,
+      sealed boolean NOT NULL DEFAULT false, updated timestamptz NOT NULL DEFAULT now());
+    CREATE INDEX IF NOT EXISTS fractalsql_ledger_kind_id_idx ON fractalsql_ledger (kind, id DESC);
+    CREATE OR REPLACE FUNCTION bt_put(p bytea, b bytea, m bytea) RETURNS bytea LANGUAGE plpgsql AS \$f\$
+    DECLARE h bytea := sha256(p || b || coalesce(m, '\\x'::bytea));
+    BEGIN
+      INSERT INTO fractalsql_ledger (kind, blob, mac, prev_hash, entry_hash) VALUES (1, b, m, p, h);
+      RETURN h;
+    END \$f\$;
+    CREATE OR REPLACE FUNCTION bt_hmac(k bytea, m bytea) RETURNS bytea LANGUAGE plpgsql IMMUTABLE AS \$f\$
+    DECLARE ik bytea := '\x'::bytea; ok bytea := '\x'::bytea; kk bytea := k; i int;
+    BEGIN
+      IF length(kk) > 64 THEN kk := sha256(kk); END IF;
+      kk := kk || decode(repeat('00', 64 - length(kk)), 'hex');
+      FOR i IN 0..63 LOOP
+        ik := ik || set_byte('\x00'::bytea, 0, get_byte(kk, i) # 54);
+        ok := ok || set_byte('\x00'::bytea, 0, get_byte(kk, i) # 92);
+      END LOOP;
+      RETURN sha256(ok || sha256(ik || m));
+    END \$f\$;" >/dev/null 2>&1 </dev/null
+  local zero="decode(repeat('00',32),'hex')"
+  # row builder: chain_row(prev, blob, mac_or_null) -> entry_hash is
+  # sha256(prev || blob [|| mac]).
+  local key="gate45-ledger-key"
+  sql_table_run 45 <<FSQL_TBL_ROWS
+tip empty	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT fractal_ledger_load()
+tip genesis ok	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01020304',NULL); SELECT fractal_ledger_load()
+tip genesis nonzero prev	E:fractalsql: ledger chain verification failed -- the sole entry's prev_	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(decode(repeat('11',32),'hex'),'\x01',NULL); SELECT fractal_ledger_load()
+tip chain ok	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); SELECT fractal_ledger_load()
+tip chain link broken	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',NULL); SELECT bt_put(decode(repeat('22',32),'hex'),'\x02',NULL); SELECT fractal_ledger_load()
+tip prior hash null	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,NULL); SELECT bt_put($zero,'\x02',NULL); SELECT fractal_ledger_load()
+tip prior hash short	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,'\x0011'); SELECT bt_put($zero,'\x02',NULL); SELECT fractal_ledger_load()
+tip blob tampered	E:fractalsql: ledger chain verification failed -- the latest entry's has	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x0102',NULL); UPDATE fractalsql_ledger SET blob='\x0103' WHERE kind=1; SELECT fractal_ledger_load()
+tip prev short	E:fractalsql: ledger chain verification failed -- stored prev_hash/entry	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01','\x0011',$zero); SELECT fractal_ledger_load()
+tip hash short	E:fractalsql: ledger chain verification failed -- stored prev_hash/entry	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,'\x0011'); SELECT fractal_ledger_load()
+tip entry_hash null	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,NULL); SELECT fractal_ledger_load()
+tip prev null	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',NULL,$zero); SELECT fractal_ledger_load()
+tip key, no mac	E:fractalsql: ledger MAC verification failed -- the persisted blob has n	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',NULL); SELECT fractal_ledger_load()
+tip key, mac short	E:fractalsql: ledger MAC verification failed -- stored MAC is 16 bytes, 	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',decode(repeat('cd',16),'hex')); SELECT fractal_ledger_load()
+tip key, mac wrong	E:fractalsql: ledger MAC verification failed -- the persisted QTL blob i	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',decode(repeat('cd',32),'hex')); SELECT fractal_ledger_load()
+tip key, mac valid	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); SELECT fractal_ledger_load()
+tip key, mac valid, blob tampered	E:fractalsql: ledger MAC verification failed -- the persisted QTL blob i	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); UPDATE fractalsql_ledger SET blob='\x02' WHERE kind=1; SELECT fractal_ledger_load()
+tip key, mac valid, hash tampered	E:fractalsql: ledger chain verification failed -- the latest entry's has	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); UPDATE fractalsql_ledger SET entry_hash=decode(repeat('ee',32),'hex') WHERE kind=1; SELECT fractal_ledger_load()
+tip nokey, mac present	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',decode(repeat('ab',32),'hex')); SELECT fractal_ledger_load()
+tip nokey, mac short	E:fractalsql: ledger MAC verification failed -- stored MAC is 16 bytes, 	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',decode(repeat('ab',16),'hex')); SELECT fractal_ledger_load()
+tip verify kind1 ok	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); SELECT fractal_ledger_verify(1)::text
+tip verify kind1 tampered	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); UPDATE fractalsql_ledger SET blob='\x09' WHERE kind=1 AND id=(SELECT min(id) FROM fractalsql_ledger WHERE kind=1); SELECT fractal_ledger_verify(1)::text
+migrate old schema	OK	DROP TABLE IF EXISTS fractalsql_ledger; CREATE TABLE fractalsql_ledger (kind int PRIMARY KEY, blob bytea); SELECT fractal_ledger_verify(1)
+migrate missing index	OK	DROP TABLE IF EXISTS fractalsql_ledger; CREATE TABLE fractalsql_ledger (id bigserial PRIMARY KEY, kind integer NOT NULL, blob bytea NOT NULL, mac bytea, prev_hash bytea NOT NULL, entry_hash bytea NOT NULL, sealed boolean NOT NULL DEFAULT false, updated timestamptz NOT NULL DEFAULT now()); SELECT fractal_ledger_verify(1)
+FSQL_TBL_ROWS
+  [[ "$TBL_BAD" -eq 0 ]] \
+    && pass "45 enterprise_paths: all $TBL_N ledger-tip authentication cases behaved as specified (genesis, link, hash, MAC, key/no-key)"
+
+  # ---- (c) enterprise libraries that are missing symbols -----------------
+  # One built without the optional multimodal symbols (an older enterprise
+  # build: the loader accepts it, the multimodal functions refuse), one
+  # without a required symbol (the loader refuses the whole library).
+  local mock_old="$TMPROOT/fractalsql_bt_g45_old_${PG_MAJOR}.so" mock_bad="$TMPROOT/fractalsql_bt_g45_bad_${PG_MAJOR}.so"
+  rm -f "$mock_old" "$mock_bad"
+  if cc -shared -fPIC -std=c99 -DMOCK_OMIT_MULTIMODAL -Iinclude tests/mock_enterprise_core.c -o "$mock_old" 2>/tmp/fractalsql_bt_gate45_build.log \
+     && cc -shared -fPIC -std=c99 -DMOCK_OMIT_AUDIT_UNPACK -Iinclude tests/mock_enterprise_core.c -o "$mock_bad" 2>>/tmp/fractalsql_bt_gate45_build.log; then
+    pg_set_guc fractalsql.enterprise_lib "'$mock_old'" "$mock_old" >/dev/null
+    sql_table_run 45 <<FSQL_TBL_ROWS
+old core multimodal	E:not available in this enterprise library	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2)
+old core pareto	E:not available in this enterprise library	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2)
+old core ledger still works	OK	SELECT fractal_ledger_truth_count()
+FSQL_TBL_ROWS
+    [[ "$TBL_BAD" -eq 0 ]] \
+      && pass "45 enterprise_paths: a core without the optional multimodal symbols loads, and only the multimodal functions refuse"
+    pg_set_guc fractalsql.enterprise_lib "'$mock_bad'" "$mock_bad" >/dev/null
+    sql_table_run 45 <<FSQL_TBL_ROWS
+bad core ledger	E:enterprise tier not loaded	SELECT fractal_ledger_flush()
+bad core multimodal	E:enterprise tier not loaded	SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[],ARRAY[1,0,0,0,1,0,0,0,1]::float8[],2)
+FSQL_TBL_ROWS
+    [[ "$TBL_BAD" -eq 0 ]] \
+      && pass "45 enterprise_paths: a core missing a required symbol is refused as a whole"
+  else
+    cat /tmp/fractalsql_bt_gate45_build.log >&2
+    fail "45 enterprise_paths: reduced mock cores failed to build"
+  fi
+  rm -f "$mock_old" "$mock_bad"
+
+  "${PSQL[@]}" -c "DROP FUNCTION IF EXISTS bt_hmac(bytea,bytea), bt_put(bytea,bytea,bytea); DELETE FROM fractalsql_ledger;" >/dev/null 2>&1 </dev/null
+  "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.enterprise_require_signature;" >/dev/null 2>&1 </dev/null
+  "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.enterprise_lib;" >/dev/null 2>&1 </dev/null
+  "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1 </dev/null
+  rm -f "$mock_so" "$mock_so.sig"
+  return 0
+}
+
+# Gate 46: plugin / provider configuration paths. Every setting that is only
+# applied "if configured" (http_url, token, model, plaintext, embed url/model,
+# think, native url, num_ctx, review, max attempts, allowed statements) is
+# never set by the other gates, so the branches that apply them stay dark.
+# This sets them all, runs the reasoning / embed / text-to-sql entry points
+# against the mock plugins, then clears the plugin path entirely to exercise
+# the "no plugin configured" errors.
+gate_46_plugin_config() {
+  "${PSQL[@]}" -c "
+     DROP TABLE IF EXISTS bt_g46;
+     CREATE TABLE bt_g46 (id serial PRIMARY KEY, emb float8[], txt text);
+     INSERT INTO bt_g46 (emb, txt) VALUES (ARRAY[0.1,0.2,0.3],'a'), (ARRAY[0.3,0.2,0.1],'b');
+  " >/dev/null 2>&1 </dev/null
+  echo "SELECT count(*) FROM bt_g46" > /tmp/fractalsql_bt_sql.txt
+  pg_swap_plugin "$MOCK" >/dev/null
+  sql_table_run 46 <<'FSQL_TBL_ROWS'
+@guc	http_url	http://127.0.0.1:9/v1/chat/completions
+@guc	http_token	bt-token
+@guc	http_model	bt-model
+@guc	http_allow_plaintext	on
+@guc	http_embed_url	http://127.0.0.1:9/v1/embeddings
+@guc	http_embed_model	bt-embed
+@guc	http_think	low
+@guc	http_think_provider	ollama
+@guc	http_native_url	http://127.0.0.1:9/api/chat
+@guc	http_num_ctx	4096
+@guc	text_to_sql_max_attempts	3
+@guc	text_to_sql_allowed_statements	select_insert_update
+configured reason	OK	SELECT fractal_reason('q')
+configured reason ctx	OK	SELECT fractal_reason('q', '{"k":1}')
+configured t2s	OK	SELECT fractal_text_to_sql('count rows in bt_g46')
+configured t2s tables	OK	SELECT fractal_text_to_sql('count rows', ARRAY['bt_g46'])
+configured sql_agent	OK	SELECT * FROM fractal_sql_agent('count rows in bt_g46')
+configured sql_agent exec	OK	SELECT * FROM fractal_sql_agent('count rows in bt_g46', ARRAY['bt_g46'], 2, true)
+configured schema	OK	SELECT length(fractal_schema_context(ARRAY['bt_g46'], 'rows')) > 0
+@guc	text_to_sql_use_review	on
+review t2s	E:fractal_text_to_sql: exhausted 3 attempt(s), last review verdict: ```s	SELECT fractal_text_to_sql('count rows in bt_g46')
+review sql_agent	OK	SELECT * FROM fractal_sql_agent('count rows in bt_g46')
+@guc	text_to_sql_use_review	off
+@plugin	EMBED
+configured embed	OK	SELECT array_length(fractal_embed('hello'), 1)
+configured search_agent	OK	SELECT * FROM fractal_search_agent('q', 'bt_g46', 'emb')
+configured rag	OK	SELECT * FROM fractal_rag_agent('q', 'bt_g46', 'emb')
+configured plan	OK	SELECT count(*) FROM fractal_agent_plan_explore('q', 'bt_g46', 'emb', 2)
+@guc	http_embed_url	
+embed url unset	E:http_embed_url is not configured	SELECT fractal_embed('hello')
+embed url unset agent	E:fractal_embed: fractalsql.http_embed_url is not configured	SELECT * FROM fractal_search_agent('q', 'bt_g46', 'emb')
+@guc	reasoning_plugin	
+no plugin reason	E:fractal_reason: no reasoning plugin loaded	SELECT fractal_reason('q')
+no plugin t2s	E:fractal_text_to_sql: no reasoning plugin loaded	SELECT fractal_text_to_sql('count rows in bt_g46')
+no plugin sql_agent	E:fractal_sql_agent: no reasoning plugin loaded	SELECT * FROM fractal_sql_agent('count rows in bt_g46')
+no plugin embed	E:fractal_embed: no reasoning plugin loaded	SELECT fractal_embed('hello')
+no plugin schema	OK	SELECT length(fractal_schema_context(ARRAY['bt_g46'])) > 0
+no plugin search_agent	E:fractal_search_agent: no reasoning plugin loaded	SELECT * FROM fractal_search_agent('q', 'bt_g46', 'emb')
+FSQL_TBL_ROWS
+  [[ "$TBL_BAD" -eq 0 ]] \
+    && pass "46 plugin_config: all $TBL_N provider-configuration / no-plugin calls behaved as specified (no backend crash)"
+  local k
+  for k in http_url http_token http_model http_allow_plaintext http_embed_url http_embed_model http_think \
+           http_think_provider http_native_url http_num_ctx text_to_sql_max_attempts text_to_sql_allowed_statements \
+           text_to_sql_use_review; do
+    "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.$k;" >/dev/null 2>&1 </dev/null
+  done
+  "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1 </dev/null
+  pg_set_guc fractalsql.reasoning_plugin "'$MOCK'" "$MOCK" >/dev/null
+  "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_g46;" >/dev/null 2>&1 </dev/null
+  rm -f /tmp/fractalsql_bt_sql.txt
+  return 0
+}
+
+# Gate 47: fault injection into the SPI and core calls the extension checks.
+# The "SPI_execute(...) != SPI_OK_*" and "rc != FSQL_OK" branches fire only on
+# memory exhaustion or an engine fault, so no SQL input reaches them. A test
+# build (gate 01 passes FAULT_INJECT=1; src/fsql_fault.h) lets a session fail
+# the Nth call of one named site:  SET fractalsql.fault_inject = 'SPI_execute:3'.
+# For each statement below and each site, the sweep fails call 1, 2, 3, ...
+# until a run no longer reaches that many calls, and requires every injected
+# run to end cleanly: no backend crash or hang, and none of the warnings
+# Postgres emits when a code path leaks (non-empty SPI stack, an unclosed
+# resource). The failure may surface as an ERROR or be absorbed (a best-effort
+# path); either is fine. Skips when the build has no hook. Linux/macOS only.
+FI_SITES="srf_context SPI_connect SPI_execute SPI_execute_with_args fsql_new_sovereign fsql_load_reasoning fsql_search_ptr fsql_search_null_json fsql_dispatch_ai fsql_dispatch_ai_resp fsql_dispatch_ai_nosummary fsql_extract_topk fsql_topk_idx_neg fsql_topk_idx_big fsql_extract_best_point fsql_extract_population fsql_parse_embedding_array fsql_cycle_detect_init fsql_cycle_detect_feed fsql_state_fingerprint fsql_feedback_report fsql_diversify_enable fsql_diversify_disable fsql_diversify_get_params fsql_diversify_set_params fsql_optimize_portfolio_ex get_call_result_type g_ent_ledger_flush g_ent_ledger_load g_ent_ledger_compact g_ent_ledger_reset_soft g_ent_ledger_reset_hard g_ent_ledger_truth_count g_ent_ledger_shadow_count g_ent_optimize_portfolio_multimodal g_ent_optimize_portfolio_multimodal_ex g_ent_optimize_portfolio_multimodal_pareto"
+FI_RUNS=0; FI_FIRED=0; FI_BAD=0
+FI_TIMEOUT=""
+
+# fault_sweep <label> <sql>: sweep every site in FI_SITES over one statement.
+fault_sweep() {
+  local label="$1" sql="$2" site k out i
+  for site in $FI_SITES; do
+    for k in $(seq 1 100); do
+      out=$($FI_TIMEOUT "${PSQL[@]}" -c "SET fractalsql.fault_inject = '$site:$k'; $sql" 2>&1 </dev/null)
+      local rc=$?
+      FI_RUNS=$((FI_RUNS + 1))
+      if grep -q "server closed the connection\|terminated by signal\|in recovery mode\|not yet accepting" <<<"$out" \
+         || [[ "$rc" -eq 124 ]]; then
+        fail "47 fault_injection: '$label' with $site:$k CRASHED or hung the backend: $(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+        FI_BAD=$((FI_BAD + 1))
+        for i in $(seq 1 $((60 * TIMEOUT_MULT))); do "${PSQL[@]}" -c "SELECT 1" >/dev/null 2>&1 </dev/null && break; sleep 0.5; done
+        break
+      fi
+      grep -q "fractalsql: fault injected at" <<<"$out" || break    # ran past the last call of this site
+      FI_FIRED=$((FI_FIRED + 1))
+      if grep -qiE "non-empty SPI stack|leak|was not closed|still open" <<<"$out"; then
+        fail "47 fault_injection: '$label' with $site:$k leaked: $(grep -iE 'non-empty SPI stack|leak|was not closed|still open' <<<"$out" | head -1 | cut -c1-140)"
+        FI_BAD=$((FI_BAD + 1))
+      fi
+    done
+  done
+}
+
+gate_47_fault_injection() {
+  if ! "${PSQL[@]}" -c "SHOW fractalsql.fault_inject" >/dev/null 2>&1 </dev/null; then
+    skip "47 fault_injection: this build has no fault-injection hook (needs make FAULT_INJECT=1)"
+    return 0
+  fi
+  "${PSQL[@]}" -c "
+     DROP TABLE IF EXISTS bt_g47, bt_g47v;
+     CREATE TABLE bt_g47 (id serial PRIMARY KEY, emb float8[], txt text);
+     INSERT INTO bt_g47 (emb, txt) VALUES (ARRAY[0.1,0.2,0.3],'a'), (ARRAY[0.3,0.2,0.1],'b'), (ARRAY[0.9,0.8,0.7],'c'), (ARRAY[0.5,0.5,0.5],'d');
+     CREATE TABLE bt_g47v (id serial PRIMARY KEY, emb fractal_vector);
+     INSERT INTO bt_g47v (emb) VALUES ('[0.1,0.2,0.3]'), ('[0.3,0.2,0.1]'), ('[0.9,0.8,0.7]');
+  " >/dev/null 2>&1 </dev/null
+  echo "SELECT count(*) FROM bt_g47" > /tmp/fractalsql_bt_sql.txt
+  FI_RUNS=0; FI_FIRED=0; FI_BAD=0
+  FI_TIMEOUT=""
+  command -v timeout >/dev/null 2>&1 && FI_TIMEOUT="timeout $((60 * TIMEOUT_MULT))"
+
+  # ---- reasoning mock: text-to-SQL, the SQL agent, schema context ------
+  pg_swap_plugin "$MOCK" >/dev/null
+  fault_sweep "sql_agent"           "SELECT * FROM fractal_sql_agent('count rows in bt_g47')"
+  fault_sweep "sql_agent exec"      "SELECT * FROM fractal_sql_agent('count rows in bt_g47', ARRAY['bt_g47'], 2, true)"
+  fault_sweep "text_to_sql"         "SELECT fractal_text_to_sql('count rows in bt_g47', ARRAY['bt_g47'])"
+  fault_sweep "schema_context"      "SELECT length(fractal_schema_context(ARRAY['bt_g47'], 'rows'))"
+  fault_sweep "schema_context auto" "SELECT length(fractal_schema_context())"
+  fault_sweep "reason"              "SELECT fractal_reason('q')"
+  pg_set_guc fractalsql.text_to_sql_use_review "'on'" "on" >/dev/null
+  pg_set_guc fractalsql.text_to_sql_max_attempts "'2'" "2" >/dev/null
+  fault_sweep "sql_agent review"    "SELECT * FROM fractal_sql_agent('count rows in bt_g47')"
+  fault_sweep "text_to_sql review"  "SELECT fractal_text_to_sql('count rows in bt_g47')"
+  pg_set_guc fractalsql.text_to_sql_use_review "'off'" "off" >/dev/null
+
+  # ---- embed mock: the embedding-driven agents --------------------------
+  pg_swap_plugin "$EMBED" >/dev/null
+  pg_set_guc fractalsql.http_embed_url "'http://unused/embeddings'" "http://unused/embeddings" >/dev/null
+  fault_sweep "embed"          "SELECT array_length(fractal_embed('hello'), 1)"
+  fault_sweep "search_agent"   "SELECT * FROM fractal_search_agent('q', 'bt_g47', 'emb')"
+  fault_sweep "rag_agent"      "SELECT * FROM fractal_rag_agent('q', 'bt_g47', 'emb')"
+  fault_sweep "plan_explore"   "SELECT count(*) FROM fractal_agent_plan_explore('q', 'bt_g47', 'emb', 2)"
+  "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.http_embed_url; SELECT pg_reload_conf();" >/dev/null 2>&1 </dev/null
+
+  # ---- no plugin needed: search, trajectory, loop/cycle, diversify ------
+  pg_swap_plugin "$MOCK" >/dev/null
+  fault_sweep "search"           "SELECT fractal_search(ARRAY[0.1,0.2,0.3]::float8[], 3, 6)"
+  fault_sweep "search_debug"     "SELECT fractal_search_debug(ARRAY[0.1,0.2,0.3]::float8[], 3, 6)"
+  fault_sweep "search_explore"   "SELECT count(*) FROM fractal_search_explore('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], '{\"iterations\":3,\"population_size\":5}')"
+  fault_sweep "search_explore fv" "SELECT count(*) FROM fractal_search_explore('bt_g47v', 'emb', ARRAY[0.1,0.2,0.3]::float8[])"
+  fault_sweep "telemetry"        "SELECT count(*) FROM fractal_search_telemetry('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], 2)"
+  fault_sweep "telemetry fv"     "SELECT count(*) FROM fractal_search_telemetry('bt_g47v', 'emb', ARRAY[0.1,0.2,0.3]::float8[], 2)"
+  fault_sweep "trajectory"       "SELECT count(*) FROM fractal_search_trajectory('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], ARRAY[0.3,0.2,0.1]::float8[], 2)"
+  fault_sweep "trajectory fv"    "SELECT count(*) FROM fractal_search_trajectory('bt_g47v', 'emb', '[0.1,0.2,0.3]'::fractal_vector, '[0.3,0.2,0.1]'::fractal_vector, 2)"
+  fault_sweep "cross_modal"      "SELECT count(*) FROM fractal_cross_modal_search('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], ARRAY[0.3,0.2,0.1]::float8[], 0.5, 2)"
+  fault_sweep "cross_modal fv"   "SELECT count(*) FROM fractal_cross_modal_search('bt_g47v', 'emb', '[0.1,0.2,0.3]'::fractal_vector, '[0.3,0.2,0.1]'::fractal_vector, 0.5, 2)"
+  fault_sweep "hybrid"           "SELECT count(*) FROM fractal_hybrid_clinical_search('bt_g47', 'emb', ARRAY[0.1,0.2,0.3]::float8[], (SELECT array_agg(ctid::text) FROM bt_g47), 2)"
+  fault_sweep "hybrid fv"        "SELECT count(*) FROM fractal_hybrid_clinical_search('bt_g47v', 'emb', ARRAY[0.1,0.2,0.3]::float8[], (SELECT array_agg(ctid::text) FROM bt_g47v), 2)"
+  fault_sweep "agent trajectory" "SELECT * FROM fractal_agent_trajectory_predict('bt_g47', 'emb', 1, 3)"
+  fault_sweep "agent trajectory fv" "SELECT * FROM fractal_agent_trajectory_predict('bt_g47v', 'emb', 1, 3)"
+  fault_sweep "detect_loop"      "SELECT * FROM fractal_agent_detect_loop('a', ARRAY[1,2,1,2,1,2,1,2]::float8[], 2)"
+  fault_sweep "fingerprint"      "SELECT fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 64)"
+  fault_sweep "cycle_detect"     "SELECT * FROM fractal_cycle_detect(ARRAY['\\x01','\\x02','\\x01','\\x02','\\x01','\\x02']::bytea[])"
+  fault_sweep "diversify"        "SELECT fractal_diversify_enable(); SELECT fractal_diversify_set_params(5); SELECT fractal_feedback_report(1,'positive'); SELECT fractal_explain_result(); SELECT fractal_detect_collapse(); SELECT fractal_diversify_disable()"
+  fault_sweep "diversify dq"     "SELECT fractal_diversify_enable(); SELECT fractal_diversify_current_dq(); SELECT fractal_diversify_overhead_p99_us(); SELECT fractal_isolate_background(1); SELECT fractal_diversify_disable()"
+  fault_sweep "periodogram"      "SELECT * FROM fractal_periodogram(ARRAY[1,2,3,4,5,6,7,8]::float8[], 4)"
+  fault_sweep "tda"              "SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4,5,6]::float8[], 2)"
+  fault_sweep "portfolio"        "SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2,0.15]::float8[], ARRAY[1,0,0,0,1,0,0,0,1]::float8[], 2, 7)"
+  fault_sweep "set_config"       "SELECT fractalsql_set_config('http_model', 'bt-model'); SELECT fractalsql_get_config('http_model')"
+  fault_sweep "store/mine"       "SELECT fractal_store_morphology(1, ARRAY[0.1,0.2]::float8[]); SELECT count(*) FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2]::float8[], 2)"
+
+  # ---- enterprise mock: ledger / audit ----------------------------------
+  local mock_so="$TMPROOT/fractalsql_bt_g47_ent_${PG_MAJOR}.so"
+  rm -f "$mock_so" "$mock_so.sig"
+  if cc -shared -fPIC -std=c99 -Iinclude tests/mock_enterprise_core.c -o "$mock_so" 2>/tmp/fractalsql_bt_gate47_build.log; then
+    "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;" >/dev/null 2>&1 </dev/null
+    if pg_set_guc fractalsql.enterprise_lib "'$mock_so'" "$mock_so"; then
+      fault_sweep "ledger verify"  "SELECT fractal_ledger_verify(1)"
+      fault_sweep "ledger load"    "SELECT fractal_ledger_load()"
+      fault_sweep "ledger flush"   "SELECT fractal_ledger_flush()"
+      fault_sweep "audit_log"      "SELECT fractal_audit_log('bt', '{\"k\":1}')"
+      fault_sweep "ledger compact" "SELECT fractal_ledger_compact()"
+      fault_sweep "ledger reset"   "SELECT fractal_ledger_reset_soft(); SELECT fractal_ledger_reset_hard()"
+      fault_sweep "ledger counts"  "SELECT fractal_ledger_truth_count(); SELECT fractal_ledger_shadow_count()"
+      fault_sweep "multimodal"     "SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.2,0.15]::float8[], ARRAY[1,0,0,0,1,0,0,0,1]::float8[], 2)"
+      fault_sweep "pareto"         "SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2,0.15]::float8[], ARRAY[1,0,0,0,1,0,0,0,1]::float8[], 2)"
+    else
+      fail "47 fault_injection: could not point enterprise_lib at the mock"
+    fi
+    "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.enterprise_require_signature; ALTER SYSTEM RESET fractalsql.enterprise_lib; SELECT pg_reload_conf();" >/dev/null 2>&1 </dev/null
+  else
+    cat /tmp/fractalsql_bt_gate47_build.log >&2
+    fail "47 fault_injection: mock enterprise core failed to build"
+  fi
+  rm -f "$mock_so" "$mock_so.sig"
+
+  # ---- ledger storage callbacks, driven directly (test-only SQL wrapper) --
+  # The enterprise core is what normally calls them, and none is vendored in a
+  # community checkout, so the build's fractal_fi_ledger_vfs() stands in.
+  "${PSQL[@]}" -c "
+     CREATE OR REPLACE FUNCTION bt_fi_ledger_vfs(op text, kind int4, payload bytea DEFAULT NULL)
+       RETURNS text AS '$SO','fractal_fi_ledger_vfs' LANGUAGE C VOLATILE;
+     DROP TABLE IF EXISTS fractalsql_ledger;" >/dev/null 2>&1 </dev/null
+  local lr
+  lr=$("${PSQL[@]}" -c "SELECT bt_fi_ledger_vfs('read', 1)" 2>&1 </dev/null)
+  [[ "$lr" = "rc=-46 len=0 hex=" ]] \
+    && pass "47 fault_injection: reading an empty ledger reports 'unavailable' (-46), not an error" \
+    || fail "47 fault_injection: empty-ledger read returned: $lr"
+  "${PSQL[@]}" -c "SELECT bt_fi_ledger_vfs('write', 1, '\\x616263')" >/dev/null 2>&1 </dev/null
+  lr=$("${PSQL[@]}" -c "SELECT bt_fi_ledger_vfs('read', 1)" 2>&1 </dev/null)
+  [[ "$lr" = "rc=0 len=3 hex=616263" ]] \
+    && pass "47 fault_injection: a ledger entry written through the storage callback reads back byte for byte" \
+    || fail "47 fault_injection: ledger read-back returned: $lr"
+  fault_sweep "ledger vfs write"       "SELECT bt_fi_ledger_vfs('write', 1, '\\x616263')"
+  fault_sweep "ledger vfs write keyed" "SET fractalsql.enterprise_ledger_key = 'bt-key'; SELECT bt_fi_ledger_vfs('write', 1, '\\x616263'); SELECT bt_fi_ledger_vfs('read', 1)"
+  fault_sweep "ledger vfs read"        "SELECT bt_fi_ledger_vfs('read', 1)"
+  fault_sweep "ledger vfs seal"        "SELECT bt_fi_ledger_vfs('seal', 1)"
+  "${PSQL[@]}" -c "DROP FUNCTION IF EXISTS bt_fi_ledger_vfs(text,int4,bytea); DROP TABLE IF EXISTS fractalsql_ledger;" >/dev/null 2>&1 </dev/null
+
+  if [[ "$FI_BAD" -eq 0 && "$FI_FIRED" -gt 100 ]]; then
+    pass "47 fault_injection: $FI_FIRED injected SPI/core failures across $FI_RUNS runs; none crashed, hung or leaked"
+  elif [[ "$FI_BAD" -eq 0 ]]; then
+    fail "47 fault_injection: only $FI_FIRED faults fired in $FI_RUNS runs -- the hook is not reaching the call sites"
+  fi
+
+  "${PSQL[@]}" -c "RESET fractalsql.fault_inject; DROP TABLE IF EXISTS bt_g47, bt_g47v;" >/dev/null 2>&1 </dev/null
+  pg_swap_plugin "$MOCK" >/dev/null
+  rm -f /tmp/fractalsql_bt_sql.txt
   return 0
 }
 
@@ -3595,7 +5686,7 @@ gate_29_vector_ops() {
     && pass "29 vector_ops: to_float8_array canonicalizes to {1,2,3} (native array text, not fractal_vector's own [1,2,3] form)" \
     || fail "29 vector_ops: to_float8_array='$r'"
 
-  # --- v2.0.25: Lp distance, quantization, Hamming distance -----------
+  # --- v2.0.20: Lp distance, quantization, Hamming distance -----------
   r=$("${PSQL[@]}" -c "SELECT fractal_vector_lp_distance('[3,4,0]'::fractal_vector, '[0,0,0]'::fractal_vector, 2.0);" 2>&1)
   [[ "$r" = "5" ]] && pass "29 vector_ops: lp_distance p=2 ([3,4] from origin) = 5" \
                     || fail "29 vector_ops: lp_distance p=2='$r'"
@@ -3669,7 +5760,7 @@ gate_29_vector_ops() {
   return 0
 }
 
-# The 6 newest analytics/vector-math primitives (v2.0.25), known-answer
+# The 6 newest analytics/vector-math primitives (v2.0.20), known-answer
 # asserted: real float8[]/bytea[] array args, with fractal_periodogram
 # and fractal_cycle_detect set-returning (TABLE).
 gate_30_new_primitives() {
@@ -3811,6 +5902,95 @@ gate_30_new_primitives() {
   grep <<< "$r" -q "fractal_optimize_subset rc=" \
     && pass "30 new_primitives: optimize_subset infeasible instance (caps 0.4x5 < 1.0 at k=2) rejected cleanly" \
     || fail "30 new_primitives: infeasible optimize_subset='$r' (expected a clean rc= rejection)"
+
+  # --- fractal_spectrogram_entropy (core v2.0.26): short-time spectral
+  # entropy. Series = 256 samples of a pure tone (period 8) then 256 of
+  # deterministic pseudo-noise; win=64, hop=32 -> 15 frames, frames 0-6
+  # entirely tone, frames 8-14 entirely noise (frame 7 straddles). Measured
+  # against the core directly: tone frames read 0.250, noise frames
+  # 0.78-0.92, so the 0.40 / 0.70 cut-offs have wide margins.
+  local spec_series="(SELECT array_agg(CASE WHEN i < 256 THEN 0.5*sin(2*pi()*i/8.0)
+                                              ELSE (x - floor(x)) - 0.5 END ORDER BY i)
+                        FROM (SELECT i, sin(i::float8 * 12.9898::float8) * 43758.5453::float8 AS x
+                                FROM generate_series(0, 511) i) q)"
+  r=$("${PSQL[@]}" -c "
+    SELECT array_length(fractal_spectrogram_entropy($spec_series, 64, 32), 1);" 2>&1)
+  [[ "$r" = "15" ]] && pass "30 new_primitives: spectrogram_entropy frame count = floor((512-64)/32)+1 = 15" \
+                     || fail "30 new_primitives: spectrogram_entropy frames='$r' (expected 15)"
+
+  r=$("${PSQL[@]}" -c "
+    WITH h AS (SELECT fractal_spectrogram_entropy($spec_series, 64, 32) e)
+    SELECT (SELECT avg(x) FROM unnest(e[1:7])  x) < 0.40
+       AND (SELECT avg(x) FROM unnest(e[9:15]) x) > 0.70
+       AND (SELECT bool_and(x BETWEEN 0 AND 1) FROM unnest(e) x)
+      FROM h;" 2>&1)
+  [[ "$r" = "t" ]] && pass "30 new_primitives: spectrogram_entropy separates a tone (<0.40) from noise (>0.70), all frames in [0,1]" \
+                    || fail "30 new_primitives: spectrogram_entropy tone/noise separation='$r'"
+
+  # The point of returning float8[]: it composes with change_point_detect.
+  # The tone->noise transition is at frame ~7; a boundary must land in [5,11].
+  r=$("${PSQL[@]}" -c "
+    SELECT fractal_change_point_detect(fractal_spectrogram_entropy($spec_series, 64, 32), 4, 2.0, 8);" 2>&1)
+  local sp_ok=0 sp_v
+  for sp_v in $(tr -d '{}' <<< "$r" | tr ',' ' '); do
+    awk "BEGIN{exit !($sp_v >= 5 && $sp_v <= 11)}" && sp_ok=1
+  done
+  [[ "$sp_ok" = "1" ]] && pass "30 new_primitives: change_point_detect over spectrogram_entropy flags the tone->noise transition ($r)" \
+                        || fail "30 new_primitives: change_point_detect(spectrogram_entropy)='$r' (no boundary in [5,11])"
+
+  # A constant signal has no spectral energy: every frame reports exactly 0.0
+  # (never NaN), and max_frames truncates to the first frames.
+  r=$("${PSQL[@]}" -c "
+    SELECT bool_and(x = 0.0) AND count(*) = 5
+      FROM unnest(fractal_spectrogram_entropy(array_fill(3.0::float8, ARRAY[200]), 64, 32)) x;" 2>&1)
+  [[ "$r" = "t" ]] && pass "30 new_primitives: spectrogram_entropy of a constant signal is 0.0 in all 5 frames (no NaN)" \
+                    || fail "30 new_primitives: spectrogram_entropy constant='$r'"
+
+  r=$("${PSQL[@]}" -c "
+    SELECT array_length(fractal_spectrogram_entropy($spec_series, 64, 32, 4), 1);" 2>&1)
+  [[ "$r" = "4" ]] && pass "30 new_primitives: spectrogram_entropy max_frames=4 truncates to the first 4 frames" \
+                    || fail "30 new_primitives: spectrogram_entropy max_frames='$r' (expected 4)"
+
+  # Defaults (win=64, hop=32) match the explicit call.
+  r=$("${PSQL[@]}" -c "
+    SELECT fractal_spectrogram_entropy($spec_series) = fractal_spectrogram_entropy($spec_series, 64, 32);" 2>&1)
+  [[ "$r" = "t" ]] && pass "30 new_primitives: spectrogram_entropy defaults are win=64, hop=32" \
+                    || fail "30 new_primitives: spectrogram_entropy defaults='$r'"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_spectrogram_entropy(ARRAY[1,2,3,4,5,6,7,8,9,10]::float8[], 4, 2);" 2>&1)
+  grep <<< "$r" -q "win must be in \[8, 512\]" \
+    && pass "30 new_primitives: spectrogram_entropy rejects win < 8" \
+    || fail "30 new_primitives: expected a win range rejection, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_spectrogram_entropy(array_fill(1.0::float8, ARRAY[64]), 513, 32);" 2>&1)
+  grep <<< "$r" -q "win must be in \[8, 512\]" \
+    && pass "30 new_primitives: spectrogram_entropy rejects win > 512" \
+    || fail "30 new_primitives: expected a win range rejection, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_spectrogram_entropy(array_fill(1.0::float8, ARRAY[64]), 16, 0);" 2>&1)
+  grep <<< "$r" -q "hop must be > 0" \
+    && pass "30 new_primitives: spectrogram_entropy rejects hop <= 0" \
+    || fail "30 new_primitives: expected a hop rejection, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_spectrogram_entropy(array_fill(1.0::float8, ARRAY[64]), 16, 8, 0);" 2>&1)
+  grep <<< "$r" -q "max_frames must be in" \
+    && pass "30 new_primitives: spectrogram_entropy rejects max_frames < 1" \
+    || fail "30 new_primitives: expected a max_frames rejection, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_spectrogram_entropy(array_fill(1.0::float8, ARRAY[10]), 16, 8);" 2>&1)
+  grep <<< "$r" -q "fractal_spectrogram_entropy rc=" \
+    && pass "30 new_primitives: spectrogram_entropy rejects a series shorter than win (clean rc= error)" \
+    || fail "30 new_primitives: expected a short-series rejection, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_spectrogram_entropy(array_fill('NaN'::float8, ARRAY[64]), 16, 8);" 2>&1)
+  grep <<< "$r" -q "fractal_spectrogram_entropy rc=" \
+    && pass "30 new_primitives: spectrogram_entropy rejects a non-finite sample (clean rc= error)" \
+    || fail "30 new_primitives: expected a NaN rejection, got: $r"
+
+  r=$("${PSQL[@]}" -c "SELECT fractal_spectrogram_entropy(NULL::float8[], 16, 8);" 2>&1)
+  [[ -z "$r" ]] \
+    && pass "30 new_primitives: spectrogram_entropy(NULL, ...) -> NULL (STRICT)" \
+    || fail "30 new_primitives: spectrogram_entropy NULL series='$r' (expected NULL / empty)"
   return 0
 }
 
@@ -3857,6 +6037,27 @@ gate_31_enterprise_mock() {
   grep <<< "$pre" -q "enterprise tier not loaded" \
     && pass "31 enterprise_mock: truth_count refuses cleanly before enterprise_lib is set" \
     || fail "31 enterprise_mock: expected 'enterprise tier not loaded', got: $pre"
+
+  # g_ent_attempted short-circuit (src/fractalsql.c:1049-1051): the dormant
+  # dlopen attempt is cached per backend, so the SECOND enterprise call in
+  # the SAME session takes the short-circuit return instead of re-reading
+  # the GUC and re-attempting. Both statements below run in one backend
+  # (one psql invocation = one connection -- each statement is its own
+  # batch, so psql continues past the first ERROR), and both must report
+  # the engine's own dormant error, identically, with no crash.
+  local rsc
+  rsc=$("${PSQL[@]}" 2>&1 <<'SQL'
+SELECT fractal_ledger_flush();
+SELECT fractal_ledger_flush();
+SQL
+)
+  if grep <<< "$rsc" -qE "server closed the connection|could not connect"; then
+    fail "31 ent-attempted: backend crashed -- $rsc"
+  elif [[ "$(grep -c 'fractalsql: enterprise tier not loaded' <<< "$rsc")" = "2" ]]; then
+    pass "31 ent-attempted: two dormant enterprise calls in ONE backend both report the same dormant error (2nd via the g_ent_attempted short-circuit)"
+  else
+    fail "31 ent-attempted: expected 2 dormant errors, got: $rsc"
+  fi
 
   # Path 1: a corrupt/wrong .sig is ALWAYS fatal -- no real signing key
   # needed (ent_verify_signature rejects on a MISMATCH, which 64 random
@@ -3969,6 +6170,118 @@ SQL
     && pass "31 enterprise_mock: ledger_verify detects a byte-level HMAC tamper (no real .so needed)" \
     || fail "31 enterprise_mock: expected a tamper-detected report after the byte-flip, got: $rg"
 
+  # ---- ledger-verify per-row error report: the malformed-row branches and
+  # a pure chain-LINK break, each asserted through verify()'s own jsonb
+  # report ({ok, first_failure_id, reason}). Fixture: the chain table is
+  # first swapped for a CONSTRAINT-FREE copy of the same shape. Rationale:
+  # ledger_ensure_table's own DDL declares prev_hash/entry_hash NOT NULL, so
+  # verify()'s "malformed row (unexpected NULL)" branch is unreachable
+  # through normal writes -- it defends storage the extension does not
+  # control (externally replaced / lenient tables, the same premise as
+  # gate 25's migration case). No HMAC key is set here, so rows carry NULL
+  # mac exactly as ledger_write_entry wrote them (the length branch is
+  # reached through a non-NULL mac of the wrong length, and the structural
+  # recompute runs without mac identically to how it was written).
+  #
+  # Tamper shape implemented for the link case ("31 ledger-tamper-link"):
+  # UPDATE the MIDDLE row's prev_hash to a fake 32B value. This repo's
+  # verify() (src/fractalsql.c, fractal_ledger_verify) recomputes a row's
+  # entry_hash over expect_prev = the PREVIOUS row's STORED entry_hash --
+  # not the row's own stored prev_hash -- but the chain-LINK check
+  # (row.prev_hash vs expect_prev) runs BEFORE the structural recompute, so
+  # a fake prev_hash fails THAT row's own link check while its untouched
+  # entry_hash stays fully self-consistent (recomputing
+  # sha256(prev_row_entry_hash || blob || mac) would still match). The
+  # SQLite sibling's "blob + recomputed entry_hash" shape is deliberately
+  # NOT implemented: in pg it would only make the NEXT row's link check
+  # fire, and it needs a SQL-side sha256 (pgcrypto) this harness avoids.
+  # The lenient fixture must carry ledger_ensure_table's OWN index (by
+  # name and shape): when the index is missing, each audit_log/verify's
+  # ensure step runs a CREATE INDEX INSIDE the session's active query and
+  # postgres rejects it ("because it is being used by active queries in
+  # this session") -- the silent shape the docker gate caught.
+  _31_reset_lenient_ledger() {
+    "${PSQL[@]}" -c "DROP TABLE IF EXISTS fractalsql_ledger;" >/dev/null 2>&1
+    "${PSQL[@]}" -c "
+      CREATE TABLE fractalsql_ledger (
+        id         bigserial   PRIMARY KEY,
+        kind       integer     NOT NULL,
+        blob       bytea       NOT NULL,
+        mac        bytea,
+        prev_hash  bytea,
+        entry_hash bytea,
+        sealed     boolean     NOT NULL DEFAULT false,
+        updated    timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS fractalsql_ledger_kind_id_idx
+        ON fractalsql_ledger (kind, id DESC);" >/dev/null 2>&1
+  }
+  local rf
+  _31_reset_lenient_ledger
+  rf=$("${PSQL[@]}" 2>&1 <<'SQL'
+DELETE FROM fractalsql_ledger WHERE kind = 2;
+SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":2}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":3}'::jsonb);
+UPDATE fractalsql_ledger SET entry_hash = NULL
+ WHERE kind = 2 AND id = (SELECT min(id) + 1 FROM fractalsql_ledger WHERE kind = 2);
+SELECT CASE WHEN v->>'ok' = 'false'
+             AND v->>'reason' = 'malformed row (unexpected NULL)'
+             AND (v->>'first_failure_id')::bigint = m.mid
+       THEN 'ok' ELSE 'FAIL: ' || v::text END
+  FROM (SELECT fractal_ledger_verify(2) AS v) s,
+       (SELECT min(id) + 1 AS mid FROM fractalsql_ledger WHERE kind = 2) m;
+SQL
+)
+  grep <<< "$rf" -q "^ok$" \
+    && pass "31 ledger-verify-malformed-null: entry_hash=NULL hits verify()'s 'malformed row (unexpected NULL)' branch at the middle row id" \
+    || fail "31 ledger-verify-malformed-null: expected the strict ok report, got: $rf"
+
+  rf=$("${PSQL[@]}" 2>&1 <<'SQL'
+DELETE FROM fractalsql_ledger WHERE kind = 2;
+SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":2}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":3}'::jsonb);
+UPDATE fractalsql_ledger SET mac = decode(repeat('cd', 16), 'hex')
+ WHERE kind = 2 AND id = (SELECT min(id) + 1 FROM fractalsql_ledger WHERE kind = 2);
+SELECT CASE WHEN v->>'ok' = 'false'
+             AND v->>'reason' = 'malformed row (bad hash/mac length)'
+             AND (v->>'first_failure_id')::bigint = m.mid
+       THEN 'ok' ELSE 'FAIL: ' || v::text END
+  FROM (SELECT fractal_ledger_verify(2) AS v) s,
+       (SELECT min(id) + 1 AS mid FROM fractalsql_ledger WHERE kind = 2) m;
+SQL
+)
+  grep <<< "$rf" -q "^ok$" \
+    && pass "31 ledger-verify-malformed-length: a 16-byte mac (expects 32) hits verify()'s 'malformed row (bad hash/mac length)' branch at the middle row id" \
+    || fail "31 ledger-verify-malformed-length: expected the strict ok report, got: $rf"
+
+  rf=$("${PSQL[@]}" 2>&1 <<'SQL'
+DELETE FROM fractalsql_ledger WHERE kind = 2;
+SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":2}'::jsonb);
+SELECT fractal_audit_log('test.small', '{"n":3}'::jsonb);
+UPDATE fractalsql_ledger SET prev_hash = decode(repeat('ab', 32), 'hex')
+ WHERE kind = 2 AND id = (SELECT min(id) + 1 FROM fractalsql_ledger WHERE kind = 2);
+SELECT CASE WHEN v->>'ok' = 'false'
+             AND v->>'reason' = 'chain-link break (prev_hash mismatch)'
+             AND (v->>'first_failure_id')::bigint = m.mid
+       THEN 'ok' ELSE 'FAIL: ' || v::text END
+  FROM (SELECT fractal_ledger_verify(2) AS v) s,
+       (SELECT min(id) + 1 AS mid FROM fractalsql_ledger WHERE kind = 2) m;
+SQL
+)
+  grep <<< "$rf" -q "^ok$" \
+    && pass "31 ledger-tamper-link: a self-consistent row whose prev_hash no longer matches the previous row's entry_hash fails its OWN link check ('chain-link break (prev_hash mismatch)')" \
+    || fail "31 ledger-tamper-link: expected the strict ok report, got: $rf"
+
+  # Restore the CANONICAL chain shape (NOT NULL on prev_hash/entry_hash)
+  # for the rest of the run: drop the lenient fixture and let
+  # ledger_ensure_table re-create its own DDL on the next write (the
+  # audit_log call below does exactly that and seeds a fresh genesis row).
+  "${PSQL[@]}" -c "DROP TABLE IF EXISTS fractalsql_ledger;" >/dev/null 2>&1
+  "${PSQL[@]}" -c "SELECT fractal_audit_log('test.reset', '{\"n\":0}'::jsonb);" >/dev/null 2>&1
+
   # fractal_audit_unpack: a direct decode call -- distinct from the
   # audit_log+ledger_verify round-trip above, which never calls this
   # function at all. The mock's fsql_audit_unpack is a pure echo
@@ -4028,6 +6341,71 @@ SQL
     && pass "31 enterprise_mock: fractal_optimize_portfolio logs a portfolio_optimize provenance record when enterprise is loaded" \
     || fail "31 enterprise_mock: expected the latest kind=2 row to be type=portfolio_optimize, got: $portfolio_audit"
 
+  # ---- T-J: the enterprise_lib verdict cache (ensure_enterprise_lib).
+  # The dlopen verdict is cached PER BACKEND and keyed by the PATH it was
+  # reached for. Two consequences, and they are opposites:
+  #   - LOADED, then the GUC changes: REFUSED, with the old and new paths
+  #     named. The core is dlopen'd once per backend and its image is the
+  #     trust anchor, so it cannot be re-pointed under a session that
+  #     already loaded it. The refusal is raised at USE time (the GUC is
+  #     PGC_SIGHUP, so a value that arrives with a config reload cannot be
+  #     rejected by a check hook without failing the reload of every
+  #     backend).
+  #   - FAILED, then the GUC changes: re-evaluated. Nothing is loaded, so
+  #     there is no trust anchor to protect.
+  #
+  # The re-point can only arrive through a config RELOAD, so the test has
+  # to hold ONE session open across the reload -- every psql invocation is
+  # a new backend, and a new backend starts with an empty verdict cache.
+  # Hence the multi-statement, single-invocation blocks below.
+  local repoint_path="$mock_so.repoint.so"
+  local rj1
+  rj1=$("${PSQL[@]}" 2>&1 <<SQL
+SELECT 'LOAD:' || fractal_ledger_truth_count()::text;
+ALTER SYSTEM SET fractalsql.enterprise_lib = '$repoint_path';
+SELECT pg_reload_conf();
+SELECT pg_sleep(3);
+SELECT 'SEEN:' || current_setting('fractalsql.enterprise_lib');
+SELECT 'USE:' || fractal_ledger_truth_count()::text;
+SQL
+)
+  grep -q "LOAD:0" <<< "$rj1" \
+    && pass "31 ent-repoint: the enterprise core loads from the configured path" \
+    || fail "31 ent-repoint: expected the mock to load, got: $rj1"
+  grep -qF "SEEN:$repoint_path" <<< "$rj1" \
+    && pass "31 ent-repoint: the reload delivered the new path to the open session" \
+    || fail "31 ent-repoint: expected the session to see '$repoint_path' after the reload, got: $rj1"
+  grep -q "was changed from" <<< "$rj1" && grep -qF "$mock_so" <<< "$rj1" && grep -qF "$repoint_path" <<< "$rj1" \
+    && pass "31 ent-repoint: a LOADED library refuses a mid-session re-point, naming the old and the new path" \
+    || fail "31 ent-repoint: expected the re-point refusal, got: $rj1"
+
+  # The FAILED half: a load that failed is re-evaluated when the path
+  # changes, so a bad path does not poison the session forever. The first
+  # call must FAIL (the file is not there) and the second must SUCCEED --
+  # after the path was changed back, in the SAME session.
+  local missing_path="$mock_so.missing.so"
+  if pg_set_guc fractalsql.enterprise_lib "'$missing_path'" "$missing_path"; then
+    local rj2
+    rj2=$("${PSQL[@]}" 2>&1 <<SQL
+SELECT 'F1:' || fractal_ledger_truth_count()::text;
+ALTER SYSTEM SET fractalsql.enterprise_lib = '$mock_so';
+SELECT pg_reload_conf();
+SELECT pg_sleep(3);
+SELECT 'F2:' || fractal_ledger_truth_count()::text;
+SQL
+)
+    if grep -q "enterprise tier not loaded" <<< "$rj2" && ! grep -q "F1:" <<< "$rj2"; then
+      pass "31 ent-repoint: a load that failed refuses cleanly (the dormant error)"
+    else
+      fail "31 ent-repoint: expected the dormant error for the missing library, got: $rj2"
+    fi
+    grep -q "F2:0" <<< "$rj2" \
+      && pass "31 ent-repoint: a FAILED verdict is re-evaluated when the path changes (the same session then loads the good library)" \
+      || fail "31 ent-repoint: expected the second call to succeed after the path changed, got: $rj2"
+  else
+    fail "31 ent-repoint: could not point enterprise_lib at the missing path"
+  fi
+
   unset FSQL_MOCK_ENT_FAIL
   rm -f "$mock_so" "$badsig_so" "$badsig_so.sig" "$fail_sentinel"
   "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.enterprise_lib; ALTER SYSTEM RESET fractalsql.enterprise_require_signature;" >/dev/null 2>&1
@@ -4051,6 +6429,12 @@ SQL
 # reason step. Needs a 3-dim corpus to match.
 gate_32_sovereign_agents() {
   pg_swap_plugin "$EMBED" || { fail "32 sovereign_agents: plugin swap did not take effect"; return; }
+  # Standalone-scoped gate runs never execute gate 15, which is what leaves
+  # fractalsql.http_embed_url pinned in a full run; without it the engine
+  # refuses every embed dispatch outright. Pin it here (ALTER SYSTEM;
+  # gates 15/17/20/27 re-set the same value, harmless in a full run).
+  pg_set_guc fractalsql.http_embed_url "'http://unused/embeddings'" "http://unused/embeddings" \
+    || { fail "32 sovereign_agents: http_embed_url GUC did not take effect"; return; }
 
   "${PSQL[@]}" -c "
      DROP TABLE IF EXISTS bt_agent_vec, bt_agent_fvec, bt_agent_nopk, bt_agent_empty;
@@ -4212,10 +6596,869 @@ gate_32_sovereign_agents() {
     && pass "32 sovereign_agents: fractal_rag_agent rejects an empty table" \
     || fail "32 sovereign_agents: expected a no-rows rejection, got: $ra_empty"
 
+  # --- 6: agent_partial_reasoning_fail pair (C agents) -----------------
+  # The embed mock (tests/mock_embed_plugin.c) fails its generate() when the
+  # dispatched CONTEXT carries FSQL_BT_FAIL_REASON -- and context is real
+  # content ONLY for the reasoning call (embed always dispatches "{}"), so the
+  # embed half stays healthy and the forced failure lands exactly on the
+  # reasoning flip point. Standard flag-off (raises) / flag-on (computed data
+  # half + reasoning_step_failed marker) pair, per the sqlite repo's gate-29
+  # pair convention.
+  "${PSQL[@]}" -c "
+     ALTER TABLE bt_agent_vec ADD COLUMN IF NOT EXISTS note text;
+     INSERT INTO bt_agent_vec (emb, note) VALUES (ARRAY[0.5,0.5,0.0]::float8[], 'FSQL_BT_FAIL_REASON');
+  " >/dev/null 2>&1
+
+  # Flag OFF (default): the reasoning failure raises, same as always.
+  local srf; srf=$("${PSQL[@]}" -c "SELECT fractal_search_agent('q', 'bt_agent_vec', 'emb');" 2>&1)
+  grep <<< "$srf" -q "search_agent reasoning failed" \
+    && pass "32 sovereign_agents: agent_partial_reasoning_fail off -- the reasoning failure still raises" \
+    || fail "32 sovereign_agents: expected the reasoning raise with the flag off, got: $srf"
+
+  # Flag ON: the search half survives; the answer carries the marker + detail.
+  pg_set_guc fractalsql.agent_partial_reasoning_fail on on \
+    || { fail "32 sovereign_agents: could not set agent_partial_reasoning_fail=on"; pg_swap_plugin "$MOCK" >/dev/null; return; }
+  local srp; srp=$("${PSQL[@]}" -c "
+     SELECT (answer LIKE 'reasoning_step_failed:%') AND (answer LIKE '%rc=%'), array_length(source_doc_ids, 1), execution_time_ms
+       FROM fractal_search_agent('q', 'bt_agent_vec', 'emb');" 2>&1)
+  grep <<< "$srp" -Eq "^t\|[1-9][0-9]*\|" \
+    && pass "32 sovereign_agents: agent_partial_reasoning_fail on -- search_agent returns data half + reasoning_step_failed" \
+    || fail "32 sovereign_agents: expected a partial result (data half + reasoning_step_failed), got: $srp"
+
+  local rap; rap=$("${PSQL[@]}" -c "SELECT answer LIKE 'reasoning_step_failed:%' FROM fractal_rag_agent('q', 'bt_agent_vec', 'emb');" 2>&1)
+  grep <<< "$rap" -q "^t$" \
+    && pass "32 sovereign_agents: agent_partial_reasoning_fail on -- rag_agent returns the partial answer" \
+    || fail "32 sovereign_agents: expected the rag_agent partial answer, got: $rap"
+
+  # Restore the default raise contract before cleanup.
+  pg_set_guc fractalsql.agent_partial_reasoning_fail off off \
+    || { fail "32 sovereign_agents: could not reset agent_partial_reasoning_fail=off"; pg_swap_plugin "$MOCK" >/dev/null; return; }
+
   "${PSQL[@]}" -c "DROP TABLE IF EXISTS bt_agent_vec, bt_agent_fvec, bt_agent_nopk, bt_agent_empty;" >/dev/null 2>&1
   pg_swap_plugin "$MOCK" >/dev/null
   return 0
 }
+
+# gate_33_mcp_smoke -- the FractalSQL MCP plugin (mcp/, docs/mcp-plugin.md) exercised end to end over stdio. The C++17 server is built with its own plain Makefile (mcp/Makefile, per the spec's plain-make build standard), then mcp/test/smoke.py drives it over JSON-RPC: wire-level asserts always run; DB-dependent round trips run against the gate set's own throwaway cluster wired in through the standard PG* env libpq reads. Skips (not fails) when the C++ toolchain, pkg-config libpq/openssl, or python3 are absent -- the plugin's gates are additive.
+gate_33_mcp_smoke() {
+  if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+    skip "33 mcp_smoke (make/g++ not on PATH -- the MCP server builds via mcp/Makefile)"
+    return 0
+  fi
+  if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists libpq 2>/dev/null; then
+    skip "33 mcp_smoke (pkg-config libpq missing -- install libpq-dev)"
+    return 0
+  fi
+  if ! pkg-config --exists openssl 2>/dev/null; then
+    skip "33 mcp_smoke (pkg-config openssl missing -- install libssl-dev)"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "33 mcp_smoke (python3 not on PATH -- the smoke driver is a zero-dep python script)"
+    return 0
+  fi
+  if build_mcp "$TMPROOT/fractalsql_bt_mcp33_build.log"; then :; else
+    tail -25 "$TMPROOT/fractalsql_bt_mcp33_build.log" | sed 's/^/         /'
+    fail "33 mcp_smoke (mcp/Makefile build failed -- see $TMPROOT/fractalsql_bt_mcp33_build.log)"; return 0
+  fi
+  if [[ ! -x mcp/fractalsql-postgresql-mcp ]]; then
+    skip "33 mcp_smoke (binary absent after build)"
+    return 0
+  fi
+
+  # Fixture for the row-locator/truncation/vectorizer calls (single-column PK
+  # for the vectorizer lifecycle; label col for the text-column registration;
+  # empty emb_auto as the vectorizer's target column -- create() needs it to
+  # exist to wire the trigger + backfill).
+  "${PSQL[@]}" -c "
+     DROP TABLE IF EXISTS mcpsmoke_items;
+     CREATE TABLE mcpsmoke_items (id serial PRIMARY KEY, name text, label text, emb float8[], emb_auto float8[]);
+     INSERT INTO mcpsmoke_items (name, label, emb) SELECT 'i' || g, 'l' || g, ARRAY[0.1*g, 0.2, 0.0]::float8[] FROM generate_series(1, 5) g;
+     DROP TABLE IF EXISTS mcpsw_logs;
+     CREATE TABLE mcpsw_logs (metric float8, ts timestamptz, host text);
+     INSERT INTO mcpsw_logs SELECT 50.0 + (g % 8) * 1.3 + CASE WHEN g > 48 THEN 30.0 ELSE 0.0 END,
+            now() - (96 - g) * interval '1 second', 'h1' FROM generate_series(1, 96) g;
+  " >/dev/null 2>&1
+  # The mock reasoning plugin is already active in this cluster (setup wrote
+  # fractalsql.reasoning_plugin = '$MOCK' into postgresql.conf); the mock
+  # returns whatever file /tmp/fractalsql_bt_sql.txt holds as the "LLM
+  # response" (fenced, or raw 'SELECT 1' if the file is absent). An EARLIER
+  # gate in the same run may have left stale content there and/or swapped the
+  # plugin -- pin both fresh so smoke.py's Cognition round trip is
+  # deterministic no matter which gates ran before this one.
+  printf "SELECT 'mcp-cognition-ok'::text;\n" > /tmp/fractalsql_bt_sql.txt
+  pg_swap_plugin "$MOCK" >/dev/null
+  local out rc=0
+  # FSQL_MCP_MOCK_SQL_FILE: smoke.py's agent_partial_reasoning_fail case writes
+  # the FSQL_BT_FORCE_FAIL sentinel into the mock plugin's response file, then
+  # restores it (same file the Cognition canary above is pinned to).
+  out=$(PGHOST="$SOCKDIR" PGPORT="$PORT" PGUSER=postgres \
+        PGDATABASE=postgres FSQL_MCP_LOG_LEVEL=normal FSQL_MCP_DEBUG_SQL=1 \
+        FSQL_MCP_EXE="$PWD/mcp/fractalsql-postgresql-mcp" \
+        FSQL_MCP_MOCK_SQL_FILE=/tmp/fractalsql_bt_sql.txt \
+        python3 mcp/test/smoke.py 2>&1) || rc=$?
+  # Keep every assert line visible under the gate's own indent.
+  printf '%s\n' "$out" | sed 's/^/         /'
+  if [[ "$rc" -eq 0 ]]; then
+    pass "33 mcp_smoke: handshake + tools/list invariants + per-tier tools/call round trips (C++17 server)"
+  elif [[ "$rc" -eq 77 ]]; then
+    skip "33 mcp_smoke (smoke driver reported self-skip)"
+  else
+    fail "33 mcp_smoke (see assert lines above)"
+  fi
+  "${PSQL[@]}" -c "DROP TABLE IF EXISTS mcpsmoke_items, mcpsw_logs;" >/dev/null 2>&1
+  return 0
+}
+
+# ======================================================================
+# Gates 39-42: standalone host-side unit probes (no cluster needed).
+# Compiler resolution notes: gate 39 is pure C (this repo's own
+# src/fractalsql_parse.c -- postgres.h-free by design, exactly so a
+# standalone TU can link it, gate 21's fuzz drivers being the original
+# client); gates 40/41/42 are C++17 and need g++/clang++ specifically --
+# gcc alone mis-links the C++ standard-library symbols for these probes
+# (same finding the sibling SQLite column's harnesses recorded). Both
+# resolvers honor FSQL_CC / FSQL_CXX overrides.
+pick_cc() {
+  local c
+  if [[ -n "${FSQL_CC:-}" ]] && command -v "$FSQL_CC" >/dev/null 2>&1; then
+    printf '%s' "$FSQL_CC"; return 0
+  fi
+  for c in cc gcc clang; do
+    command -v "$c" >/dev/null 2>&1 && { printf '%s' "$(command -v "$c")"; return 0; }
+  done
+  return 1
+}
+
+pick_cxx() {
+  local c
+  if [[ -n "${FSQL_CXX:-}" ]] && command -v "$FSQL_CXX" >/dev/null 2>&1; then
+    printf '%s' "$FSQL_CXX"; return 0
+  fi
+  for c in g++ clang++; do
+    command -v "$c" >/dev/null 2>&1 && { printf '%s' "$(command -v "$c")"; return 0; }
+  done
+  return 1
+}
+
+# dir_of <absolute-compiler-path-or-name> -- the bin dir its own runtime
+# DLLs live in (mingw exes resolve libstdc++/libgcc/libwinpthread from
+# PATH, and a host PATH can carry a DIFFERENT mingw's copy -- verified
+# on a Git-Bash host: Git-for-Windows's /mingw64/bin shadowed the probe
+# compiler's libstdc++-6.dll and every C++ probe 127'd at load).
+dir_of() {
+  dirname "$(command -v "$1" 2>/dev/null || echo "$1")"
+}
+
+# gate_38_mcp_https -- the MCP server's direct-TLS mode (--https) against
+# mcp/tests/mcp_https_smoke_client.py: the three load-failure modes
+# (missing files / garbage key / mismatched key) must exit nonzero at
+# STARTUP, the port must speak TLS not plaintext, and the token check must
+# still apply under TLS. The gate generates the throwaway self-signed
+# cert/key with the openssl CLI (skipping the whole gate if it is absent).
+# Runs standalone (no cluster): the client's DB-dependent live-leg checks
+# self-skip without PG* env -- TLS behavior is the point, and the
+# plaintext HTTP behavior is gate 33's/smoke.py's.
+gate_38_mcp_https() {
+  local exe="$PWD/mcp/fractalsql-postgresql-mcp"
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "38 mcp_https (python3 not on PATH)"; return 0
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    skip "38 mcp_https (openssl not on PATH -- the throwaway self-signed cert needs it)"; return 0
+  fi
+  if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+    skip "38 mcp_https (make/g++ not on PATH)"; return 0
+  fi
+  if ! pkg-config --exists libpq >/dev/null 2>&1 || ! pkg-config --exists openssl >/dev/null 2>&1; then
+    skip "38 mcp_https (pkg-config libpq/openssl missing -- install libpq-dev/libssl-dev)"; return 0
+  fi
+  # ALWAYS rebuild (never test a stale exe): a committed/host-built Linux
+  # binary can carry a GLIBC the runner doesn't have (the docker gate caught
+  # exactly that: a GLIBC_2.38 host build inside a bookworm 2.36 image,
+  # "version GLIBC_2.38 not found" at every spawn). make is incremental and
+  # 33 does the same thing.
+  if build_mcp "$TMPROOT/fractalsql_bt_mcp38_build.log"; then :; else
+    tail -25 "$TMPROOT/fractalsql_bt_mcp38_build.log" | sed 's/^/         /'
+    fail "38 mcp_https (mcp/Makefile build failed -- see $TMPROOT/fractalsql_bt_mcp38_build.log)"; return 0
+  fi
+  local port cert key
+  port=18953
+  cert="$TMPROOT/fractalsql_bt_https_cert.pem"
+  key="$TMPROOT/fractalsql_bt_https_key.pem"
+  if ! openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+        -subj "/CN=127.0.0.1" -config /dev/null \
+        -keyout "$key" -out "$cert" >/dev/null 2>&1 \
+     || [[ ! -s "$cert" || ! -s "$key" ]]; then
+    # Some openssl builds need a real config file; fall back to the
+    # driver's own minimal-config recipe (it generates a second pair the
+    # same way, so a bare -config /dev/null that fails here fails there
+    # too -- both halves skip-as-pass consistently).
+    skip "38 mcp_https (openssl self-signed generation failed)"; return 0
+  fi
+  local out rc=0
+  out=$(MCP_SERVER_EXE="$exe" MCP_SERVER_CWD="$PWD" \
+        MCP_HTTPS_PORT="$port" MCP_HTTPS_CERT="$cert" MCP_HTTPS_KEY="$key" \
+        python3 mcp/tests/mcp_https_smoke_client.py 2>&1) || rc=$?
+  printf '%s\n' "$out" | sed 's/^/         /'
+  if [[ "$rc" -eq 0 ]]; then
+    pass "38 mcp_https: --https fail-fast modes + TLS-only port + bearer-under-TLS round trip"
+  else
+    fail "38 mcp_https (see client output above)"
+  fi
+  return 0
+}
+
+gate_39_extract_parse() {
+  local cc
+  cc="$(pick_cc)" || { skip "39 extract_parse (no C compiler on PATH -- set FSQL_CC)"; return 0; }
+  # fsql_extract_best_point / fsql_parse_embedding_array /
+  # fsql_extract_topk (src/fractalsql_parse.c) all parse JSON text
+  # that, through any real SQL-level call, only ever comes back
+  # well-formed from the vendored SFS core or tests/mock_reasoning_
+  # plugin.c's canned responses -- there is no SQL-reachable way to
+  # feed them a deliberately malformed string, so their error branches
+  # (missing key, malformed number, missing closing brace, idx out of
+  # range/wrap guard, non-JSON input) are otherwise dead in a plain
+  # --coverage run. Same standalone-probe / separately-named-object
+  # treatment as the SQLite column's gate 39: probe-only objects named
+  # _extract_parse_* for src/fractalsql_parse.c, NOT the main build's
+  # own src/fractalsql_parse.o paths, so under --coverage this run's
+  # hits ADD to the real build's via lcov's same-source-path summation
+  # rather than overwriting its object file's counters.
+  local mainobj="src/_extract_parse_main.o"
+  local supportobj="src/_extract_parse_support.o"
+  local covflags=()
+  [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage)
+  rm -f "$mainobj" "$supportobj"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cc" -std=c11 -O1 -g \
+        ${covflags[@]+"${covflags[@]}"} -Isrc \
+        -c tests/extract_parse_probe.c -o "$mainobj" \
+        >"$TMPROOT/fractalsql_bt_extract_parse_build.log" 2>&1 \
+     || ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cc" -std=c11 -O1 -g \
+        ${covflags[@]+"${covflags[@]}"} \
+        -c src/fractalsql_parse.c -o "$supportobj" \
+        >>"$TMPROOT/fractalsql_bt_extract_parse_build.log" 2>&1; then
+    fail "39 extract_parse: probe failed to build (see $TMPROOT/fractalsql_bt_extract_parse_build.log)"
+    rm -f "$mainobj" "$supportobj"
+    return 0
+  fi
+  local bin="$TMPROOT/fractalsql_bt_extract_parse_probe"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cc" ${covflags[@]+"${covflags[@]}"} \
+        "$mainobj" "$supportobj" -o "$bin" \
+        >"$TMPROOT/fractalsql_bt_extract_parse_link.log" 2>&1; then
+    fail "39 extract_parse: probe failed to link (see $TMPROOT/fractalsql_bt_extract_parse_link.log)"
+    rm -f "$mainobj" "$supportobj"
+    return 0
+  fi
+  # No sanitizer runtime of its own -- nothing here dlopens a
+  # sanitizer-built library, so strip any sanitizer preload the
+  # harness exported before running it (build+run both).
+  # Subshell-local strip only: this is the C (cc) probe -- gcc has no
+  # shared stdc++ runtime to pin to its own dir, so no compiler-dir
+  # PATH prepend is needed (the C++ probes 40/41/42 do the $cxx-dir
+  # prepend instead).
+  local out
+  out=$(
+    unset LD_PRELOAD DYLD_INSERT_LIBRARIES
+    "$bin" 2>&1
+  )
+  local rc=$?
+  rm -f "$mainobj" "$supportobj"
+  if [[ "$COVERAGE" -ne 1 ]]; then
+    rm -f "${mainobj%.o}.gcno" "${mainobj%.o}.gcda"
+    rm -f "${supportobj%.o}.gcno" "${supportobj%.o}.gcda"
+  fi
+  if [[ $rc -eq 0 ]]; then
+    local n_ok; n_ok="$(grep -c '^OK:' <<<"$out")"
+    pass "39 extract_parse: best_point/embedding_array/topk malformed-input branches ($n_ok checks OK)"
+  else
+    printf '%s\n' "$out" | sed 's/^/         /'
+    fail "39 extract_parse: see driver output above"
+  fi
+  return 0
+}
+
+gate_40_vectors_probe() {
+  if [[ ! -f "mcp/tests/vectors_probe.cpp" ]]; then
+    skip "40 vectors_probe (mcp/tests/vectors_probe.cpp not present)"
+    return 0
+  fi
+  local cxx
+  cxx="$(pick_cxx)" || { skip "40 vectors_probe (no g++/clang++ on PATH -- set FSQL_CXX)"; return 0; }
+  # mcp/src/vectors.cpp's own coercion/validation branches are
+  # reachable through a real tools/call round trip only indirectly (a
+  # tool whose schema lets a deliberately-malformed element through);
+  # the unit probe hits each branch with certainty. Built from mcp/ so
+  # the recorded source path for src/vectors.cpp and src/errors.cpp
+  # matches the main mcp build's own -- merging into its coverage via
+  # lcov's same-source-path summation rather than overwriting it. Its
+  # ToolError/ErrorClass API lives in errors.cpp, so that TU is
+  # separately compiled alongside vectors.cpp with its own
+  # _vectors_probe_errors.o (same naming pattern as the source files it
+  # provides coverage for).
+  local mainobj="mcp/src/_vectors_probe_main.o"
+  local vecobj="mcp/src/_vectors_probe_vectors.o"
+  local errobj="mcp/src/_vectors_probe_errors.o"
+  local covflags=()
+  [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage -fprofile-update=atomic)
+  # std::to_chars(double) in src/vectors.cpp needs macOS >= 13.3 (see mcp/Makefile)
+  local minver=()
+  [[ "$(uname -s)" = "Darwin" ]] && minver+=(-mmacosx-version-min=13.3)
+  rm -f "$mainobj" "$vecobj" "$errobj"
+  (
+    cd mcp && \
+    { env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
+        ${covflags[@]+"${covflags[@]}"} ${minver[@]+"${minver[@]}"} -Ivendor -Isrc \
+        -c tests/vectors_probe.cpp -o "$HERE/mcp/src/_vectors_probe_main.o"
+      rc1=$?
+      env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
+        ${covflags[@]+"${covflags[@]}"} ${minver[@]+"${minver[@]}"} -Ivendor -Isrc \
+        -c src/vectors.cpp -o "$HERE/mcp/src/_vectors_probe_vectors.o"; rc2=$?
+      env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
+        ${covflags[@]+"${covflags[@]}"} ${minver[@]+"${minver[@]}"} -Ivendor -Isrc \
+        -c src/errors.cpp -o "$HERE/mcp/src/_vectors_probe_errors.o"; rc3=$?
+    } 2>&1
+    [[ $rc1 -eq 0 && $rc2 -eq 0 && $rc3 -eq 0 ]]; echo "build-rc=$?"
+  ) >"$TMPROOT/fractalsql_bt_vectors_probe_build.log" 2>&1
+  local build_ok
+  build_ok="$(grep -o '^build-rc=[0-9]*$' "$TMPROOT/fractalsql_bt_vectors_probe_build.log" | grep -o '[0-9]*$')"
+  if [[ "$build_ok" != "0" || ! -f "$mainobj" || ! -f "$vecobj" || ! -f "$errobj" ]]; then
+    fail "40 vectors_probe: probe failed to build (see $TMPROOT/fractalsql_bt_vectors_probe_build.log)"
+    rm -f "$mainobj" "$vecobj" "$errobj"
+    return 0
+  fi
+  local bin="$TMPROOT/fractalsql_bt_vectors_probe"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" ${covflags[@]+"${covflags[@]}"} \
+        "$mainobj" "$vecobj" "$errobj" -o "$bin" \
+        >"$TMPROOT/fractalsql_bt_vectors_probe_link.log" 2>&1; then
+    fail "40 vectors_probe: probe failed to link (see $TMPROOT/fractalsql_bt_vectors_probe_link.log)"
+    rm -f "$mainobj" "$vecobj" "$errobj"
+    return 0
+  fi
+  # Subshell-local: strip the harness's sanitizer preload (this probe
+  # dlopens nothing sanitizer-built) and resolve the PROBE COMPILER's
+  # own runtime dir first (see dir_of -- a Git-Bash host's /mingw64/bin
+  # can shadow libstdc++-6.dll/libgcc_s_seh-1.dll with an incompatible
+  # Git-for-Windows copy, verified: full ambient PATH made the C++
+  # probes fail to load with 127, minimal first).
+  local out
+  out=$(
+    unset LD_PRELOAD DYLD_INSERT_LIBRARIES
+    PATH="$(dir_of "$cxx"):$PATH"
+    "$bin" 2>&1
+  )
+  local rc=$?
+  rm -f "$mainobj" "$vecobj" "$errobj"
+  if [[ "$COVERAGE" -ne 1 ]]; then
+    rm -f "${mainobj%.o}.gcno" "${mainobj%.o}.gcda"
+    rm -f "${vecobj%.o}.gcno" "${vecobj%.o}.gcda"
+    rm -f "${errobj%.o}.gcno" "${errobj%.o}.gcda"
+  fi
+  if [[ $rc -eq 0 ]]; then
+    local n_ok; n_ok="$(grep -c '^OK:' <<<"$out")"
+    pass "40 vectors_probe: mcp/src/vectors.cpp coercion/validation branches ($n_ok checks OK)"
+  else
+    printf '%s\n' "$out" | sed 's/^/         /'
+    fail "40 vectors_probe: see driver output above"
+  fi
+  return 0
+}
+
+# Builds the db_probe binary once and remembers it (G41_READY/G41_BIN,
+# deliberately NOT local -- the live leg reuses it). pkg-config first,
+# pg_config as the fallback; only libpq at link time (errors.cpp pulls
+# in no OpenSSL -- -lssl/-lcrypto are the SERVER link's requirement in
+# mcp/Makefile, not this probe's).
+_gate_41_build() {
+  if [[ "${G41_READY:-0}" -eq 1 ]]; then return 0; fi
+  G41_READY=0
+  G41_BIN=""
+  G41_LIBPQ_BIN=""
+  if [[ ! -f "mcp/tests/db_probe.cpp" ]]; then
+    skip "41 db_probe (mcp/tests/db_probe.cpp not present)"
+    return 1
+  fi
+  local cxx
+  cxx="$(pick_cxx)" || { skip "41 db_probe (no g++/clang++ on PATH -- set FSQL_CXX)"; return 1; }
+  # Resolution ORDER: pg_config first (PG_BINDIR, PATH, EDB and
+  # Homebrew layouts), pkg-config second. pkg-config mirrors
+  # mcp/Makefile's own --cflags/--libs libpq usage and is what a bare
+  # libpq-dev CI host has -- but on an MSYS host Strawberry perl's
+  # pkg-config "wins" with a resolvable .pc pointing at ITS OWN client
+  # (libpq.a importing a libpq__.dll: still a working libpq, but not
+  # the PG major this harness tests) -- hence pg_config-first, and the
+  # trivial PQlibVersion() compile+run verify before trusting any
+  # chain either way (same "test-compile before trusting a resolution"
+  # convention gate 21 already uses for its libFuzzer-capable clang).
+  # Only libpq is needed at link time -- errors.cpp pulls in no OpenSSL
+  # (-lssl/-lcrypto are the SERVER link's requirement in mcp/Makefile,
+  # not this probe's).
+  local pq_probe_c="$TMPROOT/fractalsql_bt_db_probe_toolchain.c"
+  local pq_probe_bin="$TMPROOT/fractalsql_bt_db_probe_toolchain"
+  printf '%s\n' '#include <libpq-fe.h>' \
+      'int main(void) { return PQlibVersion() >= 0 ? 0 : 1; }' > "$pq_probe_c"
+  local pq_cflags="" pq_libs="" pgrtbin="" cand
+  for cand in "${PG_BINDIR:-/pg_config}" \
+              "/c/Program Files/PostgreSQL/$PG_MAJOR/bin/pg_config" \
+              "/usr/lib/postgresql/$PG_MAJOR/bin/pg_config" \
+              "/Library/PostgreSQL/$PG_MAJOR/bin/pg_config" \
+              "$(command -v pg_config 2>/dev/null || true)"; do
+    [[ -n "$cand" && -x "$cand" ]] || continue
+    local c2 l2
+    c2="-I$("$cand" --includedir 2>/dev/null)"
+    l2="-L$("$cand" --libdir 2>/dev/null) -lpq"
+    # The verify's run half needs libpq's runtime too (MSYS/DLL
+    # case -- pg_config's own bin dir; no-op on POSIX).
+    if PATH="$(dirname "$cand"):$PATH" "$cxx" -O1 -g $c2 "$pq_probe_c" $l2 \
+         -o "$pq_probe_bin" >/dev/null 2>&1 \
+       && PATH="$(dirname "$cand"):$PATH" "$pq_probe_bin" >/dev/null 2>&1; then
+      pq_cflags="$c2"; pq_libs="$l2"
+      pgrtbin="$(dirname "$cand")"
+      break
+    fi
+  done
+  if [[ -z "$pq_cflags$pq_libs" ]] && command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libpq 2>/dev/null; then
+    local c1 l1
+    c1="$(pkg-config --cflags libpq 2>/dev/null)"    # flags must word-split, unquoted
+    l1="$(pkg-config --libs libpq 2>/dev/null)"
+    if "$cxx" -O1 -g $c1 "$pq_probe_c" $l1 -o "$pq_probe_bin" >/dev/null 2>&1 \
+       && "$pq_probe_bin" >/dev/null 2>&1; then
+      pq_cflags="$c1"; pq_libs="$l1"
+    fi
+  fi
+  rm -f "$pq_probe_c" "$pq_probe_bin" "$pq_probe_bin.exe"
+  if [[ -z "$pq_cflags$pq_libs" ]]; then
+    skip "41 db_probe (no working libpq -- pkg-config libpq and pg_config (PG_BINDIR, PATH, EDB/Homebrew layouts) all failed their own probe compile+run)"
+    return 1
+  fi
+  # Runtime side: libpq is a shared object everywhere; on MSYS/Windows
+  # the .dll (and its own deps) live in the same PG tree's bin dir,
+  # which the child must see on PATH when the probe runs. Empty on
+  # POSIX when pkg-config won (the shared lib resolves normally
+  # there); a pg_config win gives us the exact tree.
+  if [[ -n "$pgrtbin" ]]; then
+    G41_LIBPQ_BIN="$pgrtbin"
+  elif [[ -n "${PG_BINDIR:-}" ]]; then
+    G41_LIBPQ_BIN="${PG_BINDIR%/bin}/bin"
+  elif command -v pg_config >/dev/null 2>&1; then
+    G41_LIBPQ_BIN="$(pg_config --bindir 2>/dev/null || true)"
+  fi
+  # ...plus the probe compiler's own runtime dir (dir_of) rides ahead
+  # of the ambient PATH in the run legs below: libpq's dir first, then
+  # the C++ runtime's (see dir_of's comment).
+  G41_LIBPQ_BIN="${G41_LIBPQ_BIN:+$G41_LIBPQ_BIN:}$(dir_of "$cxx")"
+  local mainobj="mcp/src/_db_probe_main.o"
+  local errobj="mcp/src/_db_probe_errors.o"
+  local covflags=()
+  [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage -fprofile-update=atomic)
+  rm -f "$mainobj" "$errobj"
+  (
+    cd mcp && {
+      env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
+          ${covflags[@]+"${covflags[@]}"} $pq_cflags -Ivendor -Isrc \
+          -c tests/db_probe.cpp -o "$HERE/mcp/src/_db_probe_main.o"; rc1=$?
+      env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g \
+          ${covflags[@]+"${covflags[@]}"} $pq_cflags -Ivendor -Isrc \
+          -c src/errors.cpp -o "$HERE/mcp/src/_db_probe_errors.o"; rc2=$?
+    }
+  ) >"$TMPROOT/fractalsql_bt_db_probe_build.log" 2>&1
+  if [[ ! -f "$mainobj" || ! -f "$errobj" ]]; then
+    fail "41 db_probe: probe failed to build (see $TMPROOT/fractalsql_bt_db_probe_build.log)"
+    rm -f "$mainobj" "$errobj"
+    return 1
+  fi
+  G41_BIN="$TMPROOT/fractalsql_bt_db_probe"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" \
+        ${covflags[@]+"${covflags[@]}"} "$mainobj" "$errobj" -o "$G41_BIN" \
+        $pq_libs \
+        >"$TMPROOT/fractalsql_bt_db_probe_link.log" 2>&1; then
+    fail "41 db_probe: probe failed to link (see $TMPROOT/fractalsql_bt_db_probe_link.log)"
+    G41_BIN=""
+    return 1
+  fi
+  rm -f "$mainobj" "$errobj"
+  if [[ "$COVERAGE" -ne 1 ]]; then
+    rm -f "${mainobj%.o}.gcno" "${mainobj%.o}.gcda"
+    rm -f "${errobj%.o}.gcno" "${errobj%.o}.gcda"
+  fi
+  G41_READY=1
+  return 0
+}
+
+gate_41_db_probe() {
+  # DB-less leg. Runs ALWAYS (standalone, before pg_setup -- like gates
+  # 01/21) with every PG* env var explicitly cleared, so the probe's
+  # live-DB section self-skips (mirroring mcp/test/smoke.py's exit-77
+  # posture); DB-less checks must all pass (exit 0). The compiled
+  # binary is KEPT (G41_BIN/G41_READY) for the gate's LIVE leg --
+  # gate_41_db_live(), run inside the db block after gate 33, wiring
+  # the same PG* env gate 33 exports to the server.
+  _gate_41_build || return 0
+  local out
+  local path_pfx="${G41_LIBPQ_BIN:+$G41_LIBPQ_BIN:}"
+  # Subshell-local env edits (NOT `env VAR=... cmd`: confirmed on an
+  # MSYS host that coreutils env's own PATH= handling breaks the
+  # child's DLL search for a spaces-in-path libpq bin dir, while the
+  # plain assignment form works -- and the unset/PATH changes anyway
+  # stay inside the $( ) subshell).
+  out=$(
+    unset PGDATABASE PGHOST PGCONN FSQL_MCP_TEST_CONNINFO \
+          LD_PRELOAD DYLD_INSERT_LIBRARIES   # no sanitizer-built library involved here
+    [[ -n "$path_pfx" ]] && PATH="$path_pfx$PATH"
+    "$G41_BIN" 2>&1
+  )
+  local rc=$?
+  if [[ $rc -eq 0 ]]; then
+    local n_ok; n_ok="$(grep -c '^OK:' <<<"$out")"
+    pass "41 db_probe: unconnected/refused-connection + SQLSTATE-classification branches, DB-less ($n_ok checks OK; live checks self-skipped without PG* env)"
+  else
+    printf '%s\n' "$out" | sed 's/^/         /'
+    fail "41 db_probe: see driver output above (DB-less leg)"
+  fi
+  return 0
+}
+
+gate_41_db_live() {
+  # LIVE leg: runs only inside the db block (see run_major), directly
+  # after gate 33 in gate order 33 -> ... -> 41, with the throwaway
+  # cluster pg_setup() started still up. Wires the same PG* env gate 33
+  # exports (unix-socket host, this run's port, trust-auth postgres
+  # user), so the probe's connected/prepare-failure/version-skew/
+  # agent-partial branches exercise the REAL engine. Without a
+  # successfully built probe (the DB-less leg already reported why),
+  # this leg just references that verdict instead of re-failing.
+  if [[ "${G41_READY:-0}" -ne 1 ]]; then
+    skip "41 db_probe live leg (probe build didn't succeed -- see the DB-less leg's own fail/skip reason above)"
+    return 0
+  fi
+  if [[ -z "$SOCKDIR" || ! -S "$SOCKDIR/.s.PGSQL.$PORT" ]]; then
+    skip "41 db_probe live leg (no live cluster socket at $SOCKDIR)"
+    return 0
+  fi
+  local out
+  out=$(
+    unset LD_PRELOAD DYLD_INSERT_LIBRARIES   # libpq here is not sanitizer-built
+    PATH="${G41_LIBPQ_BIN:+$G41_LIBPQ_BIN:}$PATH" \
+    PGHOST="$SOCKDIR" PGPORT="$PORT" PGUSER=postgres PGDATABASE=postgres \
+    "$G41_BIN" 2>&1
+  )
+  local rc=$?
+  if [[ $rc -eq 0 ]]; then
+    local n_ok; n_ok="$(grep -c '^OK:' <<<"$out")"
+    pass "41 db_probe live leg: connected callScalar/callRow/callRows, engine-failure classification, version-skew warning and agent-partial wiring on the live cluster ($n_ok checks OK)"
+  else
+    printf '%s\n' "$out" | sed 's/^/         /'
+    fail "41 db_probe live leg: see driver output above"
+  fi
+  return 0
+}
+
+gate_42_concurrency_probe() {
+  if [[ ! -f "mcp/tests/concurrency_probe.cpp" ]]; then
+    skip "42 concurrency_probe (mcp/tests/concurrency_probe.cpp not present)"
+    return 0
+  fi
+  local cxx
+  cxx="$(pick_cxx)" || { skip "42 concurrency_probe (no g++/clang++ on PATH -- set FSQL_CXX)"; return 0; }
+  # mcp/src/concurrency.h's per-client-limit-reached and global-timeout
+  # throw branches (and the Token-destructor release paths each throw
+  # takes on its way out) are never hit by any live-protocol test: a
+  # synchronous request/response round trip always releases its Token
+  # before the next request is read. concurrency.h is header-only (no
+  # concurrency.cpp of its own), so -- like gate 41's db_probe sibling --
+  # this probe's own translation unit is the only place its coverage
+  # data exists at all, and no other object needs to be separately
+  # compiled alongside it.
+  local obj="mcp/src/_concurrency_probe.o"
+  local covflags=()
+  [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage -fprofile-update=atomic)
+  rm -f "$obj"
+  (
+    cd mcp && env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -std=c++17 -O1 -g -pthread \
+        ${covflags[@]+"${covflags[@]}"} -Ivendor -Isrc \
+        -c tests/concurrency_probe.cpp -o "$HERE/mcp/src/_concurrency_probe.o" 2>&1; echo "build-rc=$?"
+  ) >"$TMPROOT/fractalsql_bt_concurrency_probe_build.log" 2>&1
+  local build_ok
+  build_ok="$(grep -o '^build-rc=[0-9]*$' "$TMPROOT/fractalsql_bt_concurrency_probe_build.log" | grep -o '[0-9]*$')"
+  if [[ "$build_ok" != "0" || ! -f "$obj" ]]; then
+    fail "42 concurrency_probe: probe failed to build (see $TMPROOT/fractalsql_bt_concurrency_probe_build.log)"
+    rm -f "$obj"
+    return 0
+  fi
+  local bin="$TMPROOT/fractalsql_bt_concurrency_probe"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cxx" -pthread \
+        ${covflags[@]+"${covflags[@]}"} "$obj" -o "$bin" \
+        >"$TMPROOT/fractalsql_bt_concurrency_probe_link.log" 2>&1; then
+    fail "42 concurrency_probe: probe failed to link (see $TMPROOT/fractalsql_bt_concurrency_probe_link.log)"
+    rm -f "$obj"
+    return 0
+  fi
+  # Subshell-local: strip the harness's sanitizer preload (this probe
+  # dlopens nothing sanitizer-built) and resolve the PROBE COMPILER's
+  # own runtime dir first (see dir_of -- a Git-Bash host's /mingw64/bin
+  # can shadow libstdc++-6.dll/libgcc_s_seh-1.dll with an incompatible
+  # Git-for-Windows copy, verified: full ambient PATH made the C++
+  # probes fail to load with 127, minimal first).
+  local out
+  out=$(
+    unset LD_PRELOAD DYLD_INSERT_LIBRARIES
+    PATH="$(dir_of "$cxx"):$PATH"
+    "$bin" 2>&1
+  )
+  local rc=$?
+  rm -f "$obj"
+  if [[ "$COVERAGE" -ne 1 ]]; then
+    rm -f "${obj%.o}.gcno" "${obj%.o}.gcda"
+  fi
+  if [[ $rc -eq 0 ]]; then
+    pass "42 concurrency_probe: mcp/src/concurrency.h per-client-limit, global-timeout and Token-release branches (driver: ${out})"
+  else
+    printf '%s\n' "$out" | sed 's/^/         /'
+    fail "42 concurrency_probe: see driver output above"
+  fi
+  return 0
+}
+
+# The enterprise SURFACE INVARIANT: of the twelve user-facing enterprise
+# functions, exactly ONE is not gated on the enterprise core library.
+#
+# fractal_ledger_verify() is a pure storage-layer check -- it walks the
+# persisted ledger chain with SPI and never touches the enterprise core
+# (no ensure_search_ctx, no ensure_enterprise_lib) -- so it must answer
+# on EVERY edition, including community with no .so anywhere. The other
+# ELEVEN (9 ledger/audit + 2 portfolio) must raise the documented
+# 'enterprise tier not loaded' error when the library is absent.
+#
+# This is easy to break by accident, in both directions:
+#   - GATING fractal_ledger_verify() "for consistency" would take the
+#     CISO audit query offline on community -- a forensic read of the
+#     persisted chain, which community still writes via the best-effort
+#     audit bindings, with no core library involved at all.
+#   - UNGATING one of the other eleven would make a dormant function
+#     appear to work, and then fail deeper in, in a way that leaks the
+#     enterprise core's internals.
+# The sibling engine (fractalsql-sqlite) holds the same invariant, and
+# the whole point of pinning it here is that it is a property of the
+# SURFACE, not of any one edition.
+#
+# The dormant state is forced deterministically by pointing
+# fractalsql.enterprise_lib at a path that does not exist -- the same
+# trick gate 24's Phase B uses -- so this gate asserts the SAME thing
+# whether or not an enterprise library happens to be vendored in
+# include/. It therefore does NOT self-skip on a community checkout:
+# the community checkout is precisely the state it is here to pin.
+# ----------------------------------------------------------------------
+# gate 48: industry kits (demo/demo-vertical-*.sql: 42 kits -- the twenty-nine newer
+# automotive / aerospace / telecom / climate-tech / RF / event-stream / document / spatial kits, then the 13 original
+# ones, which are checked for a clean run and an unchanged output shape rather than a headline).  Each is run
+# end to end through psql against the scratch cluster (fractalsql_agents
+# installed, the mock reasoning plugin answering the reasoned steps) and
+# must (a) exist, (b) raise no SQL error beyond the documented exception
+# (the scenario-planning kit's plan_explore call needs an embedding
+# endpoint: at most one error), (c) print no NaN, and (d) reproduce its
+# headline claim -- the fixtures are deterministic (no random()), so the
+# claim is checked against fixed numbers.
+# ----------------------------------------------------------------------
+# kit_shape_ok <output> <min>: the older kits have no HEADLINE line and their fixtures use
+# random() under setseed(), so their numbers are not pinned. What a regression does change is
+# the SHAPE of the output: a step that silently returns no rows drops data lines. Count the
+# lines that are neither psql noise nor command tags and require at least <min> of them
+# (three quarters of what a clean run prints).
+kit_shape_ok() {
+  local n
+  n=$(grep -vcE '^(psql:|NOTICE|HINT|DETAIL|CONTEXT|LINE|DROP |CREATE |INSERT |UPDATE |DELETE |SELECT [0-9]|ALTER |SET$|Timing|Time:|$)' <<< "$1")
+  [[ "$n" -ge "$2" ]]
+}
+
+gate_48_kits() {
+  if [[ ! -d demo ]]; then
+    skip "48 kits (demo/ not present)"; return
+  fi
+  pg_swap_plugin "$MOCK" || { fail "48 kits: plugin swap did not take effect"; return; }
+  local kits=(ev-battery-lifecycle adas-safety-validation v2x-warranty-triage
+    critical-inventory-routing heavy-industry-predictive-maintenance
+    climatech-grid-balancing hazmat-occupational-triage
+    scenario-planning-simulation avionics-fault-prediction
+    satellite-constellation-coverage telecom-account-anomaly-screening
+    telecom-traffic-routing climatech-emissions-monitoring
+    climatech-risk-exposure rf-spectrum-sensing
+    event-stream-anomaly-triage outlier-interception-footprint agentic-budget-reallocation
+    stalled-process-triage intent-matching-discovery
+    agentic-next-action-ranking document-risk-drift
+    coordinated-record-detection sensor-telemetry-allocation simulated-economy-drift
+    multi-series-replenishment periodicity-portfolio-selection
+    agentic-recall-recommendation spatial-footprint-portfolio-risk
+    agentic-customer-support agentic-edge-swarm agentic-fintech-mcts
+    agentic-ops-devops biotech-genomics cybersecurity-threat-detection
+    fleet-logistics maritime-defense medtech-clinical quant-finance
+    recommendation-search smart-cities-iot sovereign-edge-ai)
+  local k f out nerr maxerr ok
+  for k in "${kits[@]}"; do
+    f="demo/demo-vertical-$k.sql"
+    if [[ ! -f "$f" ]]; then
+      fail "48 kits: $f is missing"; continue
+    fi
+    out=$("${PSQL[@]}" -F'|' -f "$f" 2>&1)
+    nerr=$(grep -c 'ERROR:' <<< "$out")
+    maxerr=0; [[ "$k" == scenario-planning-simulation ]] && maxerr=1; [[ "$k" == periodicity-portfolio-selection ]] && maxerr=1
+    case "$k" in agentic-fintech-mcts) maxerr=1 ;; agentic-ops-devops) maxerr=2 ;; esac   # fractal_embed with no embedding endpoint
+    if [[ "$nerr" -gt "$maxerr" ]]; then
+      fail "48 kits: $k raised $nerr SQL error(s), at most $maxerr expected: $(grep 'ERROR:' <<< "$out" | head -2 | tr '\n' ' ')"
+      continue
+    fi
+    if grep -qE '(^|\|)-?(nan|NaN|inf|Infinity)(\||$)' <<< "$out"; then
+      fail "48 kits: $k printed a NaN/inf cell"; continue
+    fi
+    ok=0
+    case "$k" in
+      event-stream-anomaly-triage|outlier-interception-footprint|agentic-budget-reallocation|stalled-process-triage|intent-matching-discovery|agentic-next-action-ranking|document-risk-drift|coordinated-record-detection|sensor-telemetry-allocation|simulated-economy-drift|multi-series-replenishment|periodicity-portfolio-selection|agentic-recall-recommendation|spatial-footprint-portfolio-risk) grep -q "HEADLINE kit=$k ok" <<< "$out" && ok=1 ;;
+      agentic-customer-support) kit_shape_ok "$out" 11 && ok=1 ;;
+      agentic-edge-swarm) kit_shape_ok "$out" 22 && ok=1 ;;
+      agentic-fintech-mcts) kit_shape_ok "$out" 3 && ok=1 ;;
+      agentic-ops-devops) kit_shape_ok "$out" 6 && ok=1 ;;
+      biotech-genomics) kit_shape_ok "$out" 12 && ok=1 ;;
+      cybersecurity-threat-detection) kit_shape_ok "$out" 25 && ok=1 ;;
+      fleet-logistics) kit_shape_ok "$out" 19 && ok=1 ;;
+      maritime-defense) kit_shape_ok "$out" 22 && ok=1 ;;
+      medtech-clinical) kit_shape_ok "$out" 18 && ok=1 ;;
+      quant-finance) kit_shape_ok "$out" 15 && ok=1 ;;
+      recommendation-search) kit_shape_ok "$out" 24 && ok=1 ;;
+      smart-cities-iot) kit_shape_ok "$out" 18 && ok=1 ;;
+      sovereign-edge-ai) kit_shape_ok "$out" 21 && ok=1 ;;
+      ev-battery-lifecycle) awk -F'|' '$1=="EV-203" && $2+0>0.5 && $3+0>1.5 {a=1} $1=="EV-101" && $2+0<0 && $3+0<1 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      adas-safety-validation) awk -F'|' '$1 ~ /^P1 firm/ && $4=="t" {a=1} $1 ~ /^P2 steady/ && $4=="f" {b=1} $1 ~ /^P3 gentle/ && $4=="t" {c=1} END{exit !(a&&b&&c)}' <<< "$out" && ok=1 ;;
+      v2x-warranty-triage) grep -q '^battery-thermal-service|0\.99' <<< "$out" && ok=1 ;;
+      critical-inventory-routing) awk -F'|' '$1==4 && $2=="west" && $5+0>1.2 {a=1} END{exit !a}' <<< "$out" && ok=1 ;;
+      heavy-industry-predictive-maintenance) awk -F'|' '$1=="PUMP-07" && $2+0>0.5 && $3+0>1.5 {a=1} $1=="PUMP-03" && $2+0<0 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      climatech-grid-balancing) awk -F'|' '$1=="AREA-C" && $2+0>0.5 && $3+0>1.2 {a=1} $1=="AREA-A" && $2+0<0 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      hazmat-occupational-triage) awk -F'|' '($1==7||$1==15||$1==31) && $2=="reactor-bay" && $3=="night" && $4+0<0.001 {n++} END{exit !(n>=3)}' <<< "$out" && ok=1 ;;
+      scenario-planning-simulation) [[ $(grep -c 'variant' <<< "$out") -ge 6 ]] && ok=1 ;;
+      avionics-fault-prediction) grep -q '^AC-09|0\.2' <<< "$out" && ok=1 ;;
+      satellite-constellation-coverage) awk -F'|' '$1=="healthy" && NF==3 {h=$3+0} $1=="degraded" && NF==3 {d=$3+0} END{exit !(h>0 && d>h)}' <<< "$out" && ok=1 ;;
+      telecom-account-anomaly-screening) awk -F'|' '$1 ~ /^E1 swap/ && $4=="t" {a=1} $1 ~ /^E2 routine/ && $4=="f" {b=1} $1 ~ /^E4 faint/ && $4=="t" {c=1} END{exit !(a&&b&&c)}' <<< "$out" && ok=1 ;;
+      telecom-traffic-routing) grep -q '^R3 mobile handover burst|edge-mobile-hub|' <<< "$out" && grep -q '^R3 mobile handover burst|edge-backup-west$' <<< "$out" && ok=1 ;;
+      climatech-emissions-monitoring) awk -F'|' '$1=="CH4-02" && $2+0>0.5 && $3+0>1.5 {a=1} $1=="CH4-01" && $2+0<0 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      climatech-risk-exposure) awk -F'|' '$1=="dry season" && NF==3 {a=1} $1=="wet season" && NF==3 {b=1} END{exit !(a&&b)}' <<< "$out" && ok=1 ;;
+      rf-spectrum-sensing) grep -q '^CH-A|{9}$' <<< "$out" && grep -q '^CH-B|{}$' <<< "$out" && grep -q '^CH-C|{}$' <<< "$out" && ok=1 ;;
+    esac
+    if [[ "$ok" -eq 1 ]]; then
+      pass "48 kits: demo-vertical-$k.sql runs clean and reproduces its headline result"
+    else
+      fail "48 kits: demo-vertical-$k.sql did not reproduce its headline result"
+    fi
+  done
+  # The kits leave their tables behind for inspection; this gate does not.
+  "${PSQL[@]}" -c "DROP TABLE IF EXISTS ebl_telemetry, asv_known_bad, asv_proposed, asv_routes,
+      v2x_capabilities, v2x_claims, cir_depots, cir_consumption, cir_profile, cir_result, hpm_readings,
+      cgb_freq, cgb_resources, cgb_result, hot_workers, sps_scenarios, sps_scout, afp_flights,
+      scc_footprints, scc_slots, taa_known_anomalous, taa_proposed, ttr_nodes, ttr_requests,
+      cem_readings, cre_grid, rfs_capture, rfs_entropy,
+      esa_latency, esa_rate, esa_lprof, esa_rprof, esa_health, esa_traj, oif_known, oif_proposed, oif_screen, oif_screen_l2, oif_clicks, oif_dim, abr_outcome, abr_prof, abr_result, abr_models, abr_events, abr_routed, spt_items, spt_traj, spt_triage, imd_entities, imd_picks, imd_scout, imd_content, imd_rec, anr_candidates, anr_recall, anr_actions, anr_rec, drd_risk, drd_prof, drd_clauses, drd_picks, drd_scout, drd_approved, drd_rec, crd_known, crd_proposed, crd_screen, crd_records, crd_traj, crd_locations, crd_dim, sta_demand, sta_prof, sta_result, sed_price, sed_prof, sed_result, sed_loop, msr_units, msr_prof, msr_result, pps_sales, pps_prof, pps_result, pps_catalog, pps_rec, arr_offers, arr_picks, arr_scout, arr_sessions, arr_recall, sfp_parcels, sfp_dim, sfp_index, sfp_prof, sfp_result, sfp_comps, sfp_picks, sfp_scout CASCADE;" >/dev/null 2>&1
+}
+
+gate_43_enterprise_surface() {
+  # fractalsql.enterprise_lib is PGC_SIGHUP: it cannot be set in-session,
+  # so it goes through ALTER SYSTEM + reload, then we poll until a FRESH
+  # backend observes the new value (pg_reload_conf() returns before the
+  # postmaster has re-read the config).
+  local v
+  set_ent_guc_surface() {
+    local val="$1" want="$1"
+    "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_lib = '$val';" >/dev/null 2>&1
+    "${PSQL[@]}" -c "SELECT pg_reload_conf();" >/dev/null 2>&1
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      v=$("${PSQL[@]}" -tA -c "SHOW fractalsql.enterprise_lib;" 2>/dev/null)
+      [[ "$v" = "$want" ]] && return
+      sleep 0.3
+    done
+  }
+
+  set_ent_guc_surface "/nonexistent/fractalsql-enterprise-absent.so"
+  if [[ "$v" != "/nonexistent/fractalsql-enterprise-absent.so" ]]; then
+    fail "43 enterprise_surface: could not force the dormant tier (reload did not take effect; got '$v')"
+    return 0
+  fi
+
+  # The one UNGATED function: a forensic read of the persisted chain
+  # that must work with no enterprise core loaded at all.
+  local vres
+  vres=$("${PSQL[@]}" -tA -c "SELECT fractal_ledger_verify();" 2>&1)
+  if grep -q "enterprise tier not loaded" <<< "$vres"; then
+    fail "43 enterprise_surface: fractal_ledger_verify() must NOT be gated on the enterprise core, but it raised the dormant error"
+  elif grep -q '"ok": *true' <<< "$vres"; then
+    pass "43 enterprise_surface: fractal_ledger_verify() answers with no enterprise core loaded (the one ungated function)"
+  else
+    fail "43 enterprise_surface: expected fractal_ledger_verify() to return an ok report, got: $vres"
+  fi
+
+  # The other ELEVEN: each must raise the documented dormant error.
+  # The portfolio pair is checked with the same arguments gate 24 uses,
+  # so a failure here is about the GATE and not about the arguments.
+  local gated_calls=(
+    "SELECT fractal_ledger_flush();"
+    "SELECT fractal_ledger_load();"
+    "SELECT fractal_ledger_compact();"
+    "SELECT fractal_ledger_reset_soft();"
+    "SELECT fractal_ledger_reset_hard();"
+    "SELECT fractal_ledger_truth_count();"
+    "SELECT fractal_ledger_shadow_count();"
+    "SELECT fractal_audit_log('t', '{}'::jsonb);"
+    "SELECT fractal_audit_unpack(''::bytea);"
+    "SELECT fractal_optimize_portfolio_multimodal(ARRAY[0.1,0.05,0.08]::float8[], ARRAY[0.04,0.01,0.01, 0.01,0.03,0.01, 0.01,0.01,0.05]::float8[], 2);"
+    "SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.05,0.08]::float8[], ARRAY[0.04,0.01,0.01, 0.01,0.03,0.01, 0.01,0.01,0.05]::float8[], 2);"
+  )
+  local gated_names=(
+    "fractal_ledger_flush"
+    "fractal_ledger_load"
+    "fractal_ledger_compact"
+    "fractal_ledger_reset_soft"
+    "fractal_ledger_reset_hard"
+    "fractal_ledger_truth_count"
+    "fractal_ledger_shadow_count"
+    "fractal_audit_log"
+    "fractal_audit_unpack"
+    "fractal_optimize_portfolio_multimodal"
+    "fractal_optimize_portfolio_multimodal_pareto"
+  )
+  local bad_gated=()
+  local i out
+  for i in "${!gated_calls[@]}"; do
+    out=$("${PSQL[@]}" -c "${gated_calls[$i]}" 2>&1)
+    if ! grep -q "enterprise tier not loaded" <<< "$out"; then
+      bad_gated+=("${gated_names[$i]}: $out")
+    fi
+  done
+  if [[ "${#bad_gated[@]}" -eq 0 ]]; then
+    pass "43 enterprise_surface: all 11 gated enterprise functions raise 'enterprise tier not loaded' with no core loaded"
+  else
+    fail "43 enterprise_surface: expected all 11 gated functions to be dormant, got: ${bad_gated[*]}"
+  fi
+
+  # Database-side guard behind the MCP server's FSQL_MCP_READ_ONLY switch: the two
+  # ledger resets are not executable by PUBLIC (sql/fractalsql--1.0.sql), so a role
+  # with no grant is refused by Postgres itself, before the enterprise core is even
+  # consulted. The superuser calls above still reach the dormant error.
+  "${PSQL[@]}" -c "DROP ROLE IF EXISTS bt_ledger_lowpriv; CREATE ROLE bt_ledger_lowpriv LOGIN;" >/dev/null 2>&1
+  local lp_psql=("$BIN/psql" -h "$SOCKDIR" -p "$PORT" -U bt_ledger_lowpriv -d postgres -X -tA)
+  local lp_bad=() lp_fn
+  for lp_fn in fractal_ledger_reset_soft fractal_ledger_reset_hard; do
+    out=$("${lp_psql[@]}" -c "SELECT ${lp_fn}();" 2>&1)
+    grep -q "permission denied for function ${lp_fn}" <<< "$out" || lp_bad+=("${lp_fn}: $out")
+  done
+  "${PSQL[@]}" -c "DROP ROLE IF EXISTS bt_ledger_lowpriv;" >/dev/null 2>&1
+  if [[ "${#lp_bad[@]}" -eq 0 ]]; then
+    pass "43 enterprise_surface: fractal_ledger_reset_soft/_hard are refused to a role with no EXECUTE grant (permission denied)"
+  else
+    fail "43 enterprise_surface: expected 'permission denied' for a low-privilege role on the ledger resets, got: ${lp_bad[*]}"
+  fi
+
+  # The gate must not leak into later gates on a reused cluster.
+  set_ent_guc_surface ""
+  return 0
+}
+
+# --- run one major through a gate set ---------------------------------
 
 run_major() {
   local v="$1"; shift
@@ -4223,15 +7466,26 @@ run_major() {
   printf "== PG%s ==\n" "$v"
   # gate 01 (build) and gate 21 (fuzz smoke) always run standalone (no
   # cluster) -- gate 21 links the pure-C parsers directly, no postgres
-  # backend involved at all.
+  # backend involved at all. Same for the gate 39-42 unit probes
+  # (39/40/42 entirely; 41's DB-less leg, whose compiled binary
+  # gate_41_db_live reuses for its live leg inside the db block below).
   for g in "${gates[@]}"; do [[ "$g" = "01" ]] && gate_01_build "$v"; done
   for g in "${gates[@]}"; do [[ "$g" = "21" ]] && gate_21_fuzz_smoke; done
+  for g in "${gates[@]}"; do
+    case "$g" in
+      38) gate_38_mcp_https ;;
+      39) gate_39_extract_parse ;;
+      40) gate_40_vectors_probe ;;
+      41) gate_41_db_probe ;;   # DB-less leg (PG* env unset)
+      42) gate_42_concurrency_probe ;;
+    esac
+  done
   # gates 02-20 need a live cluster
   local need_db=0
   for g in "${gates[@]}"; do
     case "$g" in
-      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26|27|28|29|30|31|32) need_db=1 ;;
-      *) ;;   # 01/21 run standalone above, no DB needed -- intentional no-op
+      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26|27|28|29|30|31|32|33|41|43|44|45|46|47) need_db=1 ;;
+      *) ;;   # 01/21/38/39/40/42 (and 41's DB-less leg) run standalone above -- intentional no-op
     esac
   done
   if [[ "$need_db" -eq 1 ]]; then
@@ -4277,7 +7531,15 @@ run_major() {
         30) gate_30_new_primitives ;;
         31) gate_31_enterprise_mock ;;
         32) gate_32_sovereign_agents ;;
-        *) ;;   # 01/21 already ran standalone above, no-op here by design
+        33) gate_33_mcp_smoke ;;
+        43) gate_43_enterprise_surface ;;
+        44) gate_44_error_paths ;;
+        45) gate_45_enterprise_paths ;;
+        46) gate_46_plugin_config ;;
+        47) gate_47_fault_injection ;;
+        48) gate_48_kits ;;
+        41) gate_41_db_live ;;
+        *) ;;   # 01/21/39/40/42 already ran standalone above (41's DB-less leg too), no-op here by design
       esac
     done
     pg_teardown

@@ -262,10 +262,11 @@ SELECT doc_id, distance FROM fractal_cross_modal_search(
 );
 
 -- ------------------------------------------------------------------
--- 10. New analytics + vector quantization (9 functions)
+-- 10. New analytics + vector quantization (10 functions)
 -- ------------------------------------------------------------------
 \echo ''
 \echo '=== New analytics: fractal_change_point_detect, fractal_periodogram,'
+\echo 'fractal_spectrogram_entropy,'
 \echo 'fractal_state_fingerprint, fractal_cycle_detect,'
 \echo 'fractal_tda_persistence_diagram, fractal_vector_lp_distance,'
 \echo '_quantize_int8, _quantize_binary, _hamming_distance ==='
@@ -283,6 +284,14 @@ SELECT freq, power FROM fractal_periodogram(
     (SELECT array_agg(sin(2*pi()*t/8.0) ORDER BY t)
        FROM generate_series(1, 64) t), 4
 );
+
+-- Short-time spectral entropy of the same sine: 7 frames of window 16 / hop 8,
+-- each reading how ordered that frame's spectrum is (a plain float8[], so it
+-- can feed fractal_change_point_detect directly).
+SELECT fractal_spectrogram_entropy(
+    (SELECT array_agg(sin(2*pi()*t/8.0) ORDER BY t)
+       FROM generate_series(1, 64) t), 16, 8
+) AS spectrogram_entropy;
 
 SELECT fractal_state_fingerprint(ARRAY[0.1, 0.0]::float8[], 64) AS fingerprint_a;
 

@@ -27,6 +27,18 @@ blocks further down.
 > `demo/demo-agentic-*.sql` scripts; the installable agents are their
 > productized form.
 
+> **Recipes whose behavior changed in the current release line** —
+> `outlier_intercept` and `patient_deterioration_triage` — are shown in
+> their new shape throughout: `outlier_intercept` now takes a
+> caller-chosen `distance_metric` argument (`'cosine'` by default, `'l2'`
+> when magnitude should count — the threshold is calibrated against the
+> metric, so anything else is a clean error) and returns the metric it
+> used in a `metric` column, and `patient_deterioration_triage`
+> accepts caller-built `cohort_doc_ids` (e.g. an `age>65 AND
+> condition='sepsis'` cohort) that
+> [recall_hybrid](#recall-hybrid--fractal_agent_recall_hybrid)'s single
+> `(filter_col, filter_val)` cannot express.
+
 ---
 
 ## Install
@@ -85,10 +97,33 @@ Pick by the problem shape, not by the function name.
 > capability name and `confidence` is `1/(1+distance)`; `intercepted` is a real
 > distance-vs-threshold comparison; `mem_id`/`content` are the real recalled row;
 > `item_id`/`score` are the real catalog id and `1 − cosine_distance`. The
-> thirteen cognition agents' `triage_summary` / `rationale` / `analysis`
-> columns are real `fractal_reason` output. Every agent raises a clean `ERROR`
-> on bad input (empty target table, NULL series, filter matching no rows) with
-> an agent-named message.
+> thirteen cognition agents' `triage_summary` / `rationale` / `reason` /
+> `analysis` columns are real `fractal_reason` output, and each of those
+> engines ends with a trailing **`reasoning_step_failed` (text)** column —
+> `NULL` on a normal run, and the carrier of the error text when the reasoning
+> step failed (see the partial-results note below). Every agent raises a clean
+> `ERROR` on bad input (empty target table, NULL series, filter matching no
+> rows) with an agent-named message.
+
+> **Opt-in: partial results when the reasoning step fails.** By default a
+> failed LLM call raises, aborting the whole agent like any other error. Set
+> the per-connection key `fractalsql.agent_partial_reasoning_fail = on`
+> (`SET`/`ALTER SYSTEM`; the MCP server turns it on for its own sessions) and
+> the reasoning step degrades gracefully instead: the thirteen cognition
+> agents return their **computed data half** (`threat_score`, `allocation`,
+> `routed_to`, `confidence`, … — everything before the LLM call) with their
+> `triage_summary`/`rationale`/`reason`/`analysis` column **NULL** and a
+> separate trailing **`reasoning_step_failed` (text) column** carrying the
+> plugin's own error message. The C-native `fractal_search_agent`/
+> `fractal_rag_agent` do the same in their `answer` column (with
+> `source_doc_ids` intact). Only the reasoning step is softened:
+> embed/search/analytic failures still raise, and `fractal_reason`,
+> `fractal_text_to_sql`, and `fractal_sql_agent` **keep raising** even with
+> the flag on — the raise is their result, or it preempts the data half.
+> A **missing reasoning plugin is a setup mistake, not a transient endpoint
+> failure**: it raises even with the flag on (`SQLSTATE 55000`). Any caller
+> treating an agent row as complete should check whether the LLM column is
+> `NULL` (and read `reasoning_step_failed` for the why) before acting on it.
 
 ---
 
@@ -120,7 +155,7 @@ instead.
 for the regime-change drift exponent. (3) Calls `fractal_reason` to synthesize a
 human-readable triage over the drift result.
 
-**Returns** `(threat_score float8, anomaly_type text, triage_summary text)`:
+**Returns** `(threat_score float8, anomaly_type text, triage_summary text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above):
 `threat_score` is the real drift exponent; `anomaly_type` is the literal
 `'vector_drift'` label; `triage_summary` is the LLM's read.
 
@@ -164,7 +199,7 @@ the SFS Sharpe maximizer and reasons a rationale.
 SFS cardinality-constrained Sharpe maximizer. (2) Extracts the real Sharpe from
 the optimizer's own output. (3) `fractal_reason` explains the allocation.
 
-**Returns** `(allocation jsonb, sharpe float8, rationale text)`: `allocation` is
+**Returns** `(allocation jsonb, sharpe float8, rationale text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above): `allocation` is
 the optimizer's `{sharpe, weights}` jsonb; `sharpe` is the real risk-adjusted
 return; `rationale` is the LLM's explanation.
 
@@ -211,7 +246,7 @@ named capability id via a direct predicate (see
 `confidence = 1/(1+distance)`, accounts `remaining_budget = budget − cost_per_route`.
 (4) `fractal_reason` writes a one-line routing rationale.
 
-**Returns** `(routed_to text, confidence float8, remaining_budget int, rationale text)`.
+**Returns** `(routed_to text, confidence float8, remaining_budget int, rationale text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above).
 
 **Example**
 ```sql
@@ -250,16 +285,17 @@ if that distance is within a threshold.
 | `history_table` | `text` | — | your known-bad-state table |
 | `emb_col` | `text` | — | the embedding column in that table |
 | `threshold` | `float8` | — | intercept if the nearest bad state is within this distance |
-| `metric` | `text` | `'cosine'` | the distance measure: `'cosine'` (exact telemetry engine, ignores magnitude) or `'l2'` (exact Euclidean via the `<->` operator). Any other value raises `metric must be 'cosine' or 'l2'`. |
+| `distance_metric` | `text` | `'cosine'` | the distance measure: `'cosine'` (exact telemetry engine, ignores magnitude) or `'l2'` (exact Euclidean via the `<->` operator). Any other value raises `metric must be 'cosine' or 'l2'`. The parameter is named `distance_metric` because the returned `metric` column takes the name `metric` (PostgreSQL forbids a `RETURNS TABLE` column with the same name as an input parameter); positional calls are unaffected. |
 
 **How it works.** With `metric = 'cosine'` (default): (1)
 `fractal_search_telemetry(history_table, emb_col, state_vec, 1)` for the
 distance to the nearest known-bad state. (2) `intercepted = distance <
 threshold`, a real comparison of a real distance. With `metric = 'l2'`: an
 exact `ORDER BY ... <-> ... LIMIT 1` Euclidean scan of the same table. (3)
-`fractal_reason` justifies the decision in one sentence.
+`fractal_reason` justifies the decision in one sentence, naming the metric
+actually used so the threshold's own basis is auditable.
 
-**Returns** `(intercepted boolean, reason text)`.
+**Returns** `(intercepted boolean, metric text, reason text, reasoning_step_failed text)` — `metric` is the distance measure the engine actually used (`'cosine'` or `'l2'`), so a caller can read the decision's own basis without re-deriving it. `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above).
 
 **Example**
 ```sql
@@ -287,9 +323,11 @@ FROM fractal_agent_outlier_intercept(
 **Notes.** Cosine distance **ignores magnitude**: `[0.1,0.1,0.1]` vs
 `[0.9,0.9,0.9]` are parallel (distance 0, "near"), not far. To build a "far"
 known-bad fixture, point a *different direction* (e.g. `[0,1,0]` vs `[1,0,0]` →
-distance 1). If magnitude should count, pass `metric => 'l2'`: there,
-`[0.05,0,0]` sits 0.95 away from `[1,0,0]` and is allowed under the same
-threshold. Raises `no bad-state rows in …` if the history table is empty.
+distance 1). If magnitude should count, pass `'l2'` as the metric
+(`distance_metric => 'l2'`): there,
+`[0.05,0,0]` sits ~0.856 away from the bad pair above (its nearest bad
+state, `[0.9,0.1,0.0]`) and is allowed under the same threshold. Raises
+`no bad-state rows in …` if the history table is empty.
 
 ---
 
@@ -419,7 +457,7 @@ NL→SQL→execute with `auto_execute=true` so `result_json` carries the real ro
 count (or a captured execution-failure reason); with `false`, `result_json` is
 always NULL. (2) `fractal_reason` writes a one-paragraph analysis over the result.
 
-**Returns** `(analysis text, generated_sql text, result_json jsonb)`:
+**Returns** `(analysis text, generated_sql text, result_json jsonb, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above):
 `analysis` is the LLM's read; `generated_sql` and `result_json` are the SQL
 agent's own real outputs (no canned constants).
 
@@ -477,7 +515,7 @@ result; `k` does not apply here. (4) `fractal_reason` synthesizes the triage
 over the single nearest cohort match and the drift, not over every entry in
 `cohort_matches`.
 
-**Returns** `(nearest_cohort_id bigint, cohort_distance float8, drift_distance float8, rationale text, cohort_matches jsonb)`.
+**Returns** `(nearest_cohort_id bigint, cohort_distance float8, drift_distance float8, rationale text, cohort_matches jsonb, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above).
 `cohort_matches` is a ranked array of up to `k` `{"id":..,"distance":..}`
 entries; `nearest_cohort_id`/`cohort_distance` are always `cohort_matches[0]`.
 
@@ -597,7 +635,7 @@ node. (3) Resolves the returned `ctid` `doc_id` to the named node id via a
 direct predicate (see [id resolution](#a-note-on-id-resolution)). (4) `fractal_reason` writes a one-line
 placement rationale.
 
-**Returns** `(assigned_node text, confidence float8, rationale text)`:
+**Returns** `(assigned_node text, confidence float8, rationale text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above):
 `confidence = 1/(1+distance)`.
 
 **Example**
@@ -649,7 +687,7 @@ allocation id via the row_number-over-ctid mapping (see
 [id resolution](#a-note-on-id-resolution)). (5) `fractal_reason`
 synthesizes the rebalance rationale.
 
-**Returns** `(sharpe float8, weights jsonb, nearest_alloc_id bigint, nearest_distance float8, rationale text)`.
+**Returns** `(sharpe float8, weights jsonb, nearest_alloc_id bigint, nearest_distance float8, rationale text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above).
 
 **Example**
 ```sql
@@ -720,7 +758,7 @@ one call per candidate); the prompt framing differs by mode (Sharpe-band
 language vs. return/risk-dominance language).
 
 **Returns** one row per candidate: `(candidate_id int, sharpe float8, weights
-jsonb, rationale text)`. `rationale` repeats per row since it's a single
+jsonb, rationale text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above). `rationale` repeats per row since it's a single
 reasoning call covering every candidate. In `'sharpe'` mode `weights` is a
 bare array, same as `allocate`. In `'pareto'` mode `weights` is instead
 `{"weights": [...], "return": r, "risk": v}`: a richer object so per-row
@@ -789,7 +827,7 @@ the named vehicle id via the row_number-over-ctid mapping (see
 [id resolution](#a-note-on-id-resolution)). (4)
 `fractal_reason` classifies the detour.
 
-**Returns** `(nearest_fleet_id bigint, trajectory_distance float8, trace_complexity float8, rationale text)`.
+**Returns** `(nearest_fleet_id bigint, trajectory_distance float8, trace_complexity float8, rationale text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above).
 
 **Example**
 ```sql
@@ -853,7 +891,7 @@ named track id via the row_number-over-ctid mapping (see
 [id resolution](#a-note-on-id-resolution)). (4)
 `fractal_reason` triages the track.
 
-**Returns** `(nearest_fleet_id bigint, trajectory_distance float8, dfa_exponent float8, rationale text)`.
+**Returns** `(nearest_fleet_id bigint, trajectory_distance float8, dfa_exponent float8, rationale text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above).
 
 **Example**
 ```sql
@@ -916,7 +954,7 @@ reasons an alert.
 boolean). (3) `drift_detected = abs(drift) > drift_threshold`. (4) `fractal_reason`
 issues the alert.
 
-**Returns** `(morph_dimension float8, lacunarity float8, drift_detected boolean, rationale text)`.
+**Returns** `(morph_dimension float8, lacunarity float8, drift_detected boolean, rationale text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above).
 
 **Example**
 ```sql
@@ -969,7 +1007,7 @@ correlation exponent. (2) `fractal_dimension_drift(series, win)` for the
 regime-change drift + recent/baseline alphas. (3) `drift_detected = abs(drift) >
 drift_threshold`. (4) `fractal_reason` triages the regime change.
 
-**Returns** `(dfa_exponent float8, drift_detected boolean, recent_alpha float8, baseline_alpha float8, rationale text)`.
+**Returns** `(dfa_exponent float8, drift_detected boolean, recent_alpha float8, baseline_alpha float8, rationale text, reasoning_step_failed text)` — `reasoning_step_failed` is `NULL` unless the reasoning step failed, in which case the LLM column is `NULL` too and the error text lands in `reasoning_step_failed` (see the partial-results note above).
 
 **Example**
 ```sql
@@ -1143,7 +1181,9 @@ row (max PK). It derives `dim` from the data (not a hardcoded width) and
 searches the corpus for the nearest state to $\Delta = V_{current} - V_{baseline}$.
 `table_name` must therefore have a single-column primary key and a non-NULL
 `vector_col` of `float8[]` or `fractal_vector` on both the baseline and latest
-rows. `forecast_steps` is reserved for a future extrapolation step.
+rows. `forecast_steps` is reserved for a future extrapolation step. The
+function is `STRICT`: a `NULL` argument short-circuits to a NULL result
+without executing.
 - `predicted_state_vector`: The corpus row nearest to the drift delta (real, data-derived dim).
 - `projected_drift_delta`: The distance to that nearest row.
 - `risk_threshold_exceeded`: True if the drift exceeds 0.5.
@@ -1163,8 +1203,14 @@ fractal_agent_detect_loop(
     seed              float8  DEFAULT 42.0,
     hamming_threshold int4    DEFAULT 0
 ) RETURNS fractal_loop_detect_result
-LANGUAGE C VOLATILE STRICT
+LANGUAGE C VOLATILE
 ```
+
+The function is deliberately **not** `STRICT`: the C body handles `NULL`
+per argument (it raises on a required argument left `NULL` instead of
+silently returning NULL, and falls back to the documented defaults on
+optional ones), where a `STRICT` declaration would short-circuit that to
+a silent NULL result.
 
 `state_log` is a `float8[]` holding the agent's states flattened row-major
 (`n_states = length(state_log) / dim` doubles, the same convention
@@ -1222,7 +1268,7 @@ The three agentic-vertical demos (`demo/demo-vertical-agentic-ops-devops.sql` fo
 | Domain Agent | Composes | Purpose |
 | --- | --- | --- |
 | `fractal_agent_route_task(task, cap_map, budget)` → `(routed_to, confidence, remaining_budget)` | `fractal_search_agent` (embed → Scout → reason) | Sub-agent dispatcher: matches an incoming task to the best capable sub-agent and returns a confidence plus a token-budget accounting. |
-| `fractal_agent_outlier_intercept(state_vec, history_table, emb_col, threshold, metric)` → `(intercepted, reason)` | `fractal_search_telemetry` | Pre-commit safety barrier: screens a proposed action's state vector against known-bad state clusters and intercepts it when the nearest bad state is within `threshold`, measured by `metric` (`'cosine'` by default, or `'l2'`). |
+| `fractal_agent_outlier_intercept(state_vec, history_table, emb_col, threshold, distance_metric)` → `(intercepted, metric, reason)` | `fractal_search_telemetry` | Pre-commit safety barrier: screens a proposed action's state vector against known-bad state clusters and intercepts it when the nearest bad state is within `threshold`, measured by `distance_metric` (`'cosine'` by default, or `'l2'`); the returned `metric` column is the measure actually used. |
 | `fractal_agent_threat_triage(host_id, log_table, baseline_window)` → `(threat_score, anomaly_type, triage_summary)` | `fractal_dimension_drift` + `fractal_reason` | SOC incident triage: scores drift on the host's latency series, then reasons a human-readable triage summary over the drift result. |
 
 ### FinTech — `demo/demo-vertical-agentic-fintech-mcts.sql`
