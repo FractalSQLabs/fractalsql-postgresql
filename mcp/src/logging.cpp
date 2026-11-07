@@ -1,3 +1,5 @@
+#include <string>
+#include <functional>
 #include "logging.h"
 #include <openssl/evp.h>
 #include <cstdio>
@@ -18,9 +20,14 @@ namespace fsqlmcp::logging
         unsigned char digest[ EVP_MAX_MD_SIZE ];
         unsigned int  len = 0;
         EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-        EVP_DigestInit_ex( ctx, EVP_sha256(), nullptr );
-        EVP_DigestUpdate( ctx, s.data(), s.size() );
-        EVP_DigestFinal_ex( ctx, digest, &len );
+        // Every step can fail (allocation failure inside OpenSSL); an unchecked failure is a null dereference.
+        if( !ctx || EVP_DigestInit_ex( ctx, EVP_sha256(), nullptr ) != 1
+            || EVP_DigestUpdate( ctx, s.data(), s.size() ) != 1
+            || EVP_DigestFinal_ex( ctx, digest, &len ) != 1 )
+        {
+            if( ctx ) EVP_MD_CTX_free( ctx );
+            return std::string( "unavailable" );
+        }
         EVP_MD_CTX_free( ctx );
         static const char* const kHex = "0123456789abcdef";
         std::string out;
@@ -110,7 +117,8 @@ namespace fsqlmcp::logging
     }
 
     void toolCall( std::string_view toolName, const Json& argsRedactedCapped,
-                    double latencyMs, const char* errorClassOrNull )
+                    double latencyMs, const char* errorClassOrNull,
+                    const std::string& clientKey, const std::string& era )
     {
         if( static_cast<int>( g_cfg.level ) < static_cast<int>( Level::Info ) )
             return;
@@ -119,6 +127,19 @@ namespace fsqlmcp::logging
             { "tool", std::string( toolName ) },
             { "latency_ms", latencyMs }
         };
+        // Who ran it: a short digest of the client key (session id or token
+        // prefix), never the key itself -- enough to tell clients apart in an
+        // incident without writing a bearer-token prefix into the log.
+        if( !clientKey.empty() )
+        {
+            char buf[ 24 ];
+            std::snprintf( buf, sizeof buf, "c-%08zx", std::hash<std::string>{}( clientKey ) & 0xffffffffu );
+            line[ "client" ] = buf;
+        }
+        // Which protocol era the call arrived in, so a client that quietly
+        // falls back from the modern era to the legacy one is visible.
+        if( !era.empty() )
+            line[ "era" ] = era;
         if( errorClassOrNull )
             line[ "error_class" ] = errorClassOrNull;
         if( g_cfg.level == Level::Debug || ( errorClassOrNull && std::string_view( errorClassOrNull ) == "schema" ) )

@@ -2,12 +2,16 @@
 #include "../db.h"
 #include "../vectors.h"
 #include "../logging.h"
+#include "../policy.h"
 #include "../tool_param_helpers.h"
 #include "../pg_call.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdio>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace fsqlmcp
 {
@@ -107,6 +111,56 @@ namespace fsqlmcp
         return false;
     }
 
+    // A short, non-reversible tag of the calling client, for the refusal
+    // log: enough to tell two clients apart in an incident, never the
+    // credential itself.
+    static std::string clientTag( const std::string& clientKey )
+    {
+        if( clientKey.empty() ) return std::string();
+        char buf[ 24 ];
+        std::snprintf( buf, sizeof buf, "c-%08zx",
+                       std::hash<std::string>{}( clientKey ) & 0xffffffffu );
+        return buf;
+    }
+
+    // The config-writes switch. off: no key may be written through the MCP
+    // boundary. safe (the default): only the low-risk keys -- the model
+    // names and the think mode -- may be; every other key is refused. all:
+    // every key may be (the enterprise keys still need their own per-call
+    // consent).
+    //
+    // The refusal names the key, says what it is set to now, and says where
+    // to set it instead: the operator's own configuration, not a tool call a
+    // model can make.
+    static void refuseConfigWrite( Db& db, const std::string& key, const CallCtx& ctx )
+    {
+        // The current value is part of the refusal: a caller that wanted to
+        // point the key somewhere else can see what it is now. A key this
+        // session's role cannot read reports itself as unreadable rather
+        // than failing the refusal.
+        std::string current = "<unreadable>";
+        try
+        {
+            const auto v = db.callScalar( "SELECT current_setting($1::text, true)", { normalizeKey( key ) } );
+            if( v.has_value() ) current = *v;
+        }
+        catch( ... ) { /* leave it unreadable */ }
+        if( isSecretKey( key ) ) current = "***";
+        logging::event( "config_write_refused", Json{
+            { "key", key },
+            { "mode", configWritesModeName() },
+            { "client", clientTag( ctx.clientKey ) } } );
+        throw ToolError( ErrorClass::Schema,
+            "config write refused: '" + key + "' may not be written through this tool while "
+            "FSQL_MCP_CONFIG_WRITES=" + std::string( configWritesModeName() ) + ". The safe set is the "
+            "chat model name (http_model), the embedding model name (http_embed_model) and the think mode "
+            "(http_think); the endpoint URLs, the plaintext flag, the plugin path, the token and the "
+            "enterprise keys are not in it. '" + key + "' is currently set to '" + current + "'. Set it in "
+            "the server's own configuration -- the operator's postgresql.conf or the server's environment, "
+            "reloaded by the operator -- instead of through this tool, or run the server with "
+            "FSQL_MCP_CONFIG_WRITES=all if you really want this tool to write it." );
+    }
+
     std::vector<ToolSpec> buildAdminTools( Db& db )
     {
         std::vector<ToolSpec> t;
@@ -137,18 +191,19 @@ namespace fsqlmcp
                                     "agent_partial_reasoning_fail is PGC_USERSET (any user, session-settable); "
                                     "enterprise_ledger_key is PGC_SUSET (superuser only -- the server's privilege "
                                     "error surfaces verbatim); the other 15 are PGC_SIGHUP (reload-scoped) and are "
-                                    "ALTER SYSTEM-only -- the server refuses a session-level set of those outright "
-                                    "('cannot be changed now'), so this tool reports that as a clean error naming "
-                                    "the ALTER SYSTEM + pg_reload_conf() path (fractalsql_configure_reasoning does "
-                                    "exactly that for the provider keys) instead of claiming a change took effect. "
-                                    "A key that DID take is verified by reading the value back." ),
+                                    "changed server-side -- postgres refuses a session-level set of those "
+                                    "('cannot be changed now'), so this tool writes them with ALTER SYSTEM SET + "
+                                    "pg_reload_conf() and answers 'queued', because that is what they are: the "
+                                    "running session keeps the value it had and the next backend picks the new "
+                                    "one up. A key that DID take at session scope is verified by reading the "
+                                    "value back." ),
               Str( "value", true, "The value to set (GUC spelling: on/off for booleans; integers as integers)." ),
               Bool_( "allow_secrets", false,
                      "Must be true to set an enterprise-posture key (enterprise_lib, "
                      "enterprise_require_signature, enterprise_ledger_key) through the MCP boundary: an "
                      "explicit operator intent, never a default.", false ) },
             std::nullopt, true, false,
-            [&db]( const Json& a, CallCtx& ) {
+            [&db]( const Json& a, CallCtx& ctx ) {
                 const std::string key = a.at( "key" ).get<std::string>();
                 if( isEnterpriseKey( key ) && !a.value( "allow_secrets", false ) )
                     throw ToolError( ErrorClass::Schema,
@@ -166,6 +221,10 @@ namespace fsqlmcp
                         "enterprise_lib, enterprise_require_signature, enterprise_ledger_key, "
                         "agent_partial_reasoning_fail); the fractalsql.-prefixed spelling is accepted too — "
                         "and http_token is never set through the MCP boundary" );
+                // The config-writes switch: a key the current mode does not
+                // allow is refused BEFORE anything is changed.
+                if( !configWriteAllowed( key ) )
+                    refuseConfigWrite( db, key, ctx );
                 const std::string guc = normalizeKey( key );
                 const std::string oldVal = db.callScalar( "SELECT current_setting($1::text, true)", { guc } ).value_or( "<unset>" );
                 const std::string newVal = a.at( "value" ).get<std::string>();
@@ -180,19 +239,45 @@ namespace fsqlmcp
                 // internals that also made the "did it take effect?" answer a
                 // guess. So: perform the set, READ THE VALUE BACK, and report
                 // what actually happened. "effective" below is a checked fact.
+                // A key postgres refuses to change for the session (a
+                // reload-scoped one) is written the way postgres changes it --
+                // server-side, with ALTER SYSTEM SET + pg_reload_conf() -- and
+                // the answer says "queued", because it is: the running session
+                // keeps the value it had.
+                // The failure is captured inside the catch and thrown AFTER it: a new exception thrown from
+                // within a catch funclet crashes the Windows MSVC ASan runtime (__FrameHandler3::GetUnwindTryBlock).
+                std::optional<ToolError> setFailed;
                 try
                 {
                     db.callScalar( "SELECT set_config($1::text, $2::text, false)", { guc, newVal } );
                 }
                 catch( const ToolError& e )
                 {
-                    if( e.message.find( "cannot be changed now" ) != std::string::npos )
-                        throw ToolError( ErrorClass::Schema,
-                            "'" + guc + "' is not session-settable (a reload-scoped key: it is changed "
-                            "server-side, not per session): set it via ALTER SYSTEM SET + "
-                            "pg_reload_conf() -- the fractalsql_configure_reasoning admin tool does "
-                            "exactly that for the provider keys -- or the operator's postgresql.conf" );
-                    throw;
+                    setFailed = e;
+                }
+                if( setFailed )
+                {
+                    if( setFailed->message.find( "cannot be changed now" ) == std::string::npos )
+                        throw *setFailed;
+                    // A reload-scoped key (PGC_SIGHUP) cannot be changed for
+                    // the session: postgres changes it server-side and hands
+                    // it to the next backend. The operator's config-writes
+                    // switch has already decided that this key MAY be
+                    // written, so the write happens the only way postgres
+                    // allows -- server-side -- and the answer says plainly
+                    // that it is queued rather than live.
+                    db.callScalar( "ALTER SYSTEM SET " + guc + " = " + quoteDouble( newVal ), {} );
+                    db.callScalar( "SELECT pg_reload_conf()", {} );
+                    logging::configChange( guc, isSecretKey( key ) ? "***" : oldVal, isSecretKey( key ) ? "***" : newVal );
+                    return Json{ { "key", guc },
+                                 { "old", isSecretKey( key ) ? Json( "***" ) : Json( oldVal ) },
+                                 { "new", isSecretKey( key ) ? Json( "***" ) : Json( newVal ) },
+                                 { "effective", false },
+                                 { "scope", "server-wide (ALTER SYSTEM SET + pg_reload_conf(): the value is "
+                                            "written to the server's configuration and is handed to the "
+                                            "next backend/session -- this session's own value is unchanged)" },
+                                 { "status", "queued; takes effect on the next backend/session "
+                                             "(pg_reload_conf is async)" } };
                 }
                 // Read-back: a silent no-op must never be reported as success.
                 const auto back = db.callScalar( "SELECT current_setting($1::text, true)", { guc } );
@@ -219,21 +304,24 @@ namespace fsqlmcp
                                        "fractalsql.enterprise_lib additionally cannot be re-pointed while a "
                                        "library is already loaded (the engine refuses that at use time)" } };
             } } );
-        t.back().description = "Sets a config key to a value for THIS session (the PostgreSQL column's wrapper "
-            "over set_config(key, value, false) on the engine's fractalsql.* GUCs for the documented keys: "
-            "reasoning plugin path, http_url/http_embed_url, models, think knobs, text-to-sql keys, agent "
-            "partial-failure mode). SCOPE honesty by VERIFICATION: the tool performs the session-level set and then "
-            "READS THE VALUE BACK -- 'effective' is a checked fact, never a claim. Two of the seventeen keys are "
-            "session-settable: agent_partial_reasoning_fail (PGC_USERSET, any user) and enterprise_ledger_key "
-            "(PGC_SUSET, superuser only -- the server's privilege error surfaces verbatim). The other fifteen are "
-            "PGC_SIGHUP and are ALTER SYSTEM-only: the server refuses a session-level set of those outright ('cannot "
-            "be changed now'), and this tool turns that refusal into a clean error naming the ALTER SYSTEM + "
-            "pg_reload_conf() path (fractalsql_configure_reasoning does exactly that for the provider keys) "
-            "instead of claiming a change took effect. "
+        t.back().description = "Sets a config key to a value (the PostgreSQL column's wrapper over the engine's "
+            "fractalsql.* GUCs for the documented keys: reasoning plugin path, http_url/http_embed_url, models, "
+            "think knobs, text-to-sql keys, agent partial-failure mode). SCOPE honesty by VERIFICATION: the tool "
+            "performs the set and then READS THE VALUE BACK -- 'effective' is a checked fact, never a claim. Two of "
+            "the seventeen keys are session-settable (agent_partial_reasoning_fail, PGC_USERSET, any user; "
+            "enterprise_ledger_key, PGC_SUSET, superuser only -- the server's privilege error surfaces verbatim) "
+            "and are changed for THIS session only. The other fifteen are PGC_SIGHUP: postgres refuses a "
+            "session-level set of those ('cannot be changed now'), so this tool writes them the way postgres "
+            "changes them -- ALTER SYSTEM SET + pg_reload_conf() -- and answers 'queued', because that is what "
+            "they are: the running session keeps the value it had, the next backend picks the new one up. "
             "destructiveHint-flagged: repointing http_url/http_embed_url redirects every subsequent "
             "reasoning/embedding dispatch on reload; a client UI that honors annotations will prompt a human first. "
             "The secret GUC http_token is NEVER set through the MCP boundary; enterprise-posture keys require "
-            "allow_secrets=true.";
+            "allow_secrets=true. "
+            "Config writes are governed by the server's own switch (FSQL_MCP_CONFIG_WRITES): off refuses every key, "
+            "safe (the default) allows only the model names and the think mode, all allows every documented key. "
+            "A refused key is not changed at all, and the refusal names the key, its current value and where to "
+            "set it instead.";
         t.back().secretHint = true;   // credential-shaped values pass through even though logs redact
 
         t.push_back( ToolSpec{ "fractalsql_get_config", "admin", ToolClass::Cheap,
@@ -274,29 +362,41 @@ namespace fsqlmcp
                          "Allow plaintext http:// endpoints (needed for local Ollama).", true },
               NullableStr("think_mode","Reasoning effort for hybrid-thinker models: unset/none (model default), 'off', or any provider-verbatim value (low/medium/high/...).") },
             std::nullopt, true, false,
-            [&db]( const Json& a, CallCtx& ) {
-                bool any = false;
-                Json updated = Json::object();
+            [&db]( const Json& a, CallCtx& ctx ) {
+                // Collect EVERY requested field FIRST: a call that names a key
+                // the current mode refuses must change NOTHING, so the
+                // refusal has to happen before the first ALTER SYSTEM.
+                std::vector<std::pair<std::string, std::string>> pending;
                 for( auto& [ field, guc ] : kFieldMap )
                 {
                     if( !a.contains( field ) || a.at( field ).is_null() ) continue;
-                    any = true;
                     const std::string newVal = std::string( field ) == "allow_plaintext"
                         ? ( a.at( field ).get<bool>() ? "on" : "off" )
                         : a.at( field ).get<std::string>();
+                    pending.emplace_back( std::string( guc ), newVal );
+                }
+                if( pending.empty() ) throw ToolError( ErrorClass::Schema, "nothing to set — supply at least one field" );
+                // The config-writes switch: refuse before anything is changed.
+                for( const auto& p : pending )
+                    if( !configWriteAllowed( p.first ) )
+                        refuseConfigWrite( db, p.first, ctx );
+                Json updated = Json::object();
+                for( const auto& p : pending )
+                {
+                    const std::string guc = p.first;
+                    const std::string newVal = p.second;
                     std::string oldVal;
                     {
-                        const auto old = db.callScalar( "SELECT current_setting($1::text, true)", { std::string( guc ) } );
+                        const auto old = db.callScalar( "SELECT current_setting($1::text, true)", { guc } );
                         oldVal = old.value_or( "<unset>" );
                     }
                     // ALTER SYSTEM SET <allowlisted-guc> = '<value-with-doubled-quotes>' —
                     // the value text itself is plain data; quote doubling is the only
                     // rendering step and cannot terminate early (every ' becomes '').
-                    db.callScalar( "ALTER SYSTEM SET " + std::string( guc ) + " = " + quoteDouble( newVal ), {} );
+                    db.callScalar( "ALTER SYSTEM SET " + guc + " = " + quoteDouble( newVal ), {} );
                     logging::configChange( guc, oldVal, newVal );
                     updated[ guc ] = newVal;
                 }
-                if( !any ) throw ToolError( ErrorClass::Schema, "nothing to set — supply at least one field" );
                 db.callScalar( "SELECT pg_reload_conf()", {} );
                 // 5.1's async-reload caveat, VERBATIM in the result — never claim liveness.
                 return Json{ { "updated", updated },
@@ -305,7 +405,10 @@ namespace fsqlmcp
         t.back().description = "Configure the reasoning/embedding provider via ALTER SYSTEM SET + pg_reload_conf(). "
             "NEVER claims the change is live immediately — states 'queued' per the documented async-reload caveat. "
             "NEVER touches enterprise_lib/enterprise_ledger_key/enterprise_require_signature — enabling or "
-            "disabling the enterprise tier is an operator action against Postgres, never an MCP client action.";
+            "disabling the enterprise tier is an operator action against Postgres, never an MCP client action. "
+            "Config writes are governed by the server's own switch (FSQL_MCP_CONFIG_WRITES): off refuses every key, "
+            "safe (the default) allows only the model names and the think mode, all allows every provider key. "
+            "A call that names a refused key changes NOTHING at all.";
         t.back().secretHint = true;   // credential-shaped values pass through even though logs redact
 
         return t;

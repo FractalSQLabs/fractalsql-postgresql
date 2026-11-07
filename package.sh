@@ -85,8 +85,15 @@ SRC_DIR="dist/${PKG_ARCH}"
 # after install. It links libcurl at runtime; the libcurl dependency is
 # declared on both packages below.
 REASONING_SO="include/${FSQL_PLATFORM}/fractalsql-reasoning-http.so"
+REASONING_SIG="${REASONING_SO}.sig"
 if [[ ! -f "${REASONING_SO}" ]]; then
     echo "missing ${REASONING_SO} — re-run the vendored-artifact deploy step" >&2
+    exit 1
+fi
+# The plugin loads only when its detached Ed25519 signature (exactly 64 bytes) sits beside it, so a
+# package must never carry the plugin without the signature.
+if [[ ! -f "${REASONING_SIG}" || "$(wc -c < "${REASONING_SIG}")" -ne 64 ]]; then
+    echo "missing or invalid ${REASONING_SIG} (needs 64 bytes) — re-run the vendored-artifact deploy step" >&2
     exit 1
 fi
 
@@ -188,6 +195,8 @@ for PG_VER in 14 15 16 17 18; do
         "${STAGE_DEB}/usr/lib/postgresql/${PG_VER}/lib/fractalsql.so"
     install -Dm0755 "${REASONING_SO}" \
         "${STAGE_DEB}/usr/lib/postgresql/${PG_VER}/lib/fractalsql-reasoning-http.so"
+    install -Dm0644 "${REASONING_SIG}" \
+        "${STAGE_DEB}/usr/lib/postgresql/${PG_VER}/lib/fractalsql-reasoning-http.so.sig"
     install -Dm0644 fractalsql.control \
         "${STAGE_DEB}/usr/share/postgresql/${PG_VER}/extension/fractalsql.control"
     install -Dm0644 sql/fractalsql--1.0.sql \
@@ -212,6 +221,8 @@ for PG_VER in 14 15 16 17 18; do
         "${STAGE_RPM}/usr/pgsql-${PG_VER}/lib/fractalsql.so"
     install -Dm0755 "${REASONING_SO}" \
         "${STAGE_RPM}/usr/pgsql-${PG_VER}/lib/fractalsql-reasoning-http.so"
+    install -Dm0644 "${REASONING_SIG}" \
+        "${STAGE_RPM}/usr/pgsql-${PG_VER}/lib/fractalsql-reasoning-http.so.sig"
     install -Dm0644 fractalsql.control \
         "${STAGE_RPM}/usr/pgsql-${PG_VER}/share/extension/fractalsql.control"
     install -Dm0644 sql/fractalsql--1.0.sql \

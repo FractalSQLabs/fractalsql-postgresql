@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="FractalSQLforPostgreSQL.jpg" alt="FractalSQL for PostgreSQL" width="720">
+</p>
+
 Third-Party Notices
 
 This file contains licensing and attribution notices for third-party software components incorporated into FractalSQL.

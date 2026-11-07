@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>   // std::intptr_t, not pulled in transitively here
 #include <string>
 
@@ -92,5 +93,28 @@ namespace fsqlmcp::net
     }
 
     void close( Socket s ) { ::close( asFd( s ) ); }
+    void closeAfterReply( Socket s, int lingerMs )
+    {
+        // Half-close: the peer reads the reply and then sees EOF, so a client
+        // that is still writing its request is not reset straight away.
+        ::shutdown( asFd( s ), SHUT_WR );
+        // Read and discard whatever the peer sends until it stops or the
+        // linger window ends. Data left unread in the receive buffer at
+        // close time makes the kernel reset the connection, and the reset
+        // discards the reply that was just written: the client would see a
+        // broken connection instead of the refusal it was owed.
+        setRecvTimeout( s, 100 );
+        char sink[ 4096 ];
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds( lingerMs );
+        while( std::chrono::steady_clock::now() < deadline )
+        {
+            const int n = recv( s, sink, static_cast<int>( sizeof( sink ) ) );
+            if( n == 0 ) break;   // the peer closed: nothing more can arrive
+            if( n == -1 ) break;  // hard error: the socket is finished anyway
+            // n == -2 is an idle read (the peer has not written yet) and n > 0
+            // is data to discard: both mean "keep waiting for the rest".
+        }
+        close( s );
+    }
 }
 #endif  // !defined(_WIN32)

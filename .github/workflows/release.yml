@@ -139,7 +139,7 @@ jobs:
           VERSION=$(docker exec pg psql -U postgres -tAc \
               "SELECT fractal_version();")
           echo "version: ${VERSION}"
-          test "${VERSION}" = "2.0.20"
+          test "${VERSION}" = "2.0.21"
 
           # Convergence sanity check: query = (0.6, 0.8), objective is
           # cosine distance. Cosine distance is magnitude-invariant,
@@ -182,13 +182,20 @@ jobs:
   package:
     name: package ${{ matrix.arch }}
     needs: build
-    runs-on: ubuntu-latest
+    # Native runner per arch: the bundled MCP server is compiled here, so an
+    # arm64 package built on an x86 runner would carry an x86 binary.
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout Code
@@ -234,6 +241,23 @@ jobs:
           sudo apt-get install -y ruby ruby-dev build-essential rpm \
               libpq-dev libssl-dev pkg-config
           sudo gem install --no-document fpm
+
+      - name: Build the MCP server on EL9 (old glibc, runs on EL9/Debian/Ubuntu)
+        run: |
+          # package.sh ships ONE mcp binary in every .deb/.rpm. Built on this
+          # ubuntu runner (glibc 2.39, libstdc++ 13) it fails on Rocky 9 with
+          # "GLIBC_2.38 not found" / "GLIBCXX_3.4.32 not found". Built on EL9
+          # (glibc 2.34) it runs everywhere newer. package.sh reuses an
+          # existing mcp/fractalsql-postgresql-mcp instead of rebuilding.
+          docker run --rm -v "$PWD":/w -w /w rockylinux:9 bash -ec '
+            dnf install -qy gcc-c++ make pkgconf-pkg-config libpq-devel openssl-devel
+            make -C mcp clean
+            make -C mcp -j2
+            mcp/fractalsql-postgresql-mcp --version
+            ldd mcp/fractalsql-postgresql-mcp | grep -E "libpq|libssl|libcrypto"
+            objdump -T mcp/fractalsql-postgresql-mcp | grep -oE "GLIBC_[0-9.]+" | sort -Vu | tail -1
+          '
+          sudo chown -R "$(id -u):$(id -g)" mcp
 
       - name: Build .deb and .rpm for ${{ matrix.arch }}
         run: |
@@ -300,6 +324,7 @@ jobs:
               CONTENTS=$(dpkg-deb -c "${deb}")
               echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/fractalsql\.so$'
               echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/fractalsql-reasoning-http\.so$'
+              echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/fractalsql-reasoning-http\.so\.sig$'
               echo "${CONTENTS}" | grep -E 'usr/lib/postgresql/[0-9]+/lib/fractalsql-postgresql-mcp$'
               echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql\.control$'
               echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql--1\.0\.sql$'
@@ -319,6 +344,7 @@ jobs:
               CONTENTS=$(rpm -qlp "${rpm}")
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/fractalsql\.so$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/fractalsql-reasoning-http\.so$'
+              echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/fractalsql-reasoning-http\.so\.sig$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/lib/fractalsql-postgresql-mcp$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql\.control$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql--1\.0\.sql$'
@@ -376,7 +402,7 @@ jobs:
       matrix:
         pg: [14, 15, 16, 17, 18]
         arch: [arm64, x86_64]
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: write
     env:
@@ -606,15 +632,36 @@ jobs:
           $ver = "${{ github.ref_name }}".Substring(1)
           Add-Content -Path $env:GITHUB_ENV -Value "MSI_VERSION=$ver"
 
-      # MCP server: scripts\windows\build-msi.bat auto-detects
-      # mcp\fractalsql-postgresql-mcp.exe (built by build_test.ps1's
-      # gate 33, or mcp\scripts\windows\build.bat) and stages it into
-      # the MSI's mcp\ folder only when it is present — this job does
-      # not build the exe itself yet (needs a vcpkg x64-windows-static
-      # OpenSSL, which the release leg doesn't install today, unlike
-      # the sqlite sibling), so release MSIs ship MCP-less until that
-      # build step lands. build_test.ps1's gate 33 exists today (33);
-      # future mcp gates (39-42) also slot in beside it.
+      # MCP server: built here and staged into the MSI by scripts\windows\build-msi.bat. The executable and its two
+      # lock files install under <PG root>\bin, beside libpq.dll and the libraries it loads, which the server needs.
+      # The server is built for x64 only.
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        if: matrix.arch == 'x64'
+        shell: cmd
+        run: |
+          echo VCPKG_ROOT=C:\vcpkg>>%GITHUB_ENV%
+          C:\vcpkg\vcpkg.exe install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
+      - name: Build fractalsql-postgresql-mcp.exe
+        if: matrix.arch == 'x64'
+        shell: cmd
+        run: |
+          set PGDIR=%CD%\deps\pg\root
+          call mcp\scripts\windows\build.bat
+          if errorlevel 1 exit /b 1
+          if not exist mcp\fractalsql-postgresql-mcp.exe ( echo ERROR: fractalsql-postgresql-mcp.exe was not produced & exit /b 1 )
+
+      - name: Smoke-check fractalsql-postgresql-mcp.exe
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          # The server loads libpq.dll from the PostgreSQL bin directory, as it does once installed.
+          $env:PATH = "$PWD\deps\pg\root\bin;$env:PATH"
+          .\mcp\fractalsql-postgresql-mcp.exe --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          .\mcp\fractalsql-postgresql-mcp.exe --list-tools | Select-Object -First 3
+
       - name: Build MSI (candle + light, PG ${{ matrix.pg }} / ${{ matrix.arch }})
         shell: cmd
         env:
@@ -674,3 +721,25 @@ jobs:
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publishes SHA256SUMS for every asset on the release. scripts/easy_install.sh refuses to install a
+  # download whose checksum does not match this file.
+  checksums:
+    needs: [package, build-darwin, build-windows-msi]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Compute and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir assets && cd assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*' --skip-existing
+          rm -f SHA256SUMS
+          sha256sum * | sort -k2 > ../SHA256SUMS
+          cd ..
+          gh release upload "$TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber

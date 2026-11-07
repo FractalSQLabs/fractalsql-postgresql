@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <functional>
 #include <memory>
 #include "jsonrpc_server.h"
@@ -13,6 +14,13 @@ namespace fsqlmcp
         std::string path = "/mcp";
         std::string authToken;          // FSQL_MCP_AUTH_TOKEN
         std::string authTokenFile;      // FSQL_MCP_AUTH_TOKEN_FILE (hot-reloaded, 10.3)
+        // Per-client credentials (FSQL_MCP_TOKEN_POLICY_FILE): a JSON file
+        // naming clients, each with the SHA-256 of its token, an optional
+        // expiry and an optional tool allowlist. The file holds no secret.
+        std::string tokenPolicyFile;
+        // Browser origins allowed to call this server (FSQL_MCP_ALLOWED_ORIGINS),
+        // comma-separated. Loopback origins are always allowed.
+        std::vector<std::string> allowedOrigins;
         bool tlsEnabled = false;
         std::string tlsCertPath, tlsKeyPath;
         int shutdownDrainMs = 5000;
@@ -26,6 +34,15 @@ namespace fsqlmcp
     // sessionFactory builds a fresh Db-backed JsonRpcServer per minted session
     // (main.cpp wires it), so all dispatch goes through per-session servers while
     // ConcurrencyManager stays process-global via ServerConfig::sharedConcurrency.
+    // The modern protocol era mints no session: its state handles ("context_id")
+    // get their own server from the same factory, so a context's connection is
+    // as isolated as a session's.
     int runHttpTransport( const HttpConfig& cfg, std::function<bool()> readinessProbe,
                            std::function<std::shared_ptr<JsonRpcServer>()> sessionFactory );
+
+    // The startup check for the per-client credential file: an empty string
+    // means the file is absent or valid; a non-empty one says what is wrong
+    // with it. A credential file that cannot be read or parsed is a startup
+    // failure, never a silent "no authentication".
+    std::string tokenPolicyError( const HttpConfig& cfg );
 }

@@ -405,7 +405,8 @@ namespace fsqlmcp
                 PgBind::s( "int8", a.at( "doc_id" ).dump() ),
                 PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "feature_array" ), "feature_array" ) ) } ); } } );
         t.back().description = "Upserts a feature vector against a doc_id key in the generic per-item feature "
-            "store (fractalsql_feature_store, auto-created on first use). Last-writer-wins. Returns {ok:true}.";
+            "store (fractalsql_feature_store, auto-created on first use). An overwrite of a vector written by "
+            "another role is refused; the store records who wrote it and when. Returns {ok:true}.";
 
         t.push_back( ToolSpec{ "fractal_mine_topology_negatives", "analytics", ToolClass::Cheap,
             { Vec("surrogate_vector", true, "Query vector into the feature store."), Int("k", false, "Neighbors to return.", 10), RowLimit() },

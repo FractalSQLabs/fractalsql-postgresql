@@ -33,9 +33,10 @@
 --
 -- Notes:
 --   * Fully deterministic fixtures (no random()).
---   * The multimodal step is the one expected error on the Community edition
---     (the "enterprise tier not loaded" refusal); everything else runs on
---     Community.
+--   * The multimodal step is the one enterprise-gated call in this kit. On
+--     the Community edition it reports the "enterprise tier not loaded"
+--     refusal and the rest of the file still runs: the call is guarded, so
+--     it never stops the script and every section below it still prints.
 --   * Ends with a HEADLINE line computed from the kit's own results (HEADLINE kit=<name> ok);
 --     the build_test kit gate greps for it.
 
@@ -145,14 +146,31 @@ SELECT fractal_diversify_disable();
 
 \echo ''
 \echo '=== 5. Enterprise edition: structurally different schedules ==='
-\echo '--- Enterprise edition: structurally distinct candidates (errors with "enterprise tier not loaded" on the Community edition) ---'
-SELECT candidate_id, sharpe, rationale
-FROM fractal_agent_diverse_portfolios(
-    (SELECT array_agg(round((p.mean_v / 100.0)::numeric, 4)::float8 ORDER BY p.pid) FROM pps_prof p),
-    (SELECT array_agg(CASE WHEN a.pid = b.pid THEN round((a.var_v * a.dfa_alpha / 100.0)::numeric, 4)::float8 ELSE 0::float8 END
-                      ORDER BY a.pid, b.pid)
-       FROM pps_prof a CROSS JOIN pps_prof b),
-    3, 4);
+\echo '--- Enterprise edition: structurally distinct candidates (reports "enterprise tier not loaded" on the Community edition) ---'
+DO $$
+DECLARE
+    r record;
+    n int := 0;
+BEGIN
+    FOR r IN
+        SELECT candidate_id, sharpe, rationale
+        FROM fractal_agent_diverse_portfolios(
+            (SELECT array_agg(round((p.mean_v / 100.0)::numeric, 4)::float8 ORDER BY p.pid) FROM pps_prof p),
+            (SELECT array_agg(CASE WHEN a.pid = b.pid THEN round((a.var_v * a.dfa_alpha / 100.0)::numeric, 4)::float8 ELSE 0::float8 END
+                              ORDER BY a.pid, b.pid)
+               FROM pps_prof a CROSS JOIN pps_prof b),
+            3, 4)
+    LOOP
+        n := n + 1;
+        RAISE NOTICE 'candidate %: sharpe=% rationale=%', r.candidate_id, r.sharpe, r.rationale;
+    END LOOP;
+    IF n = 0 THEN
+        RAISE NOTICE 'fractal_agent_diverse_portfolios returned no rows.';
+    END IF;
+EXCEPTION
+    WHEN object_not_in_prerequisite_state THEN
+        RAISE NOTICE 'fractal_agent_diverse_portfolios: enterprise tier not loaded (dormant). To activate: stage libfractalsql-enterprise-sovereign-c.so into the container, run "ALTER SYSTEM SET fractalsql.enterprise_lib = ''<path>''; SELECT pg_reload_conf();", then re-run this demo. See demo/enterprise-qtl-audit.sql.';
+END $$;
 
 \echo ''
 \echo '=== 6. Reasoning: decision note ==='

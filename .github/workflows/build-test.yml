@@ -26,7 +26,7 @@ name: build-test
 #              right. PG14/15/17/18 share the exact same code path but
 #              have not each been individually confirmed on CI yet.
 #   darwin-gate-matrix — build_test.sh (the same script, unmodified) on
-#              macos-14 via Homebrew's postgresql@$MAJOR, PG 14-18.
+#              macos-15 via Homebrew's postgresql@$MAJOR, PG 14-18.
 #              Verified end-to-end (all 26 gates) against real Darwin/
 #              x86_64 hardware during development -- see the job's own
 #              comment for the three Darwin-specific bugs that surfaced
@@ -168,7 +168,7 @@ jobs:
   darwin-gate-matrix:
     name: build_test.sh pg${{ matrix.pg }} (macOS)
     if: github.event_name != 'schedule'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -311,7 +311,7 @@ jobs:
     name: build_test.sh --asan pg16 (macOS)
     # Same 2.x push promotion as windows-asan above.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -352,7 +352,7 @@ jobs:
     name: build_test.sh --ubsan pg16 (macOS)
     # Same 2.x push promotion as windows-asan above.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -561,7 +561,7 @@ jobs:
             return 1
           }
           apt_retry 180 update -qq
-          apt_retry 600 install -qq -y wget gnupg lsb-release ca-certificates lcov
+          apt_retry 600 install -qq -y wget gnupg lsb-release ca-certificates lcov gawk
           # libpq-dev + libssl-dev: gate 33 (mcp_smoke) builds the MCP
           # server via mcp/Makefile (pkg-config libpq + -lssl -lcrypto) --
           # the same pin the sibling's coverage job carries for its MCP
@@ -634,7 +634,7 @@ jobs:
           set -euo pipefail
           V="$(./mcp/fractalsql-postgresql-mcp --version)"
           echo "version: ${V}"
-          test "${V}" = "2.0.20"
+          test "${V}" = "2.0.21"
           LINES="$(./mcp/fractalsql-postgresql-mcp --list-tools | wc -l)"
           echo "tool-catalog lines: ${LINES}"
           test "${LINES}" = "82"

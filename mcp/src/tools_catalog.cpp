@@ -32,6 +32,19 @@ namespace fsqlmcp
             if( x.name == "fractal_diversify_enable" || x.name == "fractal_diversify_disable" )
                 x.idempotentHint = true;
 
+        classifyStateMutatingTools( all );
+
+        // The tools whose effect lives in the ENGINE's session state take the
+        // optional "context_id" argument. In the modern protocol era there is
+        // no protocol session to carry that state, so the handle is explicit:
+        // the first call without one mints a handle and returns it, and
+        // passing the handle back keeps using the same engine state. Added
+        // here, in the one place the tool table is assembled, so the schema,
+        // the manifest and the locks all describe the same argument.
+        for( ToolSpec& x : all )
+            if( isContextScopedTool( x.name ) )
+                x.params.push_back( contextIdParam() );
+
         Resources::init( &db );
         return all;   // 14 discovery + 4 cognition + 22 agency + 23 analytics + 10 enterprise + 5 vectorizer + 4 admin = 82
     }

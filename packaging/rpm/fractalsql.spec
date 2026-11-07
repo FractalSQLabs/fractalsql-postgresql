@@ -12,7 +12,7 @@
 # prebuilt .so from dist/${arch}/fractalsql_pg${pg_major}.so.
 
 Name:           postgresql-%{pg_major}-fractalsql
-Version:        2.0.20
+Version:        2.0.21
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search extension for PostgreSQL %{pg_major}
 
@@ -64,6 +64,8 @@ install -Dm0755 dist/fractalsql_pg%{pg_major}.so \
 # Requires below).
 install -Dm0755 include/linux-%{fsql_arch}/fractalsql-reasoning-http.so \
     %{buildroot}/usr/pgsql-%{pg_major}/lib/fractalsql-reasoning-http.so
+install -Dm0644 include/linux-%{fsql_arch}/fractalsql-reasoning-http.so.sig \
+    %{buildroot}/usr/pgsql-%{pg_major}/lib/fractalsql-reasoning-http.so.sig
 install -Dm0644 fractalsql.control \
     %{buildroot}/usr/pgsql-%{pg_major}/share/extension/fractalsql.control
 install -Dm0644 sql/fractalsql--1.0.sql \
@@ -99,6 +101,7 @@ install -Dm0644 mcp/manifest.json \
 %license THIRD-PARTY-NOTICES.md
 /usr/pgsql-%{pg_major}/lib/fractalsql.so
 /usr/pgsql-%{pg_major}/lib/fractalsql-reasoning-http.so
+/usr/pgsql-%{pg_major}/lib/fractalsql-reasoning-http.so.sig
 /usr/pgsql-%{pg_major}/lib/fractalsql-postgresql-mcp
 /usr/pgsql-%{pg_major}/lib/.mcp-schema-lock
 /usr/pgsql-%{pg_major}/lib/.mcp-safety-annotations-lock
@@ -110,6 +113,20 @@ install -Dm0644 mcp/manifest.json \
 %{mcpdocdir}/manifest.json
 
 %changelog
+* Sat Nov 07 2026 FractalSQLabs - 2.0.21-1
+- Safety: the reasoning plugin is now signed. It ships with a detached
+  Ed25519 signature (.sig) beside it and loads only when that file is
+  present and valid; a missing signature is refused unless
+  FSQL_REASONING_REQUIRE_SIGNATURE=0 is set in the server environment,
+  and a wrong one is always refused. The enterprise library signature
+  requirement is unchanged.
+- MCP server: stricter defaults and new limits for authentication,
+  origins, locks and sessions; see docs/mcp-plugin.md.
+- Audit: the text of an agent's question can be hashed or truncated
+  before it is written to an audit entry (FSQL_AUDIT_REDACT).
+- Packaging: the plugin's .sig is installed beside the plugin, and the
+  Windows installer now includes the reasoning plugin.
+
 * Tue Oct 20 2026 FractalSQLabs - 2.0.20-1
 - Ships the MCP server binary in every package (fractalsql-postgresql-mcp,
   in the PG libdir alongside the extension .so), built on the packaging

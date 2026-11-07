@@ -24,7 +24,7 @@ namespace fsqlmcp
         t.back().description = std::string("Encodes the truth+shadow ledgers into a QTL blob, appends it to the "
             "tamper-evident hash chain. A rewritten row breaks the chain; a deleted row leaves a visible id gap.") + kEnterprise;
 
-        t.push_back( ToolSpec{ "fractal_ledger_load", "enterprise", ToolClass::Cheap, {}, std::nullopt, false, false,
+        t.push_back( ToolSpec{ "fractal_ledger_load", "enterprise", ToolClass::Cheap, {}, std::nullopt, true, false,
             [&db]( const Json&, CallCtx& ) { return voidOk( db, "fractal_ledger_load" ); } } );
         t.back().description = std::string("Hydrates in-memory ledgers from the chain's latest entry (tip-only, "
             "O(1)). On an integrity failure, diversify is auto-disabled and ledgers left empty.") + kEnterprise;
@@ -97,10 +97,13 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_audit_log", "enterprise", ToolClass::Cheap,
             { Str("entry_type", true, "Decision-audit entry type."), Str("payload", true, "Payload — must be valid JSON; stored as jsonb.") },
             std::nullopt, false, false,
-            [&db]( const Json& a, CallCtx& ) {
+            [&db]( const Json& a, CallCtx& ctx ) {
                 const std::string payload = a.at( "payload" ).get<std::string>();
                 if( !Json::accept( payload ) )
                     throw ToolError( ErrorClass::Schema, "payload must be valid JSON (stored as jsonb on Postgres)" );
+                // Tell the engine which MCP client is appending, so the chain entry
+                // carries an actor (the engine adds the database role and session user itself).
+                db.callScalar( "SELECT set_config('fractalsql.actor', $1, false)", { ctx.clientKey } );
                 auto call = pgSelectCall( "fractal_audit_log", {
                     PgBind::s( "text", a.at( "entry_type" ).get<std::string>() ),
                     PgBind::s( "jsonb", payload ) }, false );

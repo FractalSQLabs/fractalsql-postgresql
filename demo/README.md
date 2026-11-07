@@ -173,9 +173,9 @@ single NOTICE; active → all phases run clean).
 > seam — the enterprise core is unchanged and is never handed tampered bytes.
 >
 > **Concurrency / cross-session** coverage (parallel last-writer-wins
-> flush across 8 backends, and load-in-a-fresh-backend) is exercised by
-> `build_test` **gate 25** (`gate_25_enterprise_stress` /
-> `Gate25EnterpriseStress`), which can fork parallel psql backends — not
+> flush across 8 backends, and load-in-a-fresh-backend) is exercised by the
+> `build_test` harness's enterprise-stress phase, which can fork parallel
+> psql backends — not
 > something a single `psql -f` can do.
 
 ```sh

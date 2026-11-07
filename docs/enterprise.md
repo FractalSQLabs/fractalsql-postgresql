@@ -134,8 +134,7 @@ prove nothing in the *middle* was altered or removed, but it can't prove
 nothing was truncated off the very *end*: there's nothing after the last
 row to notice its absence. That needs an external anchor (e.g. publishing
 the head hash somewhere independent). See **External anchoring** below
-for a ready-to-use recipe. (See `demo/enterprise-stress.sql` Phase E and
-`build_test` gate 25 Phase E.)
+for a ready-to-use recipe. (See `demo/enterprise-stress.sql` Phase E.)
 
 ### External anchoring (closing the truncation gap)
 
@@ -166,20 +165,105 @@ FROM fractalsql_ledger WHERE kind = <kind> AND id = <anchored id>;
 `false` or no matching row means the row was altered, or the chain was
 rewound past it, after the anchor was taken.
 
-**Detached signature verification (optional hardening).** The 8-symbol
-`dlsym` check in `ensure_enterprise_lib()` only proves a file has the right
-function *names*. A tampered file with the same names sails through it
-untouched. Set `fractalsql.enterprise_require_signature = on` (superuser-only,
-`PGC_SIGHUP`) to additionally require a valid detached Ed25519 signature (a
-sibling `<path>.sig` file, 64 raw bytes) against a fixed FractalSQLabs public
-key before the library is `dlopen`'d. Off by default: a missing `.sig` only
-logs a `WARNING` and the library still loads, so this is backward compatible
-with unsigned releases. An **invalid** signature (present but wrong) is
-always refused regardless of the setting: unambiguous tamper evidence,
-unlike a merely absent file. New enterprise releases only need a fresh
+**Detached signature verification.** The 8-symbol `dlsym` check in
+`ensure_enterprise_lib()` only proves a file has the right function *names*.
+A tampered file with the same names sails through it untouched. So a valid
+detached Ed25519 signature (a sibling `<path>.sig` file, 64 raw bytes) against
+a fixed FractalSQLabs public key is required before the library is
+`dlopen`'d. `fractalsql.enterprise_require_signature` (superuser-only,
+`PGC_SIGHUP`) is `on` by default: a library with no `.sig` is refused, with the
+message `no signature found for enterprise library "<path>" (expected
+"<path>.sig"); place the .sig beside the library, or set
+FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 in the postmaster environment to
+load an unsigned library`. Set `FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0` in
+the postmaster environment, or set `fractalsql.enterprise_require_signature = off`,
+and a missing `.sig` only logs a `WARNING` and the library still loads. An
+**invalid** signature (present but wrong) is always refused regardless of the
+settings: unambiguous tamper evidence, unlike a merely absent file. New enterprise releases only need a fresh
 signature from the same long-lived key; this extension never needs
 rebuilding, preserving the drop-in-`.so` design a hash pin would have broken.
-(See `build_test` gate 26.)
+
+### Data at rest
+
+The QTL chain is stored **inside the database**, in the
+`fractalsql_ledger` table: one append-only row per entry, each carrying
+the hash of the row before it, so the chain is verifiable on its own.
+Beside it, `fractalsql_ledger_head` holds one row per chain with the
+number of entries that chain should have. Three consequences are worth
+stating plainly.
+
+**The database is the protected object.** Everything the chain holds is
+in the database, so the database's own protections — role grants, the
+`wal_level` and backup posture, and encryption on the volume the data
+directory sits on — are the whole story of what is protected at rest.
+Community PostgreSQL 14 through 18 has no built-in transparent data
+encryption, so an encrypted volume (or a vendor build whose TDE covers
+the same tables) is what protects the chain's contents from someone who
+reads the files. The write-ahead log and the base backups carry the same
+rows and want the same treatment. There is no separate ledger file here,
+so file-mode permissions do not apply to it; a chain stored in a table
+inherits the database's access control.
+
+**The head record carries its own MAC.** Because the head lives in the
+same database as the chain, anyone who can rewrite the tail can also
+rewrite the head — so the head is authenticated rather than trusted. Set
+the `fractalsql.enterprise_ledger_key` GUC and the head's row count is
+covered by an HMAC-SHA256 over its own contents (`kind` and `rows`),
+written in the same transaction that advances the head. Verification then
+distinguishes the failure modes instead of collapsing them into one
+"bad chain" answer: a head with no MAC (written before the key was set),
+a MAC that is not 32 bytes (malformed), a MAC that does not match the
+head's contents (the head was edited by hand), and a chain that holds
+fewer rows than the head recorded (rows deleted, or the table was
+dropped and replaced). A head whose MAC cannot be checked — because no
+ledger key is configured — is reported as such rather than passed over
+in silence.
+
+**The head can be published on every append.** With
+`FSQL_LEDGER_ANCHOR_LOG=stderr` (or `syslog` where the platform has one)
+the server writes one JSON line per append:
+
+```json
+{"event":"ledger_head","kind":2,"rows":17,"hash":"<hex of the newest entry hash>"}
+```
+
+`kind` is the chain, `rows` is how many entries that chain holds after
+the append, and `hash` is the newest entry hash. A chain whose tail was
+deleted no longer matches the last line published, so a truncation is
+visible from the log even though it is invisible from the database alone.
+The line is published as the row is appended, before the enclosing write
+transaction commits. Send stderr (or syslog) to a log collector the
+database's own writer cannot rewrite, and keep it at least as long as the
+audit window you care about. The scheduled-cron recipe above is the
+timer-driven version of the same idea and stays useful when you want the
+anchor on a schedule rather than on every append.
+
+**The text of an entry can be redacted.** An audit entry carries what
+the agents were asked and what they produced, and that text can hold
+customer data: the question, the generated SQL with its literals, the
+analysis, the rows that were read. `FSQL_AUDIT_REDACT` decides what the
+chain keeps:
+
+| `FSQL_AUDIT_REDACT` | What is stored |
+| --- | --- |
+| `none` (default) | The text, as it is. |
+| `hash` | `sha256:<hex> len=<bytes>` — the fingerprint of the text and its length, so equal texts stay comparable and the length is known, but the text is not. |
+| `truncate` | The first 64 characters of the text. |
+
+Redaction reaches the fields nested inside the entry as well as the entry
+itself, and leaves everything else alone: identifiers, counts, statuses
+and the attribution block are stored as they are. The values returned to
+the caller are never redacted — an agent still answers with the real
+question, the real SQL and the real analysis; only what is persisted
+changes.
+
+Two limits belong here rather than in a footnote. Neither setting
+encrypts anything: a redacted entry is unreadable, but the rows it
+describes, the table they came from and the database itself are not
+protected by it — that is what volume encryption and database access
+control are for. And the MAC key is the key you already set
+(`fractalsql.enterprise_ledger_key`); the anchor log publishes a hash of
+the head, not the key and not the entry contents.
 
 ---
 

@@ -75,24 +75,24 @@ EXPECTED_TOOLS = {
 EXPECTED_SAFETY = {
     "fractal_agent_allocate": ("write", True),
     "fractal_agent_anomaly_triage": ("write", True),
-    "fractal_agent_data_analyst": ("write", True),
+    "fractal_agent_data_analyst": ("destructive", True),
     "fractal_agent_detect_loop": ("read", False),
     "fractal_agent_detour_classify": ("write", True),
     "fractal_agent_diverse_portfolios": ("write", True),
-    "fractal_agent_feedback_audit": ("write", False),
+    "fractal_agent_feedback_audit": ("destructive", False),
     "fractal_agent_network_coverage_alert": ("write", True),
     "fractal_agent_outlier_intercept": ("write", True),
     "fractal_agent_patient_deterioration_triage": ("write", True),
     "fractal_agent_plan_explore": ("write", True),
     "fractal_agent_rebalance_sibling": ("write", True),
     "fractal_agent_recall_hybrid": ("read", False),
-    "fractal_agent_recommend_diverse": ("write", False),
+    "fractal_agent_recommend_diverse": ("destructive", False),
     "fractal_agent_regime_triage": ("write", True),
     "fractal_agent_route_task": ("write", True),
     "fractal_agent_schedule_workload": ("write", True),
     "fractal_agent_track_anomaly": ("write", True),
     "fractal_agent_trajectory_predict": ("write", False),
-    "fractal_audit_log": ("write", False),
+    "fractal_audit_log": ("destructive", False),
     "fractal_audit_unpack": ("read", False),
     "fractal_change_point_detect": ("read", False),
     "fractal_cortical_folding": ("read", False),
@@ -102,17 +102,17 @@ EXPECTED_SAFETY = {
     "fractal_dimension_boxcount": ("read", False),
     "fractal_dimension_dfa": ("read", False),
     "fractal_dimension_drift": ("read", False),
-    "fractal_diversify_disable": ("write", False),
-    "fractal_diversify_enable": ("write", False),
-    "fractal_diversify_set_params": ("write", False),
+    "fractal_diversify_disable": ("destructive", False),
+    "fractal_diversify_enable": ("destructive", False),
+    "fractal_diversify_set_params": ("destructive", False),
     "fractal_embed": ("write", True),
     "fractal_explain_result": ("read", False),
-    "fractal_feedback_report": ("write", False),
+    "fractal_feedback_report": ("destructive", False),
     "fractal_hybrid_clinical_search": ("read", False),
-    "fractal_isolate_background": ("write", False),
+    "fractal_isolate_background": ("destructive", False),
     "fractal_ledger_compact": ("destructive", False),
     "fractal_ledger_flush": ("destructive", False),
-    "fractal_ledger_load": ("write", False),
+    "fractal_ledger_load": ("destructive", False),
     "fractal_ledger_reset_hard": ("destructive", False),
     "fractal_ledger_reset_soft": ("destructive", False),
     "fractal_ledger_shadow_count": ("read", False),
@@ -136,9 +136,9 @@ EXPECTED_SAFETY = {
     "fractal_search_telemetry": ("read", False),
     "fractal_search_trajectory": ("read", False),
     "fractal_spectrogram_entropy": ("read", False),
-    "fractal_sql_agent": ("write", True),
+    "fractal_sql_agent": ("destructive", True),
     "fractal_state_fingerprint": ("read", False),
-    "fractal_store_morphology": ("write", False),
+    "fractal_store_morphology": ("destructive", False),
     "fractal_tda_persistence_diagram": ("read", False),
     "fractal_text_to_sql": ("write", True),
     "fractal_vascular_network": ("read", False),
@@ -146,11 +146,11 @@ EXPECTED_SAFETY = {
     "fractal_vector_lp_distance": ("read", False),
     "fractal_vector_quantize_binary": ("read", False),
     "fractal_vector_quantize_int8": ("read", False),
-    "fractal_vectorizer_create": ("write", False),
+    "fractal_vectorizer_create": ("destructive", False),
     "fractal_vectorizer_drop": ("destructive", False),
-    "fractal_vectorizer_pause": ("write", False),
-    "fractal_vectorizer_process_queue": ("write", False),
-    "fractal_vectorizer_resume": ("write", False),
+    "fractal_vectorizer_pause": ("destructive", False),
+    "fractal_vectorizer_process_queue": ("destructive", False),
+    "fractal_vectorizer_resume": ("destructive", False),
     "fractalsql_configure_reasoning": ("destructive", False),
     "fractalsql_get_config": ("read", False),
     "fractalsql_get_version": ("read", False),
@@ -160,6 +160,7 @@ EXPECTED_SAFETY = {
 
 class Client:
     def __init__(self, exe, env=None):
+        self.exe = exe
         self.p = subprocess.Popen(
             [exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env or os.environ, text=True, encoding="utf-8",
@@ -423,6 +424,13 @@ def main():
         fails += ok(r.get("error", {}).get("code") == -32602
                     and "JSON object" in str(r.get("error", {}).get("message", "")),
                     "tools/call with non-object arguments -> -32602 object-required", r.get("error"))
+        # A non-object "params" is an invalid-params error, not an internal one (nlohmann's value() threw on it).
+        for bad_params in ("x", None, [1]):
+            cli.p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 990010, "method": "tools/call", "params": bad_params}) + "\n")
+            cli.p.stdin.flush()
+            r = cli.recv(990010, timeout_s=15)
+            fails += ok(r.get("error", {}).get("code") == -32602,
+                        "tools/call with params=%r -> -32602 (not -32603)" % (bad_params,), r.get("error"))
         # A request with no "method" at all -> -32600 (raw write: Client.send always pairs one).
         cli.p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 990001}) + "\n")
         cli.p.stdin.flush()
@@ -780,16 +788,23 @@ def run_cli_edge_phase(exe):
     with open(sl, "w") as fh:
         fh.write("0" * 64 + "\n")
     r = run([], env=env, stdin=init + "\n")
+    fails += ok(r.returncode == 2 and "schema hash mismatch" in r.stderr,
+                "cli: a stale schema lock is fatal by default (exit 2)", [r.returncode, r.stderr[-100:]])
+    r = run([], env=dict(env, FSQL_MCP_STRICT_SCHEMA_HASH="false"), stdin=init + "\n")
     fails += ok(r.returncode == 0 and "schema hash mismatch" in r.stderr and '"id":1' in r.stdout.replace(" ", ""),
-                "cli: a stale schema lock only WARNS by default (the server still serves)", [r.returncode, r.stderr[-100:]])
+                "cli: FSQL_MCP_STRICT_SCHEMA_HASH=false downgrades a stale schema lock to a warning (the server still serves)",
+                [r.returncode, r.stderr[-100:]])
     for v in ("1", "true", "TRUE", "on", "yes"):
         r = run([], env=dict(env, FSQL_MCP_STRICT_SCHEMA_HASH=v), stdin=init + "\n")
         fails += ok(r.returncode == 2 and "schema hash mismatch" in r.stderr,
                     "cli: FSQL_MCP_STRICT_SCHEMA_HASH=%s makes a schema mismatch fatal (exit 2)" % v, r.returncode)
-    for v in ("0", "off", "no", ""):
+    for v in ("0", "off", "no", "false"):
         r = run([], env=dict(env, FSQL_MCP_STRICT_SCHEMA_HASH=v), stdin=init + "\n")
         fails += ok(r.returncode == 0,
                     "cli: FSQL_MCP_STRICT_SCHEMA_HASH=%r leaves a mismatch non-fatal" % v, r.returncode)
+    # An empty value is "unset", so the (strict) default applies.
+    r = run([], env=dict(env, FSQL_MCP_STRICT_SCHEMA_HASH=""), stdin=init + "\n")
+    fails += ok(r.returncode == 2, "cli: an empty FSQL_MCP_STRICT_SCHEMA_HASH falls back to the strict default", r.returncode)
 
     # ---- safety-annotation lock: write, verify, any drift is fatal (exit 3) ----
     sf = os.path.join(scratch, "safety.lock")
@@ -815,7 +830,8 @@ def run_cli_edge_phase(exe):
                 "cli: FSQL_MCP_MANIFEST_PATH redirects --write-manifest", [r.returncode, r.stdout[:80]])
 
     # ---- HTTP start-up config refusals ----
-    r = run(["--http", "18964", "--host", "no-such-host.invalid"], env=dict(clean, FSQL_MCP_AUTH_TOKEN="t"))
+    r = run(["--http", "18964", "--host", "no-such-host.invalid"],
+            env=dict(clean, FSQL_MCP_AUTH_TOKEN="t", FSQL_MCP_ALLOW_PLAINTEXT_NONLOOPBACK="true"))
     fails += ok(r.returncode == 1 and "http listen failed" in r.stderr,
                 "cli: an unresolvable --host is a listen failure (exit 1), not a bind-all fallback",
                 [r.returncode, r.stderr[-100:]])
@@ -1575,7 +1591,7 @@ def run_db_asserts(exe, ok, _setfails):
     import struct
     import math
 
-    cli = Client(exe)
+    cli = Client(exe, env=dict(os.environ, FSQL_MCP_CONFIG_WRITES="all"))
     fails = 0
     try:
         cli.call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "db", "version": "0"}})
@@ -1748,13 +1764,18 @@ def run_db_asserts(exe, ok, _setfails):
         sc = (r.get("result", {}).get("structuredContent") or {})
         fails += ok(r.get("result", {}).get("isError") is True and "never" in str(sc.get("message", "")).lower(),
                     "fractalsql_get_config refuses the secret key", sc)
+        # A reload-scoped (PGC_SIGHUP) key cannot be changed for the session:
+        # postgres refuses a session-level set of it, so the server writes it
+        # the way postgres changes it -- ALTER SYSTEM SET + pg_reload_conf() --
+        # and reports it as queued rather than claiming it is live.
         r = cli.call("tools/call", {"name": "fractalsql_set_config",
                                     "arguments": {"key": "http_model", "value": "smoke-set-model"}})
         sc = (r.get("result", {}).get("structuredContent") or {})
-        fails += ok(r.get("result", {}).get("isError") is True
-                    and "reload-scoped" in str(sc.get("message", ""))
-                    and "fractalsql_configure_reasoning" in str(sc.get("message", "")),
-                    "fractalsql_set_config on a reload-scoped (PGC_SIGHUP) key -> clean redirect to ALTER SYSTEM",
+        fails += ok((r.get("result", {}) or {}).get("isError") is not True
+                    and sc.get("effective") is False
+                    and "server-wide" in str(sc.get("scope", ""))
+                    and str(sc.get("status", "")).startswith("queued"),
+                    "fractalsql_set_config on a reload-scoped (PGC_SIGHUP) key -> written server-side and reported as queued",
                     sc)
         r = cli.call("tools/call", {"name": "fractalsql_set_config",
                                     "arguments": {"key": "agent_partial_reasoning_fail", "value": "off"}})
@@ -2172,12 +2193,12 @@ def _tool(cli, name, args):
 
 
 def sweep_admin(cli, ok):
-    """The config tools, positive and negative, WITHOUT touching the cluster:
-    fractalsql_set_config is session-scoped (set_config(..., false)) and is
-    only pointed at the one session-settable key plus refusal cases; the
-    ALTER SYSTEM tool (fractalsql_configure_reasoning) is exercised only on
-    its no-op refusal, because a real call would rewrite postgresql.auto.conf
-    for every later gate on the same cluster."""
+    """The config tools, positive and negative, WITHOUT leaving the cluster in a
+    changed state: fractalsql_set_config is pointed at the one session-settable
+    key plus refusal cases, and at one reload-scoped key, whose value is put
+    back the way it was found; the ALTER SYSTEM tool (fractalsql_configure_reasoning)
+    is exercised only on its no-op refusal, because a real call would rewrite
+    postgresql.auto.conf for every later gate on the same cluster."""
     fails = 0
     G = "agent_partial_reasoning_fail"
 
@@ -2195,9 +2216,20 @@ def sweep_admin(cli, ok):
     err, sc = _tool(cli, "fractalsql_set_config", {"key": G, "value": "banana"})
     fails += ok(err and sc.get("error_class") == "engine",
                 "admin: an invalid value surfaces the server's own error (engine class)", sc)
+    # A reload-scoped (PGC_SIGHUP) key cannot be changed for the session:
+    # postgres refuses a session-level set of it, so the server writes it the
+    # way postgres changes it -- ALTER SYSTEM SET + pg_reload_conf() -- and
+    # says "queued" rather than claiming it is live. The previous value is
+    # restored afterwards so the cluster this gate shares with the later ones
+    # keeps the setting they expect.
+    err, sc = _tool(cli, "fractalsql_get_config", {"key": "http_model"})
+    previous_model = sc.get("value") if not err else ""
     err, sc = _tool(cli, "fractalsql_set_config", {"key": "http_model", "value": "x"})
-    fails += ok(err and sc.get("error_class") == "schema" and "ALTER SYSTEM" in sc.get("message", ""),
-                "admin: a reload-scoped key is refused with the ALTER SYSTEM pointer", sc)
+    fails += ok(not err and sc.get("effective") is False
+                and "server-wide" in sc.get("scope", "")
+                and sc.get("status", "").startswith("queued"),
+                "admin: a reload-scoped key is written server-side and reported as queued", sc)
+    _tool(cli, "fractalsql_set_config", {"key": "http_model", "value": previous_model or ""})
     err, sc = _tool(cli, "fractalsql_set_config", {"key": "no_such_key", "value": "x"})
     fails += ok(err and sc.get("error_class") == "schema" and "unknown config key" in sc.get("message", ""),
                 "admin: set_config rejects an unknown key", sc)
@@ -2229,6 +2261,29 @@ def sweep_admin(cli, ok):
         fails += ok(err and sc.get("error_class") == "schema" and "nothing to set" in sc.get("message", ""),
                     "admin: configure_reasoning with no usable field is refused before any ALTER SYSTEM",
                     sc)
+
+    # The config-writes switch itself (the default mode refuses everything
+    # outside the safe set; the safe set -- the model names and the think
+    # mode -- is still writable). A second client runs with the default
+    # settings, so the switch is exercised in its own right.
+    safe_env = dict(os.environ)
+    safe_env.pop("FSQL_MCP_CONFIG_WRITES", None)
+    safe = Client(cli.exe, env=safe_env)
+    try:
+        safe.call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
+                                  "clientInfo": {"name": "safe", "version": "0"}})
+        safe.send("notifications/initialized", {}, notify=True)
+        err, sc = _tool(safe, "fractalsql_set_config", {"key": G, "value": "on"})
+        fails += ok(err and sc.get("error_class") == "schema"
+                    and "config write refused" in sc.get("message", ""),
+                    "admin: the default config-writes mode refuses a key outside the safe set", sc)
+        err, sc = _tool(safe, "fractalsql_set_config", {"key": "http_model", "value": "safe-set-model"})
+        fails += ok(not err and "config write refused" not in sc.get("message", "")
+                    and sc.get("effective") is False
+                    and str(sc.get("status", "")).startswith("queued"),
+                    "admin: the default config-writes mode still allows a key inside the safe set", sc)
+    finally:
+        safe.close()
     return fails
 
 

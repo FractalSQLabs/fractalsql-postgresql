@@ -58,6 +58,8 @@
                              own bounds via options jsonb, stale_after
                              reclaim (see build_test.sh Gate 20)
       21  fuzz_smoke         FUZZ ONLY (-Fuzz, not in default gates).
+      49  mcp_fuzz           FUZZ ONLY (-Fuzz): the MCP server's JSON-RPC and
+                             argument-coercion targets, built with ASan.
                              libFuzzer via clang-cl against the 3
                              hand-rolled parsers in
                              src\fractalsql_parse.c -- no cluster, no
@@ -112,10 +114,13 @@
     hardware: the default of 1 does not survive gate 06 under -Asan).
 
 .PARAMETER Fuzz
-    Gate 21 only -- libFuzzer smoke via clang-cl against
-    src\fractalsql_parse.c's 3 hand-rolled parsers. Set FSQL_FUZZ_TIME
-    (seconds per target, default 30) to run longer than the pre-push
-    smoke budget.
+    Gates 21 and 49. Gate 21: libFuzzer smoke via clang-cl (ASan+UBSan)
+    against src\fractalsql_parse.c's 3 hand-rolled parsers. Gate 49: the
+    MCP server's argument-coercion target under libFuzzer+ASan and its
+    JSON-RPC target as an ASan-built standalone mutation driver (libFuzzer
+    on clang for Windows cannot read caught C++ exception objects). Set
+    FSQL_FUZZ_TIME (seconds per target, default 30) to run longer than
+    the pre-push smoke budget.
 
 .EXAMPLE
     PS> .\build_test.ps1 -PgDir "C:\Program Files\PostgreSQL\17" -PgMajor 17
@@ -140,7 +145,9 @@ param(
     # with it at link time. -TimeoutMult auto-bumps to 8 under -Asan
     # (see below): ASan overhead blows the default 15s gate-06 crash-
     # recovery poll budget, cascade-failing later gates with "database
-    # system is in recovery mode".
+    # system is in recovery mode". The MCP server is built sanitized too
+    # (mcp\scripts\windows\build-asan.bat, into mcp\dist\windows-mcp-asan)
+    # and used by the MCP gates in place of the plain cl.exe build.
     [switch]$Asan,
     # Same structure as -Asan (separate dist\windows-ubsan\ tree, same
     # gates run against the instrumented DLL), but via clang-cl
@@ -150,7 +157,8 @@ param(
     # rebuilds its own separate dist\ tree, run one at a time. Whether
     # gate 06 needs the same -TimeoutMult headroom ASan needed is
     # unverified -- instrumentation overhead differs by sanitizer,
-    # don't assume identical without checking a real run.
+    # don't assume identical without checking a real run. The MCP server
+    # is built with build-ubsan.bat into mcp\dist\windows-mcp-ubsan.
     [switch]$Ubsan,
     # Windows port of build_test.sh's Gate 21 (--fuzz): builds and
     # briefly runs libFuzzer drivers against the 3 hand-rolled parsers
@@ -177,6 +185,8 @@ if (-not $PSBoundParameters.ContainsKey('TimeoutMult') -and ($Asan -or $Ubsan)) 
 }
 
 $ErrorActionPreference = 'Stop'
+# Test fixtures load unsigned mock plugins and an unsigned mock enterprise core; the product defaults are exercised explicitly where tested.
+if (-not $env:FSQL_REASONING_REQUIRE_SIGNATURE) { $env:FSQL_REASONING_REQUIRE_SIGNATURE = "0" }
 # PowerShell 7.3+ defaults to treating ANY native-command stderr write
 # as a terminating error under $ErrorActionPreference = 'Stop' --
 # regardless of the writing program's own actual severity level. psql
@@ -193,9 +203,9 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoRoot
 
-$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26','27','28','29','30','31','32','33','38','39','40','41','42','43','44','45','46','47','48')
+$DefaultGates = @('01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17','18','19','20','22','23','24','25','26','27','28','29','30','31','32','33','38','39','40','41','42','43','44','45','46','47','48','50','51','52')
 $QuickGates   = @('01','02')
-$FuzzGates    = @('21')
+$FuzzGates    = @('21','49')
 
 $script:Failed = 0
 function Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green }
@@ -238,6 +248,7 @@ function Find-ClangCl {
     throw "-Ubsan/-Fuzz requested but clang-cl.exe not found (checked PATH, VS's 'C++ Clang tools for Windows' component, standalone LLVM)."
 }
 $script:ClangCl = $null
+$script:McpSanExe = $null   # the sanitized MCP server exe, built once per -Asan/-Ubsan run
 if ($Ubsan -or $Fuzz) {
     $script:ClangCl = Find-ClangCl
     Write-Host "Using clang-cl: $script:ClangCl"
@@ -608,6 +619,12 @@ function Build-UbsanExtension {
 }
 
 function Gate01Build {
+    # A postgres.exe left running by an interrupted earlier run still has the previous fractalsql.dll loaded,
+    # and the linker cannot overwrite a loaded DLL (LNK1104). Stop anything still bound to THIS run's datadir
+    # before building (scoped to the datadir, the same as PgSetup's stale cleanup and the teardown).
+    if (Test-Path $DataDir) {
+        try { & "$Bin\pg_ctl.exe" -D $DataDir -m immediate -w stop 2>&1 | Out-Null } catch { Write-Verbose "best-effort: pg_ctl stop failed (harmless if no stale instance was running)" }
+    }
     Write-Information "  building..." -InformationAction Continue
     if ($Asan) {
         Build-AsanExtension
@@ -813,6 +830,15 @@ function PgSetup {
     # $DataDir\log, and pg_ctl itself gets a bounded wall clock (its
     # -w readiness wait is the piece the gate-28 comment says can block
     # on Windows) via WaitForExit + Kill.
+    # A listener already on this run's port (an orphaned postgres.exe from an interrupted run
+    # whose data directory is a different one, or any other service) makes the start fail with
+    # nothing on the terminal but "stopped waiting". Name it up front instead.
+    $busy = $null
+    try { $busy = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 } catch { Write-Verbose "best-effort: Get-NetTCPConnection unavailable" }
+    if ($busy) {
+        $owner = try { (Get-Process -Id $busy.OwningProcess -ErrorAction Stop).ProcessName } catch { 'unknown' }
+        throw "port $Port is already in use by PID $($busy.OwningProcess) ($owner) -- stop it (a postgres.exe left by an interrupted run?) and re-run"
+    }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "$Bin\pg_ctl.exe"
     foreach ($a in @('-D', $DataDir, '-w', '-l', (Join-Path $DataDir 'log'), 'start')) { $psi.ArgumentList.Add($a) }
@@ -822,7 +848,13 @@ function PgSetup {
         try { $proc.Kill($true) } catch { }
         throw "pg_ctl start did not return within 60s -- see $DataDir\log"
     }
-    if ($proc.ExitCode -ne 0) { throw "pg_ctl start failed (exit $($proc.ExitCode)) -- see $DataDir\log" }
+    if ($proc.ExitCode -ne 0) {
+        # pg_ctl's own output is deliberately not captured (see above), so the reason lives only in
+        # the server log. Put its tail in the failure instead of making the reader go and find it.
+        $tail = ''
+        try { $tail = (Get-Content -LiteralPath (Join-Path $DataDir 'log') -Tail 25 -ErrorAction Stop) -join "`n" } catch { $tail = '(no server log was written)' }
+        throw "pg_ctl start failed (exit $($proc.ExitCode)) -- see $DataDir\log; last lines:`n$tail"
+    }
 
     $createSql = @"
 CREATE FUNCTION fractal_version() RETURNS text AS '$DllPath','fractal_version' LANGUAGE C IMMUTABLE STRICT;
@@ -945,7 +977,7 @@ function PgSwapPlugin($path) {
 
 function Gate02Smoke {
     $ver = Psql -Sql "SELECT fractal_version();"
-    if ($ver -eq '2.0.20') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.20)" }
+    if ($ver -eq '2.0.21') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.21)" }
     $r = Psql -Sql @"
 WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
 SELECT CASE WHEN sqrt(v[1]*v[1]+v[2]*v[2])>1e-9
@@ -1081,14 +1113,22 @@ function Gate06CrashRecovery {
     # comes back at all within the extended one.
     $up = $false
     $withinBudget = $false
+    $cameBackSec = -1
     $tries = 30 * $TimeoutMult
     for ($i = 0; $i -lt ($tries * 2); $i++) {
         $t = Psql -Sql "SELECT 1;"
-        if ($t -eq '1') { $up = $true; if ($i -lt $tries) { $withinBudget = $true }; break }
+        if ($t -eq '1') { $up = $true; if ($i -lt $tries) { $withinBudget = $true }; $cameBackSec = [math]::Round(($i + 1) * 0.5, 1); break }
         Start-Sleep -Milliseconds 500
     }
     if ($withinBudget) { Pass "06 crash_recovery: cluster auto-restarted" }
-    else { Fail "06 crash_recovery: cluster did not come back within $($tries / 2)s" }
+    else {
+        # Say how long the restart actually took: a slow recovery and a
+        # broken one look identical in the pass/fail line, and only the
+        # first one is fixed by -TimeoutMult.
+        $how = if ($up) { "it came back after $cameBackSec s -- the recovery itself is fine; raise -TimeoutMult on a slow machine" }
+               else { "it never came back within $($tries)s" }
+        Fail "06 crash_recovery: cluster did not come back within $($tries / 2)s ($how)"
+    }
 
     if ($up) {
         $n = Psql -Sql "SELECT count(*) FROM bt_customers WHERE name = 'canary';"
@@ -2106,14 +2146,22 @@ INSERT INTO bt_embed_crash (body) VALUES ('a'), ('b'), ('c');
     # crash plugin active for the rest of the run.
     $up = $false
     $withinBudget = $false
+    $cameBackSec = -1
     $tries = 30 * $TimeoutMult
     for ($i = 0; $i -lt ($tries * 2); $i++) {
         $t = Psql -Sql "SELECT 1;"
-        if ($t -eq '1') { $up = $true; if ($i -lt $tries) { $withinBudget = $true }; break }
+        if ($t -eq '1') { $up = $true; if ($i -lt $tries) { $withinBudget = $true }; $cameBackSec = [math]::Round(($i + 1) * 0.5, 1); break }
         Start-Sleep -Milliseconds 500
     }
     if ($withinBudget) { Pass "18 embed_crash: cluster auto-restarted" }
-    else { Fail "18 embed_crash: cluster did not come back within $($tries / 2)s" }
+    else {
+        # Say how long the restart actually took: a slow recovery and a
+        # broken one look identical in the pass/fail line, and only the
+        # first one is fixed by -TimeoutMult.
+        $how = if ($up) { "it came back after $cameBackSec s -- the recovery itself is fine; raise -TimeoutMult on a slow machine" }
+               else { "it never came back within $($tries)s" }
+        Fail "18 embed_crash: cluster did not come back within $($tries / 2)s ($how)"
+    }
     if (-not $up) {
         Fail "18 embed_crash: cluster never came back -- remaining gates will run against the crash plugin"
         return
@@ -2159,7 +2207,7 @@ function Gate19SfsBounds {
     else { Fail "19 sfs_bounds: expected an iterations-limit rejection, got: $r" }
 
     $r = Psql -Sql "SELECT fractal_search(ARRAY[0.1,0.2]::float8[], 10, 100001);"
-    if ($r -match 'population_size 100001 out of range') { Pass "19 sfs_bounds: population_size over MAX_POPULATION_SIZE (100000) rejected cleanly" }
+    if ($r -match 'population_size 100001 out of range') { Pass "19 sfs_bounds: population_size over MAX_POPULATION_SIZE (10000) rejected cleanly" }
     else { Fail "19 sfs_bounds: expected a population_size-limit rejection, got: $r" }
 
     $r = Psql -Sql "SELECT fractal_search(ARRAY[0.1,0.2]::float8[], 10, 20, 33);"
@@ -2459,11 +2507,24 @@ SELECT fractal_store_morphology(904, ARRAY[0.5,0.5,0.5]::float8[]);
     Psql -Sql "DELETE FROM fractalsql_feature_store WHERE doc_id IN (901,902,903,904);" | Out-Null
 
     # --- 5: Diversify / feedback controls ------------------------------
-    Psql -Sql "SELECT fractal_diversify_enable();" | Out-Null
-    Psql -Sql "SELECT fractal_diversify_set_params(20, 0.1, 1.0, 0.5, 100, 50);" | Out-Null
-    $r10 = Psql -Sql "SELECT fractal_explain_result();"
+    # The monitor is session-scoped, and so is the search context it
+    # lives on: the enable and the read have to happen in ONE session.
+    # Reading the flag from a second connection reports that second
+    # session's own state, which is "off".
+    $r10 = Psql -Sql "SELECT fractal_diversify_enable(); SELECT fractal_diversify_set_params(20, 0.1, 1.0, 0.5, 100, 50); SELECT fractal_explain_result();"
     if ($r10 -match '"diversify_enabled": true') { Pass "22 v2_functions: fractal_explain_result reflects diversify_enabled after enable" }
     else { Fail "22 v2_functions: expected diversify_enabled=true, got: $r10" }
+
+    # A session that never enabled the monitor must report it off: the
+    # flag is the session's own state, not the core's tunable defaults.
+    $r10b = Psql -Sql "SELECT fractal_explain_result();"
+    if ($r10b -match '"diversify_enabled": false') { Pass "22 v2_functions: a session that never enabled the monitor reports diversify_enabled=false" }
+    else { Fail "22 v2_functions: a fresh session reported diversify_enabled=true, got: $r10b" }
+
+    # Switching the monitor off puts the flag back to false.
+    $r10c = Psql -Sql "SELECT fractal_diversify_enable(); SELECT fractal_diversify_disable(); SELECT fractal_explain_result();"
+    if ($r10c -match '"diversify_enabled": false') { Pass "22 v2_functions: disabling the monitor puts the flag back to false" }
+    else { Fail "22 v2_functions: after disable the session reported diversify_enabled=true, got: $r10c" }
 
     $fbr = Psql -Sql "SELECT fractal_feedback_report(0, 'negative', 100);"
     if ($fbr -match 'ERROR') { Fail "22 v2_functions: fractal_feedback_report errored on a valid call: $fbr" }
@@ -2948,8 +3009,12 @@ INSERT INTO bt_agents_catalog VALUES (10, ARRAY[0.1,0.2,0.3]), (20, ARRAY[0.9,0.
     # ====================================================================
 
     # --- 10: fractal_agent_data_analyst happy path ----------------------
-    # Composes fractal_sql_agent (NL->SQL->execute, auto_execute=true) ->
-    # fractal_reason. With the mock canary the generated_sql IS the canary
+    # Composes fractal_sql_agent (NL->SQL->execute) -> fractal_reason.
+    # auto_execute is now the CALLER's explicit opt-in: the
+    # engine's own default is false, so these three calls pass true
+    # explicitly to exercise the executing path. The fail-closed default
+    # has its own assertion below (10e).
+    # With the mock canary the generated_sql IS the canary
     # (the mock LLM); auto_execute's subtransaction catches the canary-as-SQL
     # syntax error into a real execution_failed result_json, proving the
     # execute step ran; analysis is the real reason step (canary).
@@ -2958,15 +3023,15 @@ DROP TABLE IF EXISTS bt_agents_data;
 CREATE TABLE bt_agents_data (id int PRIMARY KEY, val float8);
 INSERT INTO bt_agents_data VALUES (1,10.5),(2,20.5);
 "@ | Out-Null
-    $r10 = Psql -Sql "SELECT generated_sql FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_agents_data'], 2);"
+    $r10 = Psql -Sql "SELECT generated_sql FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_agents_data'], 2, '{}', true);"
     if ($r10 -match 'gap-analysis-canary') { Pass "23 agents: data_analyst composes sql_agent (generated_sql is the real LLM step, canary)" }
     else { Fail "23 agents: expected the canary in generated_sql, got: $r10" }
 
-    $r10b = Psql -Sql "SELECT result_json::text FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_agents_data'], 2);"
+    $r10b = Psql -Sql "SELECT result_json::text FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_agents_data'], 2, '{}', true);"
     if ($r10b -match '"status"') { Pass "23 agents: data_analyst result_json is a real jsonb (auto_execute subtransaction ran)" }
     else { Fail "23 agents: expected a status-bearing result_json, got: $r10b" }
 
-    $r10c = Psql -Sql "SELECT analysis FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_agents_data'], 2);"
+    $r10c = Psql -Sql "SELECT analysis FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_agents_data'], 2, '{}', true);"
     if ($r10c -match 'gap-analysis-canary') { Pass "23 agents: data_analyst composes sql_agent -> reason (analysis is the real reason step, canary)" }
     else { Fail "23 agents: expected the canary in analysis, got: $r10c" }
 
@@ -3018,6 +3083,27 @@ COMMIT;
     # Restore the shared mock-reply file: every engine after this point
     # in gate 23 expects the "gap-analysis-canary" reply this gate's own
     # header already set, not the INSERT text this sub-test just wrote.
+    Set-Content -Path $SqlFile -Value "gap-analysis-canary" -NoNewline
+
+    # --- 10e: the engine's auto_execute default is FALSE ---
+    # The engine-level data_analyst used to hardcode auto_execute=true, so
+    # ANY caller -- including an LLM-driven one -- got its model-generated
+    # statement executed with no opt-in of its own. The engine now
+    # takes auto_execute as an explicit argument defaulting to false, so:
+    #   * the DEFAULT call generates + validates the statement and returns
+    #     it WITHOUT running it -- result_json IS NULL and analysis IS NULL
+    #     (the reason step is skipped: there is no result to read);
+    #   * the explicit opt-in (..., true) still executes and still reasons.
+    # This drives the mock with a REAL, valid SELECT (not the canary), so
+    # "was it executed?" is decidable from result_json alone: NULL (not
+    # run) vs {"status":"executed","rows":N} (run).
+    Set-Content -Path $SqlFile -Value "SELECT id, val FROM bt_agents_data" -NoNewline
+    $a1 = Psql -Sql "SELECT (result_json IS NULL)::text || '/' || (analysis IS NULL)::text FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_agents_data'], 2);"
+    if ($a1 -eq 'true/true') { Pass "23 agents: data_analyst auto_execute defaults to false -- the generated SQL is NOT executed and no reasoning runs" }
+    else { Fail "23 agents: expected result_json IS NULL and analysis IS NULL on the default call, got: $a1" }
+    $a2 = Psql -Sql "SELECT COALESCE(result_json->>'status','(null)') || '/' || (analysis IS NOT NULL)::text FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_agents_data'], 2, '{}', true);"
+    if ($a2 -eq 'executed/true') { Pass "23 agents: data_analyst with auto_execute=true still executes the generated SQL and still reasons over it" }
+    else { Fail "23 agents: expected status=executed and a non-null analysis on the explicit opt-in, got: $a2" }
     Set-Content -Path $SqlFile -Value "gap-analysis-canary" -NoNewline
 
     # --- 11: fractal_agent_patient_deterioration_triage happy + guard ----
@@ -3369,7 +3455,7 @@ function Gate21FuzzSmoke {
             # recognize that spelling ("unknown argument ignored" warning,
             # harmless but noisy) and fractalsql_parse.c needs nothing
             # beyond clang-cl's own C default.
-            '-O1', '-Zi', '-fsanitize=fuzzer,address',
+            '-O1', '-Zi', '-fsanitize=fuzzer,address,undefined',
             "-I$srcDir",
             $srcParse, $driver,
             "/Fe$bin"
@@ -3408,6 +3494,109 @@ function Gate21FuzzSmoke {
     }
 }
 
+# Gate 49 (-Fuzz): the MCP server fuzz targets (JSON-RPC line handler, argument
+# coercion and secret redaction), built with clang-cl like gate 21. Standalone: no
+# cluster. Both targets build with ASan, because LLVM documents libFuzzer on
+# Windows as unsupported without it. libFuzzer's runtime on clang for Windows
+# breaks reading any caught C++ exception object (a plain std::runtime_error's
+# what() crashes), so fuzz_mcp_jsonrpc, whose error replies are exceptions, is
+# built with a standalone mutation driver instead; the Linux gate keeps the real
+# libFuzzer run. OpenSSL is only needed for logging.cpp's digest calls: the
+# targets compile against the vcpkg headers and link tests\fuzz\mcp_evp_stub.cpp.
+function Gate49McpFuzz {
+    if (-not (Test-Path (Join-Path $RepoRoot 'tests\fuzz\fuzz_mcp_jsonrpc.cpp')) -or
+            -not (Test-Path (Join-Path $RepoRoot 'mcp\src\main.cpp'))) {
+        Skip '49 mcp_fuzz (mcp/ server code or fuzz targets not present)'
+        return
+    }
+    $opensslInc = $null
+    foreach ($root in @($env:VCPKG_ROOT, (Join-Path $RepoRoot '..\vcpkg'))) {
+        if (-not $root) { continue }
+        $cand = Join-Path $root 'installed\x64-windows-static\include'
+        if (Test-Path (Join-Path $cand 'openssl\evp.h')) { $opensslInc = $cand; break }
+    }
+    if (-not $opensslInc) {
+        Skip '49 mcp_fuzz (OpenSSL headers not found -- vcpkg install openssl:x64-windows-static and set VCPKG_ROOT)'
+        return
+    }
+    $libpq = Join-Path $PgDir 'lib\libpq.lib'
+    if (-not (Test-Path $libpq)) { Skip "49 mcp_fuzz (libpq.lib not found under $PgDir\lib)"; return }
+
+    $fuzzDir = Join-Path $RepoRoot 'dist\windows-fuzz-mcp'
+    if (Test-Path $fuzzDir) { Remove-Item -Recurse -Force $fuzzDir }
+    New-Item -ItemType Directory -Force -Path $fuzzDir | Out-Null
+    $fuzzTime = if ($env:FSQL_FUZZ_TIME) { $env:FSQL_FUZZ_TIME } else { '30' }
+
+    # The ASan runtime DLL (clang-cl defaults to the dynamic CRT) and libpq.dll
+    # must be on PATH for the built executables to start; this process only.
+    $savedPath = $env:PATH
+    $clangResourceDir = $null
+    try { $clangResourceDir = (& $script:ClangCl -print-resource-dir 2>$null | Select-Object -First 1) } catch { Write-Verbose "best-effort: clang -print-resource-dir absent/unsupported is not fatal: $($_.Exception.Message)" }
+    if ($clangResourceDir) {
+        $sanRtDir = Join-Path $clangResourceDir 'lib\windows'
+        if (Test-Path $sanRtDir) { $env:PATH = "$sanRtDir;$env:PATH" }
+    }
+    $env:PATH = "$(Join-Path $PgDir 'bin');$env:PATH"
+    $savedAsanOpts = $env:ASAN_OPTIONS
+    $env:ASAN_OPTIONS = 'detect_leaks=0:halt_on_error=1'
+    try {
+        foreach ($t in @('fuzz_mcp_vectors', 'fuzz_mcp_jsonrpc')) {
+            $srcs = @((Join-Path $RepoRoot 'mcp\src\errors.cpp'))
+            $link = @()
+            if ($t -eq 'fuzz_mcp_vectors') { $srcs += (Join-Path $RepoRoot 'mcp\src\vectors.cpp') }
+            else {
+                foreach ($f in @('jsonrpc_server', 'logging', 'prompts', 'resources')) { $srcs += (Join-Path $RepoRoot "mcp\src\$f.cpp") }
+                $srcs += (Join-Path $RepoRoot 'tests\fuzz\mcp_evp_stub.cpp')
+                $link = @('/link', $libpq)
+            }
+            # The MSVC STL turns on container annotations under ASan and libFuzzer's
+            # prebuilt library has them off, which fails to link, so they are disabled.
+            $fz = if ($t -eq 'fuzz_mcp_jsonrpc') { @('-fsanitize=address', '-DFSQL_FUZZ_STANDALONE') }
+                  else { @('-fsanitize=fuzzer,address') }
+            $exe = Join-Path $fuzzDir "$t.exe"
+            $compileArgs = @('-std:c++17', '/EHsc', '/O1', '/Zi', '/DNOMINMAX',
+                '-D_DISABLE_STRING_ANNOTATION', '-D_DISABLE_VECTOR_ANNOTATION') + $fz + @(
+                "-I$(Join-Path $RepoRoot 'mcp\src')", "-I$(Join-Path $RepoRoot 'mcp\vendor')",
+                "-I$opensslInc", "-I$(Join-Path $PgDir 'include')",
+                (Join-Path $RepoRoot "tests\fuzz\$t.cpp")) + $srcs + @("/Fe$exe") + $link
+            $buildLog = Join-Path $fuzzDir "$t.build.log"
+            & $script:ClangCl @compileArgs 1>$buildLog 2>&1
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) {
+                Fail "49 mcp_fuzz: $t failed to build; see $buildLog"
+                Get-Content $buildLog -Tail 8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+                continue
+            }
+            $seed = Join-Path $fuzzDir "${t}_seed"
+            New-Item -ItemType Directory -Force $seed | Out-Null
+            $corpus = Join-Path $RepoRoot "tests\fuzz\corpus_$($t.Substring(5))"
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exe
+            foreach ($a in @($seed, $corpus, "-max_total_time=$fuzzTime", '-print_final_stats=1',
+                             "-artifact_prefix=$fuzzDir\$t.")) { $psi.ArgumentList.Add($a) }
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError  = $true
+            $psi.UseShellExecute = $false
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            $proc.WaitForExit()
+            if ($proc.ExitCode -eq 0) {
+                Pass "49 mcp_fuzz: $t (${fuzzTime}s, corpus-seeded)"
+            }
+            else {
+                $logPath = Join-Path $fuzzDir "$t.run.log"
+                ($outTask.Result + "`n" + $errTask.Result) | Out-File -FilePath $logPath -Encoding utf8
+                Fail "49 mcp_fuzz: $t exited rc=$($proc.ExitCode); see $logPath"
+                Get-Content $logPath -Tail 12 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "         $_" }
+            }
+        }
+    }
+    finally {
+        $env:PATH = $savedPath
+        $env:ASAN_OPTIONS = $savedAsanOpts
+    }
+}
+
 # --- dispatch --------------------------------------------------------------
 function Gate24Enterprise {
     # QTL ledger + CISO audit -- runtime-gated behind the enterprise core
@@ -3437,6 +3626,12 @@ function Gate24Enterprise {
     $applyGuc = {
         param($val)
         $escaped = $val -replace "'", "''"
+        # The vendored enterprise core ships unsigned; the product default
+        # (refuse an unsigned library) is exercised by gate 26. Without this
+        # line the enterprise_lib below never loads on a checkout whose
+        # enterprise .dll has no .sig sidecar, and every assertion in this
+        # gate fails with "no signature found" instead of testing the ledger.
+        [void](Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;")
         [void](Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_lib = '$escaped';")
         [void](Psql -Sql "SELECT pg_reload_conf();")
         Start-Sleep -Milliseconds 1500
@@ -3501,7 +3696,12 @@ SELECT fractal_audit_unpack(blob)::text AS audit
 
     # Phase D: fractal_audit_log / fractal_ledger_verify(2) -- the general
     # decision-audit chain. Library still active from Phase C.
-    [void](Psql -Sql "DELETE FROM fractalsql_ledger WHERE kind = 2;")
+    # The head row goes with the chain rows: the wipe detector
+    # compares the chain length against the head's appended-row count, so
+    # deleting only the rows would leave the head claiming rows that are
+    # gone and verify() would (correctly) report a tampered chain. Same
+    # two-statement delete as build_test.sh's Phase D.
+    [void](Psql -Sql "DELETE FROM fractalsql_ledger WHERE kind = 2; DELETE FROM fractalsql_ledger_head WHERE kind = 2;")
     $rdWrite = Psql -Sql "SELECT fractal_audit_log('test_entry', '{""note"":""gate24""}'::jsonb);"
     if ($rdWrite -match 'ERROR:') {
         Fail "24 enterprise: fractal_audit_log errored with the library present: $rdWrite"
@@ -3577,7 +3777,7 @@ DROP TABLE IF EXISTS bt_gate24_data;
 CREATE TABLE bt_gate24_data (id int PRIMARY KEY, val float8);
 INSERT INTO bt_gate24_data VALUES (1,10.5),(2,20.5);
 "@)
-    [void](Psql -Sql "SELECT * FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_gate24_data'], 2);")
+    [void](Psql -Sql "SELECT * FROM fractal_agent_data_analyst('sum of val', ARRAY['bt_gate24_data'], 2, '{}', true);")
     if ((& $latestAuditType) -eq 'agent_data_analyst') {
         Pass "24 enterprise: fractal_agent_data_analyst logs a provenance record to the audit chain"
     } else {
@@ -3595,8 +3795,9 @@ INSERT INTO bt_gate24_data VALUES (1,10.5),(2,20.5);
         Fail "24 enterprise: expected both agent_diverse_portfolios and portfolio_optimize_multimodal in the last 2 kind=2 rows, got: $rdDiverseTypes"
     }
 
-    # Reset the GUC so it does not leak into later gates on a reused cluster.
+    # Reset the GUCs so they do not leak into later gates on a reused cluster.
     [void](Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_lib;")
+    [void](Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_require_signature;")
     [void](Psql -Sql "SELECT pg_reload_conf();")
 }
 
@@ -3619,6 +3820,12 @@ function Gate25EnterpriseStress {
     $applyGuc = {
         param($val)
         $escaped = $val -replace "'", "''"
+        # The vendored enterprise core ships unsigned; the product default
+        # (refuse an unsigned library) is exercised by gate 26. Without this
+        # line the enterprise_lib below never loads on a checkout whose
+        # enterprise .dll has no .sig sidecar, and every assertion in this
+        # gate fails with "no signature found" instead of testing the ledger.
+        [void](Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;")
         [void](Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_lib = '$escaped';")
         [void](Psql -Sql "SELECT pg_reload_conf();")
         Start-Sleep -Milliseconds 1500
@@ -3627,7 +3834,7 @@ function Gate25EnterpriseStress {
     & $applyGuc $abs
 
     # Clean slate for the gate.
-    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;")
+    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;")
 
     # ---- Phase A: stress -- fill-to-cap (64 truth + 64 shadow = 128) + churn.
     # Truth/Shadow each cap at 64 (FSQL_TRUTH/SHADOW_DEFAULT_CAP); beyond that
@@ -3678,7 +3885,7 @@ END $$;
     # format carries no CRC/MAC and ledger_seal_ledger is a no-op, so this is
     # STRUCTURAL tamper-evidence only -- a targeted payload byte-flip is NOT
     # caught. The gate asserts the structural case and documents the gap.
-    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;")
+    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;")
     $rb = Psql -Sql @'
 SELECT fractal_diversify_enable();
 SELECT fractal_ledger_reset_hard();
@@ -3708,7 +3915,7 @@ SELECT fractal_ledger_load();
     #     design). The invariant now is that the chain stays a single
     #     unforked line -- ledger_write_entry's advisory xact lock (keyed
     #     on kind) serializes the "read head, link, insert" sequence.
-    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;")
+    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;")
     # NOTE: seed+flush MUST run as ONE Psql call (one backend, one
     # g_ctx) -- each separate call previously below opened its own
     # psql.exe process/connection/backend, so the in-memory truth/
@@ -3737,7 +3944,7 @@ SELECT fractal_ledger_load();
     # launched inline via the Process API (same pattern as Gate12Soak)
     # with $Bin/$Port captured via $using:. Short -c SQL is well under the
     # 32K cmdline cap.
-    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;")
+    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;")
     [void](Psql -Sql "SELECT fractal_diversify_enable(); SELECT fractal_feedback_report(0, 'positive'); SELECT fractal_ledger_flush();")
     $workers = 8
     $results = 1..$workers | ForEach-Object -Parallel {
@@ -3795,7 +4002,7 @@ SELECT fractal_ledger_load();
     # B-lite: the MAC lives in the open extension at the storage seam; the
     # enterprise core is unchanged and is never handed tampered bytes.
     # @'...'@ single-quoted here-string so $$/PL-pgSQL vars are not expanded.
-    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;")
+    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;")
     $rd = Psql -Sql @'
 SET fractalsql.enterprise_ledger_key = 'gate25-mac-key';
 DO $$
@@ -3843,7 +4050,7 @@ RESET fractalsql.enterprise_ledger_key;
     # in the MIDDLE was altered/removed, but not that nothing was
     # truncated off the very END -- that needs an external anchor, out of
     # scope here.
-    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;")
+    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;")
     $re = Psql -Sql @'
 DO $$
 DECLARE v jsonb;
@@ -3880,7 +4087,7 @@ END $$;
         Fail "25 enterprise-stress Phase E: B-full chain checks did not behave as expected: $re"
     }
 
-    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;")
+    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;")
     $rg = Psql -Sql @'
 DO $$
 DECLARE v jsonb;
@@ -3910,8 +4117,9 @@ END $$;
 
     # Migrating an existing B-lite-shaped table (kind PK, no id/prev_hash/
     # entry_hash) -- expect a NOTICE and a clean fresh chain, not an error.
-    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;")
+    [void](Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;")
     [void](Psql -Sql @'
+CREATE TABLE IF NOT EXISTS fractalsql_ledger_head (kind integer PRIMARY KEY, max_rows bigint NOT NULL, updated timestamptz NOT NULL DEFAULT now());
 CREATE TABLE fractalsql_ledger (
   kind    integer PRIMARY KEY,
   blob    bytea   NOT NULL,
@@ -3929,8 +4137,9 @@ INSERT INTO fractalsql_ledger (kind, blob) VALUES (1, '\x00'::bytea);
         Fail "25 enterprise-stress Phase E: migration did not behave as expected: flush=$rm verify=$rmVerify"
     }
 
-    # Reset the GUC so it does not leak into later gates on a reused cluster.
+    # Reset the GUCs so they do not leak into later gates on a reused cluster.
     [void](Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_lib;")
+    [void](Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_require_signature;")
     [void](Psql -Sql "SELECT pg_reload_conf();")
 }
 
@@ -4538,7 +4747,7 @@ ORDER BY power DESC LIMIT 1;
     if ($fp1 -eq $fp2) { Pass "30 new_primitives: state_fingerprint is deterministic (same seed, same bytes)" }
     else { Fail "30 new_primitives: state_fingerprint differs across identical calls: '$fp1' vs '$fp2'" }
     $r = Psql -Sql "SELECT fractal_state_fingerprint(ARRAY[1,2,3]::float8[], 0, 42);"
-    if ($r -match 'n_bits must be > 0') { Pass "30 new_primitives: state_fingerprint rejects n_bits <= 0" }
+    if ($r -match 'n_bits must be between 1 and') { Pass "30 new_primitives: state_fingerprint rejects n_bits <= 0" }
     else { Fail "30 new_primitives: expected an n_bits<=0 rejection, got: $r" }
 
     # --- fractal_cycle_detect: fingerprints of A,B,A,B,A,B as a bytea[].
@@ -4913,7 +5122,7 @@ SELECT fractal_ledger_flush();
     # call back into the dlopen'd library at all ("pure storage-layer
     # check" per fractal_ledger_verify's own SQL comment), so this
     # exercises real ground regardless of what the mock above did.
-    Psql -Sql "DELETE FROM fractalsql_ledger WHERE kind = 2;" | Out-Null
+    Psql -Sql "DELETE FROM fractalsql_ledger WHERE kind = 2; DELETE FROM fractalsql_ledger_head WHERE kind = 2;" | Out-Null
     $rg = Psql -Sql @"
 SET fractalsql.enterprise_ledger_key = 'gate31-hmac-test-key';
 SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
@@ -4958,8 +5167,9 @@ RESET fractalsql.enterprise_ledger_key;
     # postgres rejects it ("used by active queries in this session") — the
     # docker gate caught the Linux twin of this. Mirrors build_test.sh's
     # _31_reset_lenient_ledger.
-    Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;" | Out-Null
+    Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;" | Out-Null
     Psql -Sql @"
+CREATE TABLE IF NOT EXISTS fractalsql_ledger_head (kind integer PRIMARY KEY, max_rows bigint NOT NULL, updated timestamptz NOT NULL DEFAULT now());
 CREATE TABLE fractalsql_ledger (
   id         bigserial   PRIMARY KEY,
   kind       integer     NOT NULL,
@@ -4980,6 +5190,7 @@ CREATE INDEX IF NOT EXISTS fractalsql_ledger_kind_id_idx
     # output (the "DELETE 0" tag) never matched.
     $rf = Psql -Sql @"
 DELETE FROM fractalsql_ledger WHERE kind = 2;
+DELETE FROM fractalsql_ledger_head WHERE kind = 2;
 SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
 SELECT fractal_audit_log('test.small', '{"n":2}'::jsonb);
 SELECT fractal_audit_log('test.small', '{"n":3}'::jsonb);
@@ -4998,6 +5209,7 @@ SELECT CASE WHEN v->>'ok' = 'false'
 
     $rf = Psql -Sql @"
 DELETE FROM fractalsql_ledger WHERE kind = 2;
+DELETE FROM fractalsql_ledger_head WHERE kind = 2;
 SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
 SELECT fractal_audit_log('test.small', '{"n":2}'::jsonb);
 SELECT fractal_audit_log('test.small', '{"n":3}'::jsonb);
@@ -5016,6 +5228,7 @@ SELECT CASE WHEN v->>'ok' = 'false'
 
     $rf = Psql -Sql @"
 DELETE FROM fractalsql_ledger WHERE kind = 2;
+DELETE FROM fractalsql_ledger_head WHERE kind = 2;
 SELECT fractal_audit_log('test.small', '{"n":1}'::jsonb);
 SELECT fractal_audit_log('test.small', '{"n":2}'::jsonb);
 SELECT fractal_audit_log('test.small', '{"n":3}'::jsonb);
@@ -5036,7 +5249,7 @@ SELECT CASE WHEN v->>'ok' = 'false'
     # for the rest of the run: drop the lenient fixture and let
     # ledger_ensure_table re-create its own DDL on the next write (the
     # audit_log call below does exactly that and seeds a fresh genesis row).
-    Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger;" | Out-Null
+    Psql -Sql "DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;" | Out-Null
     Psql -Sql 'SELECT fractal_audit_log(''test.reset'', ''{"n":0}''::jsonb);' | Out-Null
 
     # fractal_audit_unpack: a direct decode call -- distinct from the
@@ -5274,7 +5487,7 @@ CREATE TABLE bt_agent_empty (id int PRIMARY KEY, emb float8[]);
     else { Fail "32 sovereign_agents: expected a dim<=0 rejection, got: $dlDim0" }
 
     $dlBits0 = Psql -Sql "SELECT fractal_agent_detect_loop('a', ARRAY[1,1,2,2]::float8[], 2, 0);"
-    if ($dlBits0 -match 'n_bits must be > 0') { Pass "32 sovereign_agents: fractal_agent_detect_loop rejects n_bits <= 0" }
+    if ($dlBits0 -match 'n_bits must be between 1 and') { Pass "32 sovereign_agents: fractal_agent_detect_loop rejects n_bits <= 0" }
     else { Fail "32 sovereign_agents: expected an n_bits<=0 rejection, got: $dlBits0" }
 
     $dlHam = Psql -Sql "SELECT fractal_agent_detect_loop('a', ARRAY[1,1,2,2]::float8[], 2, 64, 42.0, -1);"
@@ -5341,12 +5554,61 @@ SELECT (answer LIKE 'reasoning_step_failed:%') AND (answer LIKE '%rc=%'), array_
     PgSwapPlugin $Mock | Out-Null
 }
 
+# clang-cl defaults to the dynamic CRT, so an -Asan build links against
+# clang_rt.asan_dynamic-x86_64.dll and the .exe cannot even START without that
+# DLL's directory on PATH (STATUS_DLL_NOT_FOUND, 0xC0000135: no stderr, stdout just
+# closes, which is exactly how gates 33 and 38 failed). $script:ClangCl is only
+# resolved up front for -Ubsan/-Fuzz, so resolve it here when -Asan is the only
+# sanitizer. This process only; a no-op without -Asan.
+function Add-AsanRuntimeToPath {
+    if (-not $Asan) { return }
+    $cl = $script:ClangCl
+    if (-not $cl) { try { $cl = Find-ClangCl } catch { return } }
+    $res = $null
+    try { $res = (& $cl -print-resource-dir 2>$null | Select-Object -First 1) } catch { return }
+    if ($res) {
+        $rt = Join-Path $res 'lib\windows'
+        if (Test-Path $rt) { $env:PATH = "$rt;$env:PATH" }
+    }
+}
+
 # Shared by gates 33 (smoke) and 38 (https): the cl.exe build of mcp/ once,
 # in ONE place. Never tests a stale exe or relinks stale objects (both
 # burned an E2E run: old obj + old exe passing existence checks) -- rebuilds
 # every call; make it cheap by keeping the two gates adjacent to each other.
 # Returns the exe path, or $null after the caller-visible Fail.
 function BuildMcpServerMsvc([string]$GateLabel) {
+    # Under -Asan/-Ubsan the server is built sanitized with clang-cl
+    # (mcp\scripts\windows\build-asan.bat / build-ubsan.bat, into
+    # mcp\dist\windows-mcp-asan / windows-mcp-ubsan) and built once per run.
+    if ($Asan -or $Ubsan) {
+        if ($script:McpSanExe -and (Test-Path -LiteralPath $script:McpSanExe)) { return $script:McpSanExe }
+        $sanScript = if ($Asan) { 'build-asan.bat' } else { 'build-ubsan.bat' }
+        $sanDist   = if ($Asan) { 'windows-mcp-asan' } else { 'windows-mcp-ubsan' }
+        $sanExe    = Join-Path $RepoRoot "mcp\dist\$sanDist\fractalsql-postgresql-mcp.exe"
+        Remove-Item -LiteralPath $sanExe -ErrorAction SilentlyContinue
+        Write-Host "         [$($GateLabel.Split(' ')[0])] building mcp server ($sanScript)..."
+        $boot = Join-Path $env:TEMP 'fractalsql_bt_mcp_san_build.bat'
+        $env:PGDIR = $PgDir
+        $env:VCPKG_ROOT = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot '..\vcpkg'))
+        [IO.File]::WriteAllLines($boot, @(
+            '@echo off',
+            "call `"$RepoRoot\mcp\scripts\windows\$sanScript`"",
+            'exit /b %ERRORLEVEL%'))
+        $sanOut = & cmd /c "call `"$boot`"" 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sanExe)) {
+            if (($sanOut -join "`n") -match 'no Visual Studio|OpenSSL for MSVC not found|PGDIR not set') {
+                Skip "$GateLabel (no toolchain for the sanitized MCP server build -- install VS C++ with clang-cl, vcpkg openssl:x64-windows-static)"
+            }
+            else {
+                ($sanOut | Select-Object -Last 15) | ForEach-Object { Write-Host "         [$sanScript] $_" }
+                Fail "$GateLabel (sanitized MCP server build failed)"
+            }
+            return $null
+        }
+        $script:McpSanExe = $sanExe
+        return $sanExe
+    }
     $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
     if (-not $cl) { Skip "$GateLabel (cl.exe not on PATH -- activate MSVC first)"; return $null }
     $vcpkgRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot '..\vcpkg'))
@@ -5450,6 +5712,7 @@ INSERT INTO mcpsw_logs SELECT 50.0 + (g % 8) * 1.3 + CASE WHEN g > 48 THEN 30.0 
     $env:FSQL_MCP_DEBUG_SQL = '1'
     $env:FSQL_MCP_EXE = $exePath
     Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+    Add-AsanRuntimeToPath
     $env:PATH = (Join-Path $PgDir 'bin') + ';' + $env:PATH
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -5478,8 +5741,17 @@ INSERT INTO mcpsw_logs SELECT 50.0 + (g % 8) * 1.3 + CASE WHEN g > 48 THEN 30.0 
         foreach ($line in $shown) { Write-Host "         $line" }
         Write-Host "         ($($allLines.Count) lines total, $($allLines.Count - $shown.Count) server-log lines hidden; full log: $gateLog)"
     } else {
-        foreach ($line in $allLines) { Write-Host "         $line" }
-        Write-Host "         (full log: $gateLog)"
+        # A red gate still needs the driver's own assert/traceback lines, but not the
+        # server's [srv] log (JSON tool_call lines, [sql-debug], NOTICE bodies and their
+        # wrapped continuation lines): those run to thousands of lines and push the
+        # earlier gates out of the console. They stay in the full log.
+        $driverLines = @($allLines | Where-Object {
+            $_ -notmatch '^\s*\[srv\]' -and $_ -notmatch '^\s*x{20,}' -and $_ -notmatch 'will be truncated to'
+        })
+        $cap = 120
+        foreach ($line in ($driverLines | Select-Object -First $cap)) { Write-Host "         $line" }
+        if ($driverLines.Count -gt $cap) { Write-Host "         ... $($driverLines.Count - $cap) more driver lines not shown" }
+        Write-Host "         ($($allLines.Count - $driverLines.Count) server-log lines hidden; full log: $gateLog)"
     }
     if ($proc.ExitCode -eq 0) {
         Pass "33 mcp_smoke: handshake + tools/list invariants + per-tier tools/call round trips (C++17 server)"
@@ -5537,20 +5809,172 @@ function Gate38McpHttps {
     # loader, whose search only sees the inherited PATH -- the same
     # prepend gate 33 does for smoke.py's server. The client passes
     # os.environ down, so setting it here covers the whole tree.
-    $env:PATH = (Join-Path $PgDir 'bin') + ';' + $env:PATH
-    $outLog = & {
-        $env:MCP_SERVER_EXE = $exePath
-        $env:MCP_SERVER_CWD = $RepoRoot
-        $env:MCP_HTTPS_PORT = '18953'
-        $env:MCP_HTTPS_CERT = $cert
-        $env:MCP_HTTPS_KEY  = $key
-        & $py.Source (Join-Path $RepoRoot 'mcp\tests\mcp_https_smoke_client.py')
-    } 2>&1
+    # Scoped: the sanitized MCP server (clang-cl) needs LLVM's ASan runtime on PATH, but the extension
+    # DLL the cluster loads later was built by MSVC and needs MSVC's DLL of the SAME NAME. Leaving LLVM's
+    # directory on PATH makes the postmaster load the wrong one ("The specified procedure could not be
+    # found"), so PATH goes back exactly as it was as soon as the client has finished.
+    $savedPath38 = $env:PATH
+    try {
+        Add-AsanRuntimeToPath
+        $env:PATH = (Join-Path $PgDir 'bin') + ';' + $env:PATH
+        $outLog = & {
+            $env:MCP_SERVER_EXE = $exePath
+            $env:MCP_SERVER_CWD = $RepoRoot
+            $env:MCP_HTTPS_PORT = '18953'
+            $env:MCP_HTTPS_CERT = $cert
+            $env:MCP_HTTPS_KEY  = $key
+            & $py.Source (Join-Path $RepoRoot 'mcp\tests\mcp_https_smoke_client.py')
+        } 2>&1
+        $httpsExit = $LASTEXITCODE
+    }
+    finally { $env:PATH = $savedPath38 }
     foreach ($line in ($outLog | Where-Object { $_ })) { Write-Host "         $line" }
-    if ($LASTEXITCODE -eq 0) {
+    if ($httpsExit -eq 0) {
         Pass "38 mcp_https: --https fail-fast modes + TLS-only port + bearer-under-TLS round trip"
     } else {
         Fail "38 mcp_https (see client output above)"
+    }
+}
+
+function Gate50McpCli {
+    # The MCP server started every way its command line, environment and
+    # database connection allow (mcp\tests\mcp_cli.py), including a connection
+    # killed under a running server. Each run must end in an orderly way.
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $py) { Skip "50 mcp_cli (python not on PATH)"; return }
+    $exePath = BuildMcpServerMsvc "50 mcp_cli"
+    if (-not $exePath) { return }
+    $psql = Join-Path $PgDir 'bin\psql.exe'
+
+    $saved = @{}
+    foreach ($k in @('PGHOST','PGPORT','PGUSER','PGDATABASE','PGPASSWORD','MCP_SERVER_EXE','MCP_SERVER_CWD','MCP_PSQL_BIN','PATH')) {
+        $saved[$k] = [System.Environment]::GetEnvironmentVariable($k, 'Process')
+    }
+    $work = Join-Path $env:TEMP 'fsql_mcp50_cli'
+    New-Item -ItemType Directory -Force $work | Out-Null
+    $env:PGHOST = '127.0.0.1'
+    $env:PGPORT = "$Port"
+    $env:PGUSER = 'postgres'
+    $env:PGDATABASE = 'postgres'
+    Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+    $env:MCP_SERVER_EXE = $exePath
+    $env:MCP_SERVER_CWD = $work
+    $env:MCP_PSQL_BIN = $psql
+    Add-AsanRuntimeToPath
+    $env:PATH = (Join-Path $PgDir 'bin') + ';' + $env:PATH
+    try {
+        $outLog = & $py.Source -u (Join-Path $RepoRoot 'mcp\tests\mcp_cli.py') 2>&1
+        $cliExit = $LASTEXITCODE
+    }
+    finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item ("Env:\" + $k) -ErrorAction SilentlyContinue }
+            else { [System.Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+        }
+    }
+    foreach ($line in ($outLog | Where-Object { $_ })) { Write-Host "         $line" }
+    if ($cliExit -eq 0) {
+        Pass "50 mcp_cli: the MCP server ended in order for every command line, setting, database and killed connection tried"
+    } else {
+        Fail "50 mcp_cli (a start-up case ended badly -- see the output above)"
+    }
+}
+
+function Gate51McpFaults {
+    # Needs LD_PRELOAD and signals (tests/oom_preload.c); the POSIX harness runs it.
+    Skip "51 mcp_faults (needs LD_PRELOAD and signals, Linux only)"
+}
+
+function Gate52McpConformance {
+    # The conformance driver (mcp\tests\mcp_conformance.py): one driver that
+    # starts the server the way each kind of client starts it and checks the
+    # protocol eras, the authentication, the framing, the operator switches and
+    # the catalog against the published rules. It needs no third-party SDK,
+    # only python, and it starts and stops the servers it needs by itself --
+    # the gate supplies the server binary, the cluster's PG* connection and
+    # the two lock files. Skips (not fails) when python is absent.
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'mcp\tests\mcp_conformance.py')) -or
+        -not (Test-Path -LiteralPath (Join-Path $RepoRoot 'mcp\src\main.cpp'))) {
+        Skip '52 mcp_conformance (mcp/ server code not present)'; return
+    }
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $py) { Skip '52 mcp_conformance (no python on PATH -- the conformance driver needs it)'; return }
+
+    $exePath = BuildMcpServerMsvc '52 mcp_conformance'
+    if (-not $exePath) { return }
+
+    # The server looks for its two lock files beside the executable when no
+    # path is configured, so putting them there is what makes the installed
+    # layout start from any working directory. The build's own exe already
+    # sits in mcp\, where the locks live: copying a file onto itself is an
+    # error, so that case is skipped.
+    $exeDir = Split-Path -Parent $exePath
+    foreach ($lockName in @('.mcp-schema-lock', '.mcp-safety-annotations-lock')) {
+        $src = Join-Path $RepoRoot "mcp\$lockName"
+        $dst = Join-Path $exeDir $lockName
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        if ([System.IO.Path]::GetFullPath($src) -eq [System.IO.Path]::GetFullPath($dst)) { continue }
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+    }
+
+    # The server's own connection to the database comes from the standard PG*
+    # variables libpq reads; the driver's desktop-client profile spawns the
+    # server with a scrubbed environment, so the same variables are named in
+    # the passthrough list the driver keeps. Save+restore so later gates are
+    # unaffected.
+    $saved = @{}
+    foreach ($k in @('PGHOST','PGPORT','PGUSER','PGDATABASE','PGPASSWORD','PGSSLMODE','MCP_SERVER_EXE','MCP_SERVER_CWD','MCPC_TOKEN','MCPC_GATE','MCPC_LOCK_DIR','MCPC_PASSTHROUGH_ENV','MCPC_READ_TOOL','MCPC_READ_ARGS','MCPC_STATE_TOOL','MCPC_STATE_ARGS','MCPC_STATE_READER','MCPC_DESTRUCTIVE_TOOL','MCPC_DESTRUCTIVE_ARGS','MCPC_SAFE_KEY','MCPC_UNSAFE_KEY','PATH')) {
+        $saved[$k] = [System.Environment]::GetEnvironmentVariable($k, 'Process')
+    }
+    $work = Join-Path $env:TEMP 'fsql_mcp52_conformance'
+    New-Item -ItemType Directory -Force $work | Out-Null
+    $env:PGHOST = '127.0.0.1'
+    $env:PGPORT = "$Port"
+    $env:PGUSER = 'postgres'
+    $env:PGDATABASE = 'postgres'
+    Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+    $env:MCP_SERVER_EXE            = $exePath
+    $env:MCP_SERVER_CWD            = $work
+    $env:MCPC_TOKEN                = 'conformance-token'
+    $env:MCPC_GATE                 = '52'
+    $env:MCPC_LOCK_DIR             = (Join-Path $RepoRoot 'mcp')
+    $env:MCPC_PASSTHROUGH_ENV      = 'PGHOST,PGPORT,PGUSER,PGPASSWORD,PGDATABASE,PGSSLMODE'
+    $env:MCPC_READ_TOOL            = 'fractalsql_get_version'
+    $env:MCPC_READ_ARGS            = '{}'
+    $env:MCPC_STATE_TOOL           = 'fractal_diversify_enable'
+    $env:MCPC_STATE_ARGS           = '{}'
+    $env:MCPC_STATE_READER         = 'fractal_explain_result'
+    $env:MCPC_DESTRUCTIVE_TOOL     = 'fractal_diversify_enable'
+    $env:MCPC_DESTRUCTIVE_ARGS     = '{}'
+    $env:MCPC_SAFE_KEY             = 'http_model'
+    $env:MCPC_UNSAFE_KEY           = 'http_url'
+    Add-AsanRuntimeToPath
+    $env:PATH = (Join-Path $PgDir 'bin') + ';' + $env:PATH
+
+    $log = Join-Path $env:TEMP 'fsql_mcp52_conformance.log'
+    try {
+        & $py.Source -u (Join-Path $RepoRoot 'mcp\tests\mcp_conformance.py') 1>$log 2>&1
+        $rc = $LASTEXITCODE
+    }
+    finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item ("Env:\" + $k) -ErrorAction SilentlyContinue }
+            else { [System.Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
+        }
+    }
+    $text = ''
+    if (Test-Path -LiteralPath $log) { $text = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) }
+    if ($rc -eq 0 -and $text -match 'ALL GREEN') {
+        Pass '52 mcp_conformance: protocol eras, authentication, framing, operator switches and catalog conformance'
+    }
+    else {
+        # The driver's own failure lines, not the server's log: they say which
+        # rule was broken and what was seen instead.
+        ($text -split "`n") | Where-Object { $_ -match '^(FAIL|SKIP) ' } |
+            ForEach-Object { Write-Host "         $_" }
+        Fail "52 mcp_conformance: the conformance driver reported failures (see $log)"
     }
 }
 
@@ -5998,8 +6422,8 @@ INSERT INTO bt_g44w (emb) VALUES ('[0.1,0.2]'), ('[0.1,0.2,0.3]');
 search_agent null query	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_search_agent(NULL,'bt_g44e','emb')
 search_agent null table	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_search_agent('q',NULL,'emb')
 search_agent null col	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_search_agent('q','bt_g44e',NULL)
-search_agent pop 0	E:fractalsql: search failed	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',0,15)
-search_agent iter 0	OK	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',50,0)
+search_agent pop 0	E:fractalsql: population_size 0 out of range	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',0,15)
+search_agent iter 0	E:fractalsql: iterations 0 out of range	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',50,0)
 search_agent null pop	OK	SELECT * FROM fractal_search_agent('q','bt_g44e','emb',NULL,NULL)
 rag null q	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_rag_agent(NULL,'bt_g44e','emb')
 rag null tbl	E:fractalsql: query, table_name, and vector_col are required	SELECT * FROM fractal_rag_agent('q',NULL,'emb')
@@ -6021,7 +6445,7 @@ loop null id	E:fractalsql: agent_id, state_log, and dim are required	SELECT * FR
 loop null log	E:fractalsql: agent_id, state_log, and dim are required	SELECT * FROM fractal_agent_detect_loop('a',NULL,1)
 loop null dim	E:fractalsql: agent_id, state_log, and dim are required	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],NULL)
 loop dim 0	E:fractalsql: dim must be > 0	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],0)
-loop bits 0	E:fractalsql: n_bits must be > 0	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,0)
+loop bits 0	E:fractalsql: n_bits must be between 1 and	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,0)
 loop bits huge	OK	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,100000)
 loop ragged	E:fractalsql: state_log length (3) is not a multiple of dim (2)	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2,3]::float8[],2)
 loop neg thresh	E:fractalsql: hamming_threshold must be >= 0	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2]::float8[],1,64,0.0,-1)
@@ -6029,7 +6453,7 @@ loop null opts	OK	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,2,1,2,1,2]
 loop empty log	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_agent_detect_loop('a','{}'::float8[],1)
 loop null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[1,NULL]::float8[],1)
 loop 2d array	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_agent_detect_loop('a',ARRAY[[1,2],[3,4]]::float8[],1)
-fingerprint bits 0	E:fractalsql: n_bits must be > 0	SELECT fractal_state_fingerprint(ARRAY[1,2]::float8[],0)
+fingerprint bits 0	E:fractalsql: n_bits must be between 1 and	SELECT fractal_state_fingerprint(ARRAY[1,2]::float8[],0)
 fingerprint empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_state_fingerprint('{}'::float8[],8)
 cycle null elem	E:fractalsql: fingerprints array must not contain NULLs	SELECT * FROM fractal_cycle_detect(ARRAY['\x01',NULL]::bytea[])
 cycle ragged	E:fractalsql: every fingerprint must be the same length (index 0 was 1 b	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x0102']::bytea[])
@@ -6042,7 +6466,7 @@ dfa null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_d
 dfa empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_dimension_dfa('{}'::float8[])
 boxcount dim 0	E:fractalsql: points length (4) must be a positive multiple of dim (0)	SELECT fractal_dimension_boxcount(ARRAY[1,2,3,4]::float8[],0)
 boxcount ragged	E:fractalsql: points length (3) must be a positive multiple of dim (2)	SELECT fractal_dimension_boxcount(ARRAY[1,2,3]::float8[],2)
-boxcount few	E:fractalsql: fractal_dimension_boxcount rc=-1 (need >= 8 points, non-de	SELECT fractal_dimension_boxcount(ARRAY[1,2]::float8[],2)
+boxcount few	E:fractalsql: fractal_dimension_boxcount rc=-1 (need >= 8 finite points, a non-de	SELECT fractal_dimension_boxcount(ARRAY[1,2]::float8[],2)
 cp thresh	E:fractalsql: fractal_change_point_detect rc=-1 (need n >= 2*win, thresh	SELECT fractal_change_point_detect(ARRAY[1,2,3,4,5,6,7,8]::float8[],2,-1.0,16)
 cp max_points 0	E:fractalsql: max_points must be > 0	SELECT fractal_change_point_detect(ARRAY[1,2,3,4,5,6,7,8]::float8[],2,2.0,0)
 cp short	E:fractalsql: fractal_change_point_detect rc=-1 (need n >= 2*win, thresh	SELECT fractal_change_point_detect(ARRAY[1,2,3]::float8[],16,2.0,16)
@@ -6093,7 +6517,7 @@ folding null	OK	SELECT fractal_cortical_folding(NULL,ARRAY[0,1,2]::int4[])
 folding null faces	OK	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],NULL)
 folding verts len	E:fractalsql: vertices length must be a multiple of 3	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0]::float8[],ARRAY[0,1,2]::int4[])
 folding faces len	E:fractalsql: faces length must be a multiple of 3	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],ARRAY[0,1]::int4[])
-folding idx range	E:fractalsql: fractal_cortical_folding rc=-1 (need >= 4 non-coplanar ver	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],ARRAY[0,1,9]::int4[])
+folding idx range	E:fractalsql: fractal_cortical_folding rc=-1 (need >= 4 finite, non-coplanar ver	SELECT fractal_cortical_folding(ARRAY[0,0,0,1,0,0,0,1,0]::float8[],ARRAY[0,1,9]::int4[])
 nerve null	OK	SELECT fractal_nerve_plexus_metric(NULL,2,ARRAY[0,1]::int4[])
 nerve null dim	OK	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],NULL,ARRAY[0,1]::int4[])
 nerve null edges	OK	SELECT fractal_nerve_plexus_metric(ARRAY[0,0,1,0]::float8[],2,NULL)
@@ -6161,13 +6585,27 @@ cross_fv ok	OK	SELECT * FROM fractal_cross_modal_search('bt_g44x','emb','[0.1,0.
 explore bad col	E:column "nope" does not exist	SELECT * FROM fractal_search_explore('bt_g44','nope',ARRAY[1,2]::float8[])
 explore no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_search_explore('bt_nope','emb',ARRAY[1,2]::float8[])
 explore bad opts	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[1,2]::float8[],'[1]'::jsonb)
-explore pop	E:fractalsql: population_size 0 out of range [1, 100000]	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[1,2]::float8[],'{"population_size":0}')
+explore pop	E:fractalsql: population_size 0 out of range [2, 10000]	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[1,2]::float8[],'{"population_size":0}')
 explore ok	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"iterations":3,"population_size":5}')
 explore str opt	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"iterations":"x"}')
 search iter 0	E:fractalsql: iterations 0 out of range [1, 10000]	SELECT fractal_search(ARRAY[1,2]::float8[],0)
-search pop 0	E:fractalsql: population_size 0 out of range [1, 100000]	SELECT fractal_search(ARRAY[1,2]::float8[],5,0)
+search pop 0	E:fractalsql: population_size 0 out of range [2, 10000]	SELECT fractal_search(ARRAY[1,2]::float8[],5,0)
 search empty	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_search('{}'::float8[])
 search_dbg diff	E:fractalsql: diffusion_factor 99 out of range [1, 32]	SELECT fractal_search_debug(ARRAY[1,2]::float8[],5,5,99)
+search iter wraps	E:does not exist	SELECT fractal_search(ARRAY[1,2]::float8[],4294967301)
+search pop wraps	E:does not exist	SELECT fractal_search(ARRAY[1,2]::float8[],5,4294967301)
+search_dbg diff wraps	E:does not exist	SELECT fractal_search_debug(ARRAY[1,2]::float8[],5,5,4294967298)
+search iter cast	E:out of range	SELECT fractal_search(ARRAY[1,2]::float8[],4294967301::int)
+state_fp n_bits ceiling	E:fractalsql: n_bits must be between 1 and 33554424	SELECT fractal_state_fingerprint(ARRAY[1.0,2.0]::float8[], 33554425, 42)
+state_fp n_bits wraps	E:does not exist	SELECT fractal_state_fingerprint(ARRAY[1.0,2.0]::float8[], 4294967360, 42)
+state_fp work bound	E:fractalsql: n_bits x vector length must not exceed	SELECT fractal_state_fingerprint(ARRAY[1,2,3,4,5,6,7,8,9]::float8[], 33554424, 42)
+search work bound	E:fractalsql: search too large	SELECT fractal_search_debug(ARRAY(SELECT 0.5::float8 FROM generate_series(1,1000)),1000,1000,8)
+search pop 1	E:fractalsql: population_size 1 out of range [2, 10000]	SELECT fractal_search(ARRAY[1,2]::float8[],5,1)
+search pop 10001	E:fractalsql: population_size 10001 out of range [2, 10000]	SELECT fractal_search(ARRAY[1,2]::float8[],5,10001)
+periodogram samples	E:fractalsql: series longer than 1048576 samples	SELECT * FROM fractal_periodogram(ARRAY(SELECT 0.1::float8 FROM generate_series(1,1048577)),3)
+boxcount work bound	E:points x dim <= 4194304	SELECT fractal_dimension_boxcount(ARRAY(SELECT i::float8 FROM generate_series(1,4194306) i),2)
+boxcount non-finite	E:fractalsql: fractal_dimension_boxcount rc=	SELECT fractal_dimension_boxcount(ARRAY[0,0,1,0,0,1,1,1,2,2,3,1,1,3,4,4,'NaN',5]::float8[],2)
+subset work bound	E:fractalsql: item count x k must not exceed	SELECT fractal_optimize_subset(ARRAY(SELECT 5::float8 FROM generate_series(1,6000)),ARRAY(SELECT 1::float8 FROM generate_series(1,6000)),3000)
 embed null	E:fractal_embed: input must not be NULL	SELECT fractal_embed(NULL)
 embed empty	E:fractal_embed: dispatch failed (rc=-1): fractalsql: invalid arguments 	SELECT fractal_embed('')
 schema bad tbl	E:fractal_schema_context: table "bt_nope" not found or not visible	SELECT fractal_schema_context(ARRAY['bt_nope'])
@@ -6277,7 +6715,7 @@ vectorizer queue neg	E:LIMIT must not be negative	SELECT fractal_vectorizer_proc
 rag ok	OK	SELECT count(*)>=0 FROM fractal_rag_agent('q','bt_g44e','emb')
 rag meta filter	OK	SELECT count(*)>=0 FROM fractal_rag_agent('q','bt_g44e','emb','{"id":1}')
 search_agent ok	OK	SELECT count(*)>=0 FROM fractal_search_agent('q','bt_g44e','emb')
-search_agent small	E:fractalsql: search failed	SELECT count(*)>=0 FROM fractal_search_agent('q','bt_g44e','emb',1,1)
+search_agent small	E:fractalsql: population_size 1 out of range	SELECT count(*)>=0 FROM fractal_search_agent('q','bt_g44e','emb',1,1)
 plan ok	OK	SELECT count(*) FROM fractal_agent_plan_explore('q','bt_g44e','emb',2)
 plan no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_agent_plan_explore('q','bt_nope','emb',2)
 plan no col	E:column "nope" does not exist	SELECT * FROM fractal_agent_plan_explore('q','bt_g44e','nope',2)
@@ -6492,7 +6930,8 @@ pareto null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fracta
     # rows the extension's own DDL would refuse can be staged; bt_hmac() is
     # a plain HMAC-SHA256 over the built-in sha256().
     Psql -Sql @'
-DROP TABLE IF EXISTS fractalsql_ledger;
+DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;
+CREATE TABLE IF NOT EXISTS fractalsql_ledger_head (kind integer PRIMARY KEY, max_rows bigint NOT NULL, updated timestamptz NOT NULL DEFAULT now());
 CREATE TABLE fractalsql_ledger (
   id bigserial PRIMARY KEY, kind integer NOT NULL, blob bytea NOT NULL,
   mac bytea, prev_hash bytea, entry_hash bytea,
@@ -6517,30 +6956,30 @@ BEGIN
 END $f$;
 '@ | Out-Null
     $rowsB = @'
-tip empty	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT fractal_ledger_load()
-tip genesis ok	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01020304',NULL); SELECT fractal_ledger_load()
-tip genesis nonzero prev	E:fractalsql: ledger chain verification failed -- the sole entry's prev_	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(decode(repeat('11',32),'hex'),'\x01',NULL); SELECT fractal_ledger_load()
-tip chain ok	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); SELECT fractal_ledger_load()
-tip chain link broken	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',NULL); SELECT bt_put(decode(repeat('22',32),'hex'),'\x02',NULL); SELECT fractal_ledger_load()
-tip prior hash null	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,NULL); SELECT bt_put($zero,'\x02',NULL); SELECT fractal_ledger_load()
-tip prior hash short	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,'\x0011'); SELECT bt_put($zero,'\x02',NULL); SELECT fractal_ledger_load()
-tip blob tampered	E:fractalsql: ledger chain verification failed -- the latest entry's has	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x0102',NULL); UPDATE fractalsql_ledger SET blob='\x0103' WHERE kind=1; SELECT fractal_ledger_load()
-tip prev short	E:fractalsql: ledger chain verification failed -- stored prev_hash/entry	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01','\x0011',$zero); SELECT fractal_ledger_load()
-tip hash short	E:fractalsql: ledger chain verification failed -- stored prev_hash/entry	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,'\x0011'); SELECT fractal_ledger_load()
-tip entry_hash null	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,NULL); SELECT fractal_ledger_load()
-tip prev null	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',NULL,$zero); SELECT fractal_ledger_load()
-tip key, no mac	E:fractalsql: ledger MAC verification failed -- the persisted blob has n	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',NULL); SELECT fractal_ledger_load()
-tip key, mac short	E:fractalsql: ledger MAC verification failed -- stored MAC is 16 bytes, 	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',decode(repeat('cd',16),'hex')); SELECT fractal_ledger_load()
-tip key, mac wrong	E:fractalsql: ledger MAC verification failed -- the persisted QTL blob i	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',decode(repeat('cd',32),'hex')); SELECT fractal_ledger_load()
-tip key, mac valid	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); SELECT fractal_ledger_load()
-tip key, mac valid, blob tampered	E:fractalsql: ledger MAC verification failed -- the persisted QTL blob i	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); UPDATE fractalsql_ledger SET blob='\x02' WHERE kind=1; SELECT fractal_ledger_load()
-tip key, mac valid, hash tampered	E:fractalsql: ledger chain verification failed -- the latest entry's has	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); UPDATE fractalsql_ledger SET entry_hash=decode(repeat('ee',32),'hex') WHERE kind=1; SELECT fractal_ledger_load()
-tip nokey, mac present	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',decode(repeat('ab',32),'hex')); SELECT fractal_ledger_load()
-tip nokey, mac short	E:fractalsql: ledger MAC verification failed -- stored MAC is 16 bytes, 	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',decode(repeat('ab',16),'hex')); SELECT fractal_ledger_load()
-tip verify kind1 ok	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); SELECT fractal_ledger_verify(1)::text
-tip verify kind1 tampered	OK	DELETE FROM fractalsql_ledger; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); UPDATE fractalsql_ledger SET blob='\x09' WHERE kind=1 AND id=(SELECT min(id) FROM fractalsql_ledger WHERE kind=1); SELECT fractal_ledger_verify(1)::text
-migrate old schema	OK	DROP TABLE IF EXISTS fractalsql_ledger; CREATE TABLE fractalsql_ledger (kind int PRIMARY KEY, blob bytea); SELECT fractal_ledger_verify(1)
-migrate missing index	OK	DROP TABLE IF EXISTS fractalsql_ledger; CREATE TABLE fractalsql_ledger (id bigserial PRIMARY KEY, kind integer NOT NULL, blob bytea NOT NULL, mac bytea, prev_hash bytea NOT NULL, entry_hash bytea NOT NULL, sealed boolean NOT NULL DEFAULT false, updated timestamptz NOT NULL DEFAULT now()); SELECT fractal_ledger_verify(1)
+tip empty	OK	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT fractal_ledger_load()
+tip genesis ok	OK	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01020304',NULL); SELECT fractal_ledger_load()
+tip genesis nonzero prev	E:fractalsql: ledger chain verification failed -- the sole entry's prev_	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(decode(repeat('11',32),'hex'),'\x01',NULL); SELECT fractal_ledger_load()
+tip chain ok	OK	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); SELECT fractal_ledger_load()
+tip chain link broken	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',NULL); SELECT bt_put(decode(repeat('22',32),'hex'),'\x02',NULL); SELECT fractal_ledger_load()
+tip prior hash null	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,NULL); SELECT bt_put($zero,'\x02',NULL); SELECT fractal_ledger_load()
+tip prior hash short	E:fractalsql: ledger chain verification failed -- the latest entry's pre	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,'\x0011'); SELECT bt_put($zero,'\x02',NULL); SELECT fractal_ledger_load()
+tip blob tampered	E:fractalsql: ledger chain verification failed -- the latest entry's has	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x0102',NULL); UPDATE fractalsql_ledger SET blob='\x0103' WHERE kind=1; SELECT fractal_ledger_load()
+tip prev short	E:fractalsql: ledger chain verification failed -- stored prev_hash/entry	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01','\x0011',$zero); SELECT fractal_ledger_load()
+tip hash short	E:fractalsql: ledger chain verification failed -- stored prev_hash/entry	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,'\x0011'); SELECT fractal_ledger_load()
+tip entry_hash null	OK	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',$zero,NULL); SELECT fractal_ledger_load()
+tip prev null	OK	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; INSERT INTO fractalsql_ledger(kind,blob,prev_hash,entry_hash) VALUES (1,'\x01',NULL,$zero); SELECT fractal_ledger_load()
+tip key, no mac	E:fractalsql: ledger MAC verification failed -- the persisted blob has n	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',NULL); SELECT fractal_ledger_load()
+tip key, mac short	E:fractalsql: ledger MAC verification failed -- stored MAC is 16 bytes, 	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',decode(repeat('cd',16),'hex')); SELECT fractal_ledger_load()
+tip key, mac wrong	E:fractalsql: ledger MAC verification failed -- the persisted QTL blob i	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',decode(repeat('cd',32),'hex')); SELECT fractal_ledger_load()
+tip key, mac valid	OK	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); SELECT fractal_ledger_load()
+tip key, mac valid, blob tampered	E:fractalsql: ledger MAC verification failed -- the persisted QTL blob i	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); UPDATE fractalsql_ledger SET blob='\x02' WHERE kind=1; SELECT fractal_ledger_load()
+tip key, mac valid, hash tampered	E:fractalsql: ledger chain verification failed -- the latest entry's has	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SET fractalsql.enterprise_ledger_key = '$key'; SELECT bt_put($zero,'\x01',bt_hmac(convert_to('$key','UTF8'),'\x01')); UPDATE fractalsql_ledger SET entry_hash=decode(repeat('ee',32),'hex') WHERE kind=1; SELECT fractal_ledger_load()
+tip nokey, mac present	OK	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',decode(repeat('ab',32),'hex')); SELECT fractal_ledger_load()
+tip nokey, mac short	E:fractalsql: ledger MAC verification failed -- stored MAC is 16 bytes, 	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT bt_put($zero,'\x01',decode(repeat('ab',16),'hex')); SELECT fractal_ledger_load()
+tip verify kind1 ok	OK	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); SELECT fractal_ledger_verify(1)::text
+tip verify kind1 tampered	OK	DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head; RESET fractalsql.enterprise_ledger_key; SELECT bt_put(bt_put($zero,'\x01',NULL),'\x02',NULL); UPDATE fractalsql_ledger SET blob='\x09' WHERE kind=1 AND id=(SELECT min(id) FROM fractalsql_ledger WHERE kind=1); SELECT fractal_ledger_verify(1)::text
+migrate old schema	OK	DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head; CREATE TABLE fractalsql_ledger (kind int PRIMARY KEY, blob bytea); SELECT fractal_ledger_verify(1)
+migrate missing index	OK	DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head; CREATE TABLE fractalsql_ledger (id bigserial PRIMARY KEY, kind integer NOT NULL, blob bytea NOT NULL, mac bytea, prev_hash bytea NOT NULL, entry_hash bytea NOT NULL, sealed boolean NOT NULL DEFAULT false, updated timestamptz NOT NULL DEFAULT now()); SELECT fractal_ledger_verify(1)
 '@
     $rowsB = $rowsB.Replace('$zero', "decode(repeat('00',32),'hex')").Replace('$key', 'gate45-ledger-key')
     SqlTableRun '45' $rowsB
@@ -6579,7 +7018,7 @@ bad core multimodal	E:enterprise tier not loaded	SELECT fractal_optimize_portfol
     }
     Remove-Item -Force $mockOld, $mockBad -ErrorAction SilentlyContinue
 
-    Psql -Sql "DROP FUNCTION IF EXISTS bt_hmac(bytea,bytea), bt_put(bytea,bytea,bytea); DELETE FROM fractalsql_ledger;" | Out-Null
+    Psql -Sql "DROP FUNCTION IF EXISTS bt_hmac(bytea,bytea), bt_put(bytea,bytea,bytea); DELETE FROM fractalsql_ledger; DELETE FROM fractalsql_ledger_head;" | Out-Null
     Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_require_signature;" | Out-Null
     Psql -Sql "ALTER SYSTEM RESET fractalsql.enterprise_lib;" | Out-Null
     Psql -Sql "SELECT pg_reload_conf();" | Out-Null
@@ -6804,7 +7243,7 @@ pareto	SELECT fractal_optimize_portfolio_multimodal_pareto(ARRAY[0.1,0.2,0.15]::
     # ---- ledger storage callbacks, driven directly (test-only SQL wrapper) ----
     # The enterprise core is what normally calls them, and none is vendored in a
     # community checkout, so the build's fractal_fi_ledger_vfs() stands in.
-    Psql -Sql "CREATE OR REPLACE FUNCTION bt_fi_ledger_vfs(op text, kind int4, payload bytea DEFAULT NULL) RETURNS text AS '$DllPath','fractal_fi_ledger_vfs' LANGUAGE C VOLATILE; DROP TABLE IF EXISTS fractalsql_ledger;" | Out-Null
+    Psql -Sql "CREATE OR REPLACE FUNCTION bt_fi_ledger_vfs(op text, kind int4, payload bytea DEFAULT NULL) RETURNS text AS '$DllPath','fractal_fi_ledger_vfs' LANGUAGE C VOLATILE; DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;" | Out-Null
     $lr = Psql -Sql "SELECT bt_fi_ledger_vfs('read', 1)"
     if ($lr -eq 'rc=-46 len=0 hex=') { Pass "47 fault_injection: reading an empty ledger reports 'unavailable' (-46), not an error" }
     else { Fail "47 fault_injection: empty-ledger read returned: $lr" }
@@ -6818,7 +7257,7 @@ ledger vfs write keyed	SET fractalsql.enterprise_ledger_key = 'bt-key'; SELECT b
 ledger vfs read	SELECT bt_fi_ledger_vfs('read', 1)
 ledger vfs seal	SELECT bt_fi_ledger_vfs('seal', 1)
 '@
-    Psql -Sql "DROP FUNCTION IF EXISTS bt_fi_ledger_vfs(text,int4,bytea); DROP TABLE IF EXISTS fractalsql_ledger;" | Out-Null
+    Psql -Sql "DROP FUNCTION IF EXISTS bt_fi_ledger_vfs(text,int4,bytea); DROP TABLE IF EXISTS fractalsql_ledger; DROP TABLE IF EXISTS fractalsql_ledger_head;" | Out-Null
 
     if ($script:FiBad -eq 0 -and $script:FiFired -gt 100) {
         Pass "47 fault_injection: $($script:FiFired) injected SPI/core failures across $($script:FiRuns) runs; none crashed or leaked"
@@ -6864,6 +7303,12 @@ function Gate43EnterpriseSurface {
     $applyGuc = {
         param($val)
         $escaped = $val -replace "'", "''"
+        # The vendored enterprise core ships unsigned; the product default
+        # (refuse an unsigned library) is exercised by gate 26. Without this
+        # line the enterprise_lib below never loads on a checkout whose
+        # enterprise .dll has no .sig sidecar, and every assertion in this
+        # gate fails with "no signature found" instead of testing the ledger.
+        [void](Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;")
         [void](Psql -Sql "ALTER SYSTEM SET fractalsql.enterprise_lib = '$escaped';")
         [void](Psql -Sql "SELECT pg_reload_conf();")
         Start-Sleep -Milliseconds 1500
@@ -6968,6 +7413,7 @@ function RunGates($gates) {
     if ($gates -contains '21') {
         Gate21FuzzSmoke
     }
+    if ($gates -contains '49') { Gate49McpFuzz }
     if ($gates -contains '39') { Gate39ExtractParse }
     if ($gates -contains '40') { Gate40VectorsProbe }
     if ($gates -contains '42') { Gate42ConcurrencyProbe }
@@ -6975,7 +7421,7 @@ function RunGates($gates) {
     # @(...): same $null-vs-empty-array StrictMode trap as Gate12Soak's
     # $failedWorkers below -- not yet hit here (would need e.g. -Gate 01
     # alone), but the identical shape of bug, fixed proactively.
-    $needDb = @($gates | Where-Object { $_ -notin @('01','21','38','39','40','42') })
+    $needDb = @($gates | Where-Object { $_ -notin @('01','21','38','39','40','42','49') })
     if ($needDb.Count -gt 0) {
         try { PgSetup } catch { Fail "PG$PgMajor cluster setup: $_"; return }
         # gate 03 creates bt_customers/bt_orders; several later gates
@@ -7023,6 +7469,9 @@ function RunGates($gates) {
                 '45' { Gate45EnterprisePaths }
                 '46' { Gate46PluginConfig }
                 '47' { Gate47FaultInjection }
+                '50' { Gate50McpCli }
+                '51' { Gate51McpFaults }
+                '52' { Gate52McpConformance }
                 '48' { Gate48Kits }
                 '41' { Gate41DbProbe }
             }

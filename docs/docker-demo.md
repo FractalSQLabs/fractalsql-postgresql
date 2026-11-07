@@ -30,7 +30,12 @@ One command, no flags, gives you the bare minimum:
   `/bench/`). Demos are **demoable on demand**: they are not run at init, because
   reasoning is inert until a model is pulled and the demos are re-runnable.
 
+Copy `.env.example` to `.env` and set `FSQL_DEMO_PASSWORD` and `FSQL_DEMO_TOKEN` first: the compose file
+refuses to start without them, and every published port is bound to `127.0.0.1`. The demo is for a trusted
+workstation, not an untrusted network.
+
 ```bash
+cp .env.example .env   # then edit the two values
 docker compose up -d
 ```
 
@@ -76,7 +81,7 @@ dormant-path NOTICE. `run_demo.sh --help` lists the flags
 `response-modes.sql`, which is skipped by default — see
 [Response modes](../demo/README.md#response-modes) for why it needs
 separate treatment. On this image you should see extension version
-**2.0.20**.
+**2.0.21**.
 
 **Alternative: Docker Model Runner (Docker Desktop only).** Skip the
 `ollama` container and use Docker Desktop's built-in Model Runner instead:
@@ -173,8 +178,8 @@ npx @modelcontextprotocol/inspector docker compose exec mcp /demo/mcp/call-tool.
 ```
 
 The `mcp` service also runs the authenticated HTTP transport on
-`http://localhost:18765/mcp` (Bearer token `fractalsql-demo-token`, set via
-`FSQL_MCP_AUTH_TOKEN` in compose) for pointing an actual MCP client at the
+`http://localhost:18765/mcp` (Bearer token from `FSQL_DEMO_TOKEN` in your `.env`, passed as
+`FSQL_MCP_AUTH_TOKEN`) for pointing an actual MCP client at the
 demo database — see the plugin doc's client config. NOTE on credentials: the
 demo connects with the compose project's own superuser — fine for a throwaway
 demo, never the posture for the real plugin (see the plugin doc's

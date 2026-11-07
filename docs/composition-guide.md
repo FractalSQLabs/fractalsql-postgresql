@@ -228,3 +228,12 @@ Two issues surfaced while building the shipped agents, and apply equally to any 
   [reasoning-setup.md](reasoning-setup.md).
 - **Validate your composition** against the same demo path the shipped agents
   use → `psql -f /demo/demo-agents.sql`.
+
+  That command does not stop at the first error, so the shell carries on
+  past an expected one and the rest of the file still runs. The file
+  prints one: `demo-agents.sql` calls an enterprise-tier function, which
+  reports that the tier is not loaded on a Community build. Under
+  `psql -v ON_ERROR_STOP=1` that error would stop the file there and the
+  sections after it would never print - which is why the command above
+  does not pass it, and why the enterprise-tier calls in the shipped demos
+  report the refusal instead of raising it.
