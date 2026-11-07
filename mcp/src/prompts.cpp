@@ -162,9 +162,12 @@ namespace fsqlmcp
                 const std::string placeholder = "{" + std::string( a.name ) + "}";
                 // table_names is the one slot with a shape of its own; every
                 // other slot renders its value verbatim.
-                const std::string value = ( std::string( a.name ) == "table_names" )
+                std::string value = ( std::string( a.name ) == "table_names" )
                     ? formatTableNamesValue( args, a )
                     : slotValue( args, a );
+                // Caller-supplied text is DATA, not instructions: render it as a JSON string literal.
+                if( std::string( a.name ) != "table_names" && args.is_object() && args.contains( a.name ) && !args.at( a.name ).is_null() )
+                    value = Json( value ).dump( -1, ' ', false, Json::error_handler_t::replace );
                 std::size_t pos = 0;
                 while( ( pos = filled.find( placeholder, pos ) ) != std::string::npos )
                 {

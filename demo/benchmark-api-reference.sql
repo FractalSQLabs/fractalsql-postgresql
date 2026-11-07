@@ -295,8 +295,9 @@ SELECT fractal_spectrogram_entropy(
 
 SELECT fractal_state_fingerprint(ARRAY[0.1, 0.0]::float8[], 64) AS fingerprint_a;
 
--- Alternating A/B/A/B/A/B stream: the detector closes a cycle at index 2
--- (length 2), re-arms, and closes again at index 4.
+-- Alternating A/B/A/B/A/B stream: the detector closes the period-2 cycle
+-- at index 3 with cycle_len 2, then re-arms and closes another one every
+-- three steps (index 6, index 9, ... on a longer stream).
 WITH s AS (
     SELECT fractal_state_fingerprint(ARRAY[0.1, 0.0]::float8[]) AS fa,
            fractal_state_fingerprint(ARRAY[0.0, 0.1]::float8[]) AS fb
@@ -308,12 +309,15 @@ SELECT at_index, cycle_len FROM fractal_cycle_detect(
     0
 ) AS cycles;
 
--- Two tight 6-point clusters in dim 2: h0_bars should carry two
--- dominant bars (one per cluster). betti1 is the graph cycle rank:
--- each cluster forms a complete 6-point graph (15 edges) at this
--- scale, so betti1 = 15+15-12+2 = 20 -- the informational
--- over-count vs. true H1 the TDA section in docs/api-analytics.md
--- documents (the triangles are not subtracted out).
+-- Two tight 6-point clusters in dim 2. h0_bars is the single-linkage
+-- barcode: here it comes back with 10 bars, all born at 0 -- six dying
+-- at 0.05 and four at 0.0707 -- and no bar outlives its own cluster,
+-- because the two clusters sit ~7 units apart, far beyond the default
+-- max_thresh of 1.0.
+-- betti1 is the graph cycle rank: each cluster forms a complete
+-- 6-point graph (15 edges) at this scale, so betti1 = 15+15-12+2 = 20
+-- -- the informational over-count vs. true H1 the TDA section in
+-- docs/api-analytics.md documents (the triangles are not subtracted out).
 SELECT * FROM fractal_tda_persistence_diagram(
     ARRAY[0,0, 0.1,0, 0,0.1, 0.1,0.1, 0.05,0.05, 0.1,0.05,
           5,5, 5.1,5, 5,5.1, 5.1,5.1, 5.05,5.05, 5.1,5.05]::float8[], 2

@@ -114,9 +114,12 @@
            C:\Program Files\PostgreSQL\<PG_MAJOR>\
              lib\                 fractalsql.dll
                                   fractalsql-reasoning-http.dll (x64)
-             mcp\                 fractalsql-postgresql-mcp.exe
-                                  README.md / .mcp-*-lock / manifest.json
-                                  (x64 + SHIP_MCP; see the components)
+             bin\                 fractalsql-postgresql-mcp.exe and its two
+                                  .mcp-*-lock files (x64 + SHIP_MCP). Beside
+                                  EDB's libpq.dll and the libraries it loads,
+                                  which the server needs; the lock lookup also
+                                  starts beside the executable.
+             mcp\                 README.md / manifest.json
              share\extension\     fractalsql.control
                                   fractalsql-1.0.sql (install script)
              share\doc\fractalsql\ LICENSE
@@ -128,6 +131,7 @@
         <Directory Id="PostgreSQLFolder" Name="PostgreSQL">
           <Directory Id="PGROOT" Name="$(var.PG_MAJOR)">
             <Directory Id="LibDir" Name="lib" />
+            <Directory Id="BinDir" Name="bin" />
             <Directory Id="McpFolder" Name="mcp" />
             <Directory Id="ShareDir" Name="share">
               <Directory Id="ExtensionDir" Name="extension" />
@@ -168,6 +172,14 @@
                  Guid="C1A1$(var.PG_MAJOR)07-0000-4000-B000-00000000BE71">
         <File Id="fractalsql_reasoning_http.dll"
               Source="$(var.STAGE_DIR)\fractalsql-reasoning-http.dll"
+              KeyPath="yes" />
+      </Component>
+      <!-- Its detached Ed25519 signature: the plugin loads only when this file sits beside it. -->
+      <Component Id="c_ReasoningPluginDllSig"
+                 Directory="LibDir"
+                 Guid="C1A1$(var.PG_MAJOR)08-0000-4000-B000-00000000BE72">
+        <File Id="fractalsql_reasoning_http.dll.sig"
+              Source="$(var.STAGE_DIR)\fractalsql-reasoning-http.dll.sig"
               KeyPath="yes" />
       </Component>
       <?endif ?>
@@ -225,7 +237,7 @@
       <?if $(var.SHIP_MCP) = "1" ?>
       <?if $(sys.BUILDARCH) = "x64" ?>
       <Component Id="c_McpServerExe"
-                 Directory="McpFolder"
+                 Directory="BinDir"
                  Guid="C1A1$(var.PG_MAJOR)10-0000-4000-B000-000000005A70">
         <File Id="fractalsql_postgresql_mcp.exe"
               Name="fractalsql-postgresql-mcp.exe"
@@ -241,7 +253,7 @@
               KeyPath="yes" />
       </Component>
       <Component Id="c_McpSchemaLock"
-                 Directory="McpFolder"
+                 Directory="BinDir"
                  Guid="C1A1$(var.PG_MAJOR)12-0000-4000-B000-000000005A72">
         <File Id="mcp_schema_lock"
               Name=".mcp-schema-lock"
@@ -249,7 +261,7 @@
               KeyPath="yes" />
       </Component>
       <Component Id="c_McpSafetyLock"
-                 Directory="McpFolder"
+                 Directory="BinDir"
                  Guid="C1A1$(var.PG_MAJOR)13-0000-4000-B000-000000005A73">
         <File Id="mcp_safety_lock"
               Name=".mcp-safety-annotations-lock"

@@ -35,6 +35,12 @@ namespace fsqlmcp::net
     Socket accept( Socket listenSock );      // invalidSocket() when the listener has stopped
     void stopListening( Socket listenSock ); // shutdown(both); wakes a blocked accept()
     void close( Socket s );
+    // Closes after a refusal reply: half-closes, reads and discards the
+    // client's pending request for up to lingerMs, then closes. A plain close
+    // with unread data resets the connection, and the reset discards the
+    // reply that was just written -- the peer then sees a broken connection
+    // instead of the refusal it was owed (seen on Windows).
+    void closeAfterReply( Socket s, int lingerMs );
 
     // recv(): >0 bytes read, 0 = clean EOF, -1 = hard error, -2 = "would
     // block / idle" (EWOULDBLOCK, a receive timeout, or an interrupted

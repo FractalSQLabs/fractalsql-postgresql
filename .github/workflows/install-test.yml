@@ -43,6 +43,23 @@ jobs:
           sudo apt-get install -y ruby ruby-dev build-essential rpm \
               libpq-dev libssl-dev pkg-config
           sudo gem install --no-document fpm
+      - name: Build the MCP server on EL9 (old glibc, runs on EL9/Debian/Ubuntu)
+        run: |
+          # package.sh ships ONE mcp binary in every .deb/.rpm. Built on this
+          # ubuntu runner (glibc 2.39, libstdc++ 13) it fails on Rocky 9 with
+          # "GLIBC_2.38 not found" / "GLIBCXX_3.4.32 not found". Built on EL9
+          # (glibc 2.34) it runs everywhere newer. package.sh reuses an
+          # existing mcp/fractalsql-postgresql-mcp instead of rebuilding.
+          docker run --rm -v "$PWD":/w -w /w rockylinux:9 bash -ec '
+            dnf install -qy gcc-c++ make pkgconf-pkg-config libpq-devel openssl-devel
+            make -C mcp clean
+            make -C mcp -j2
+            mcp/fractalsql-postgresql-mcp --version
+            ldd mcp/fractalsql-postgresql-mcp | grep -E "libpq|libssl|libcrypto"
+            objdump -T mcp/fractalsql-postgresql-mcp | grep -oE "GLIBC_[0-9.]+" | sort -Vu | tail -1
+          '
+          sudo chown -R "$(id -u):$(id -g)" mcp
+
       - name: Package per-major .deb + .rpm
         run: |
           chmod +x package.sh
@@ -114,7 +131,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.20"
+          test "\$VERSION" = "2.0.21"
           echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Shipped MCP server verification ---------------------------
@@ -125,8 +142,14 @@ jobs:
               || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
           MCP_V=\$("\${MCP}" --version)
           echo "mcp=\${MCP} version=\${MCP_V}"
-          test "\${MCP_V}" = "2.0.20" \
-              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.20"; exit 1; }
+          test "\${MCP_V}" = "2.0.21" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.21"; exit 1; }
+          # The lock files install beside the binary, which is where the server looks for them; run it from
+          # another directory so that lookup is what has to find them.
+          test -f "\$(dirname "\${MCP}")/.mcp-schema-lock" && test -f "\$(dirname "\${MCP}")/.mcp-safety-annotations-lock" \
+              || { echo "FAIL: MCP lock files are not beside \${MCP}"; exit 1; }
+          test "\$(cd /tmp && "\${MCP}" --list-tools | wc -l)" -ge 60 \
+              || { echo "FAIL: MCP server lists too few tools"; exit 1; }
           echo "ok: shipped MCP server --version (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -135,6 +158,9 @@ jobs:
           PLUGIN=/usr/lib/postgresql/\${PG_VER}/lib/fractalsql-reasoning-http.so
           test -f "\${PLUGIN}" \
               || { echo "FAIL: reasoning plugin missing at \${PLUGIN}"; exit 1; }
+          # The package must ship the detached signature beside the plugin (64 raw bytes).
+          test "\$(wc -c < "\${PLUGIN}.sig")" -eq 64 \
+              || { echo "FAIL: \${PLUGIN}.sig missing or not 64 bytes"; exit 1; }
 
           # .deb Depends: libcurl4 — the plugin dlopen-links libcurl at load.
           ldd "\${PLUGIN}" | grep -qi libcurl \
@@ -261,8 +287,14 @@ jobs:
               || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
           MCP_V=\$("\${MCP}" --version)
           echo "mcp version=\${MCP_V}"
-          test "\${MCP_V}" = "2.0.20" \
-              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.20"; exit 1; }
+          test "\${MCP_V}" = "2.0.21" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.21"; exit 1; }
+          # The lock files install beside the binary, which is where the server looks for them; run it from
+          # another directory so that lookup is what has to find them.
+          test -f "\$(dirname "\${MCP}")/.mcp-schema-lock" && test -f "\$(dirname "\${MCP}")/.mcp-safety-annotations-lock" \
+              || { echo "FAIL: MCP lock files are not beside \${MCP}"; exit 1; }
+          test "\$(cd /tmp && "\${MCP}" --list-tools | wc -l)" -ge 60 \
+              || { echo "FAIL: MCP server lists too few tools"; exit 1; }
 
           chmod +x /work/scripts/easy_install.sh
           python3 /work/scripts/ci/mock_llm.py 18080 &
@@ -377,7 +409,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.20"
+          test "\$VERSION" = "2.0.21"
           echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Shipped MCP server verification ---------------------------
@@ -386,8 +418,14 @@ jobs:
               || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
           MCP_V=\$("\${MCP}" --version)
           echo "mcp=\${MCP} version=\${MCP_V}"
-          test "\${MCP_V}" = "2.0.20" \
-              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.20"; exit 1; }
+          test "\${MCP_V}" = "2.0.21" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.21"; exit 1; }
+          # The lock files install beside the binary, which is where the server looks for them; run it from
+          # another directory so that lookup is what has to find them.
+          test -f "\$(dirname "\${MCP}")/.mcp-schema-lock" && test -f "\$(dirname "\${MCP}")/.mcp-safety-annotations-lock" \
+              || { echo "FAIL: MCP lock files are not beside \${MCP}"; exit 1; }
+          test "\$(cd /tmp && "\${MCP}" --list-tools | wc -l)" -ge 60 \
+              || { echo "FAIL: MCP server lists too few tools"; exit 1; }
           echo "ok: shipped MCP server --version (pg\${PG_VER})"
 
           # --- Reasoning smoke test against a mock LLM endpoint --------
@@ -396,6 +434,9 @@ jobs:
           PLUGIN=/usr/pgsql-\${PG_VER}/lib/fractalsql-reasoning-http.so
           test -f "\${PLUGIN}" \
               || { echo "FAIL: reasoning plugin missing at \${PLUGIN}"; exit 1; }
+          # The package must ship the detached signature beside the plugin (64 raw bytes).
+          test "\$(wc -c < "\${PLUGIN}.sig")" -eq 64 \
+              || { echo "FAIL: \${PLUGIN}.sig missing or not 64 bytes"; exit 1; }
 
           # .rpm requires libcurl.so.4 (satisfied by libcurl / libcurl-minimal).
           ldd "\${PLUGIN}" | grep -qi libcurl \
@@ -449,7 +490,7 @@ jobs:
 
   macos-install:
     name: macOS — build + install + CREATE EXTENSION + reason (pg17, arm64)
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
@@ -486,9 +527,14 @@ jobs:
           # (binary + README + locks + manifest) next to install.sh.
           MCP_V=$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --version)
           echo "mcp version=${MCP_V}"
-          test "${MCP_V}" = "2.0.20" \
-              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.20"; exit 1; }
+          test "${MCP_V}" = "2.0.21" \
+              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.21"; exit 1; }
           echo "ok: shipped MCP server --version (macOS)"
+          # Run from another directory: the lock files beside the binary must be found, and the tool table loads.
+          for f in .mcp-schema-lock .mcp-safety-annotations-lock manifest.json; do
+              test -e /tmp/"${DIR}"/mcp/"${f}" || { echo "FAIL: ${f} missing from the tarball's mcp/"; exit 1; }
+          done
+          ( cd "${RUNNER_TEMP}" && test "$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --list-tools | wc -l)" -ge 60 )
 
       - name: Start PostgreSQL
         run: |
@@ -507,7 +553,7 @@ jobs:
           VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.20"
+          test "${VERSION}" = "2.0.21"
 
           # Search works with no further config.
           psql -d postgres -Atc \
@@ -522,6 +568,7 @@ jobs:
           done
           PLUGIN="$(pg_config --pkglibdir)/fractalsql-reasoning-http.so"
           test -f "${PLUGIN}" || { echo "FAIL: plugin missing at ${PLUGIN}"; exit 1; }
+          test "$(wc -c < "${PLUGIN}.sig")" -eq 64 || { echo "FAIL: ${PLUGIN}.sig missing or not 64 bytes"; exit 1; }
           # This job currently pins PG17, where ALTER SYSTEM SET accepts
           # an unrecognized placeholder GUC unconditionally -- confirmed
           # PG14/15/16 reject it ("unrecognized configuration parameter")
@@ -545,7 +592,7 @@ jobs:
 
   easy-install-macos:
     name: "easy_install.sh: macOS wizard, non-interactive (pg17, arm64)"
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
@@ -577,8 +624,10 @@ jobs:
           test -f "$(pg_config --sharedir)/extension/fractalsql.control"
           # Shipped MCP server verification (same check macos-install runs).
           MCP_V=$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --version)
-          test "${MCP_V}" = "2.0.20" \
-              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.20"; exit 1; }
+          test "${MCP_V}" = "2.0.21" \
+              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.21"; exit 1; }
+          ( cd "${RUNNER_TEMP}" && test "$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --list-tools | wc -l)" -ge 60 )
+          test -e /tmp/"${DIR}"/mcp/.mcp-schema-lock && test -e /tmp/"${DIR}"/mcp/.mcp-safety-annotations-lock
 
       - name: Run easy_install.sh against a mock LLM
         run: |
@@ -702,6 +751,22 @@ jobs:
         run: |
           .\scripts\windows\build-windows.ps1 -PgDir "deps\pg\root" -PgMajor $env:PG_VER
 
+      # The MCP server goes into the MSI too: built here as release.yml builds it.
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        shell: cmd
+        run: |
+          echo VCPKG_ROOT=C:\vcpkg>>%GITHUB_ENV%
+          C:\vcpkg\vcpkg.exe install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
+      - name: Build fractalsql-postgresql-mcp.exe
+        shell: cmd
+        run: |
+          set PGDIR=%CD%\deps\pg\root
+          call mcp\scripts\windows\build.bat
+          if errorlevel 1 exit /b 1
+          if not exist mcp\fractalsql-postgresql-mcp.exe ( echo ERROR: fractalsql-postgresql-mcp.exe was not produced & exit /b 1 )
+
       - name: Build MSI
         shell: cmd
         env:
@@ -718,6 +783,25 @@ jobs:
           if (-not $msi) { Write-Host "FATAL: built .msi not found"; exit 1 }
           $p = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /quiet /norestart" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Write-Host "FATAL: msiexec exited $($p.ExitCode)"; exit 1 }
+
+      # The installed MCP server, run from the install folder with PostgreSQL's own bin directory deliberately
+      # not on PATH: it has to find libpq.dll beside itself, and its lock files beside itself.
+      - name: Run the installed MCP server
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem 'C:\Program Files\PostgreSQL' -Directory | Select-Object -First 1 | ForEach-Object { Join-Path $_.FullName 'bin' }
+          foreach ($f in 'fractalsql-postgresql-mcp.exe','.mcp-schema-lock','.mcp-safety-annotations-lock','libpq.dll') {
+              if (-not (Test-Path (Join-Path $bin $f))) { Get-ChildItem $bin -Force | Select-Object -First 40 | Format-Table Name; Write-Host "FATAL: $f missing from $bin"; exit 1 }
+          }
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*PostgreSQL*' }) -join ';'
+          Push-Location $env:RUNNER_TEMP
+          & "$bin\fractalsql-postgresql-mcp.exe" --version
+          if ($LASTEXITCODE -ne 0) { Write-Host 'FATAL: --version failed'; exit 1 }
+          $n = (& "$bin\fractalsql-postgresql-mcp.exe" --list-tools | Measure-Object -Line).Lines
+          Write-Host "tools: $n"
+          if ($n -lt 60) { Write-Host 'FATAL: too few tools'; exit 1 }
+          Pop-Location
+          Write-Host 'ok: the MSI installs the MCP server with its lock files; it runs from the install folder'
 
       - name: Run easy_install.ps1 against a mock LLM
         shell: pwsh

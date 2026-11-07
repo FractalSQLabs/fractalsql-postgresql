@@ -1,0 +1,8 @@
+# Windows batch files: cmd.exe misparses an LF-only batch file. It
+# tokenizes the file at the wrong offsets, so a comment line can be run
+# as a command ("uisites' is not recognized") and the script dies before
+# it does any work. Force CRLF on every checkout, on every platform, so
+# scripts\windows\build.bat, build-msi.bat and the MCP build scripts
+# behave the same for everyone.
+*.bat text eol=crlf
+*.cmd text eol=crlf

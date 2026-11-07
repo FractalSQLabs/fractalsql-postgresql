@@ -1021,12 +1021,31 @@ COMMENT ON FUNCTION fractal_agent_recommend_diverse(text, text, float8[], int, t
 -- arbitrary questions -- the closest thing to a general-purpose agent in the
 -- roster. No vertical-demo preset (none of the 8 demos call fractal_sql_agent);
 -- validated via demo/demo-agents.sql and build_test gate 23.
+--
+-- Executing LLM-generated SQL is an EXPLICIT, PER-CALL opt-in. auto_execute
+-- defaults to FALSE, so the
+-- engine generates and validates the statement (the allowlist + EXPLAIN
+-- pipeline fractal_sql_agent already runs) and hands the SQL back WITHOUT
+-- running it. Only a caller that passes auto_execute => true gets the
+-- statement executed and the reasoning step. This is the same default the
+-- MCP layer's fractal_agent_data_analyst tool already shipped with, so the
+-- two layers now agree.
+--
+-- The legacy 4-argument form is dropped below so an upgraded install cannot
+-- keep resolving 4-argument calls to the old always-executing body. During
+-- CREATE EXTENSION the function does not exist yet, so the DROP is a no-op;
+-- over an existing install it is the upgrade step (re-running this script,
+-- or DROP EXTENSION fractalsql_agents CASCADE; CREATE EXTENSION
+-- fractalsql_agents;).
+
+DROP FUNCTION IF EXISTS fractal_agent_data_analyst(text, text[], int, text);
 
 CREATE FUNCTION fractal_agent_data_analyst(
     question      text,
     table_names   text[]  DEFAULT NULL,
     max_retries   int     DEFAULT 2,
-    context       text    DEFAULT '{}'
+    context       text    DEFAULT '{}',
+    auto_execute  boolean DEFAULT false
 ) RETURNS TABLE(analysis text, generated_sql text, result_json jsonb, reasoning_step_failed text)
 AS $$
 DECLARE
@@ -1063,25 +1082,40 @@ BEGIN
                    WHERE e.extname = 'fractalsql') || ',', '')
         || pg_catalog.current_setting('search_path'),
         true);
-    -- 1. Real Analytics: NL -> SQL -> execute. fractal_sql_agent owns its
+    -- 1. Real Analytics: NL -> SQL -> (execute). fractal_sql_agent owns its
     -- retry loop and reports empty/failed results via execution_status; this
     -- engine does not second-guess them (no empty-table guard -- there is no
-    -- fixed table to pre-check). auto_execute=true so result_json carries the
-    -- real row count (or a captured execution-failure reason) -- with false
-    -- result_json is always NULL, which would break the real-output invariant.
-    SELECT * INTO res FROM fractal_sql_agent(question, table_names, max_retries, true);
+    -- fixed table to pre-check). auto_execute is the caller's EXPLICIT
+    -- opt-in: with the default false the statement is generated
+    -- and validated (the allowlist + EXPLAIN pipeline) but NOT run, so
+    -- result_json stays NULL and there is nothing to reason over -- step 2
+    -- is skipped entirely in that case. With auto_execute true the run is
+    -- unchanged: result_json carries the real row count (or a captured
+    -- execution-failure reason).
+    SELECT * INTO res
+      FROM fractal_sql_agent(question, table_names, max_retries, auto_execute);
 
     -- 2. Real Cognition: reason a one-paragraph read over the query result.
-    SELECT r.result, r.failed, r.err
-      INTO analysis, reasoning_failed, reasoning_err
-      FROM _fractalsql_agents_reason_ex(
-        'Analyze this database query result and answer in one paragraph: '
-        || COALESCE(res.result_json::text, 'null'),
-        context) AS r;
+    -- Skipped when auto_execute is false: there is no result to read, so the
+    -- LLM is not called at all -- analysis and reasoning_step_failed stay
+    -- NULL ("not attempted", not "failed"). With auto_execute true this is
+    -- unchanged: the reason call runs over the real result_json (or over
+    -- 'null' when the run produced no rows).
+    -- COALESCE: an explicit NULL auto_execute is treated as false, matching
+    -- fractal_sql_agent's own NULL handling -- fail closed either way.
+    IF COALESCE(auto_execute, false) THEN
+        SELECT r.result, r.failed, r.err
+          INTO analysis, reasoning_failed, reasoning_err
+          FROM _fractalsql_agents_reason_ex(
+            'Analyze this database query result and answer in one paragraph: '
+            || COALESCE(res.result_json::text, 'null'),
+            context) AS r;
+    END IF;
 
     -- 3. Best-effort audit-chain provenance -- enterprise tier only; must
     -- not break this agent for community users. High-value trail since
-    -- this engine auto-executes LLM-generated SQL.
+    -- this engine can execute LLM-generated SQL; auto_execute is recorded
+    -- so the chain distinguishes "generated and run" from "generated only".
     -- STRICTLY best-effort: ANY audit failure is swallowed (a ledger write
     -- failure must never abort an engine whose data half is already
     -- computed). Only a client-side query cancellation (SQLSTATE 57014)
@@ -1089,7 +1123,8 @@ BEGIN
     BEGIN
         PERFORM fractal_audit_log('agent_data_analyst', jsonb_build_object(
             'question', question, 'generated_sql', res.generated_sql,
-            'execution_status', res.execution_status, 'analysis', analysis));
+            'execution_status', res.execution_status, 'analysis', analysis,
+            'auto_execute', COALESCE(auto_execute, false)));
     EXCEPTION
         WHEN SQLSTATE '57014' THEN
             -- A cancelled query is not an audit failure: let it propagate.
@@ -1115,12 +1150,18 @@ EXCEPTION
 END;
 $$ LANGUAGE plpgsql;
 
-COMMENT ON FUNCTION fractal_agent_data_analyst(text, text[], int, text) IS
+COMMENT ON FUNCTION fractal_agent_data_analyst(text, text[], int, text, boolean) IS
   'Horizontal data-analyst engine. Calls fractal_sql_agent(question, '
-  'table_names, max_retries, true) -- the NL-to-SQL-to-execute pipeline with '
-  'its own retry loop, auto_execute=true so result_json carries the real row '
-  'count (or a captured execution-failure reason) -- then fractal_reason to '
-  'synthesize a one-paragraph analysis of the result. Returns (analysis, '
+  'table_names, max_retries, auto_execute) -- the NL-to-SQL pipeline with '
+  'its own retry loop -- then fractal_reason to '
+  'synthesize a one-paragraph analysis of the result. '
+  'The auto_execute flag DEFAULTS TO FALSE, so the generated statement is '
+  'validated but NOT executed unless the caller explicitly passes true; in '
+  'that default case result_json and analysis are NULL and the LLM is not '
+  'called at all. With auto_execute => true the run is unchanged: '
+  'result_json carries the real row count (or a captured execution-failure '
+  'reason) and analysis is the reason call''s read. '
+  'Returns (analysis, '
   'generated_sql, result_json, reasoning_step_failed): analysis is the LLM''s '
   'read, generated_sql and '
   'result_json are the agent''s own real outputs (no canned constants). context '

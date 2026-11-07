@@ -13,6 +13,13 @@ endif
 
 SRC      := $(wildcard src/*.cpp) $(wildcard src/adapters/*.cpp)
 OBJ      := $(SRC:.cpp=.o)
+# OUT: where the linked server is written. The default keeps the binary in
+# mcp/, where the packaging scripts, the compose file and the CI workflows
+# expect it. A build that runs against a shared folder (a bind mount, a synced
+# directory) can point OUT at a directory it owns, so the link step never has
+# to create its output file in the shared tree -- a link there can fail with
+# an opaque linker error that says nothing about the code being linked.
+OUT      ?= fractalsql-postgresql-mcp
 # openssl's own -L comes first: Homebrew's openssl@3 is keg-only (not on the default
 # linker path), so a bare -lssl -lcrypto fails to link on macOS. The explicit
 # -lssl -lcrypto stays as the fallback when no openssl.pc is found.
@@ -29,7 +36,29 @@ ifdef COVERAGE
     LIBS     += -lgcov
 endif
 
-fractalsql-postgresql-mcp: $(OBJ)
+# ASAN=1 / UBSAN=1 compose freely; TSAN=1 composes with UBSAN=1 but NOT
+# with ASAN=1 (the runtimes cannot share a binary). UBSAN builds do not
+# recover: the first undefined-behaviour hit aborts the server, so a
+# build_test.sh gate cannot pass over it.
+SANITIZE =
+ifeq ($(ASAN),1)
+  SANITIZE += -fsanitize=address
+endif
+ifeq ($(UBSAN),1)
+  SANITIZE += -fsanitize=undefined -fno-sanitize-recover=undefined
+endif
+ifeq ($(TSAN),1)
+  ifeq ($(ASAN),1)
+    $(error TSAN=1 cannot be combined with ASAN=1 -- their runtimes cannot link into the same binary)
+  endif
+  SANITIZE += -fsanitize=thread
+endif
+ifneq ($(strip $(SANITIZE)),)
+  CXXFLAGS := $(CXXFLAGS) -O1 -g -fno-omit-frame-pointer $(SANITIZE)
+endif
+
+$(OUT): $(OBJ)
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJ) $(LIBS)
 
 # -MMD -MP: write a .d file per object so a header change rebuilds every object
@@ -41,6 +70,6 @@ fractalsql-postgresql-mcp: $(OBJ)
 -include $(OBJ:.o=.d)
 
 clean:
-	rm -f $(OBJ) $(OBJ:.o=.d) $(OBJ:.o=.gcno) $(OBJ:.o=.gcda) fractalsql-postgresql-mcp
+	rm -f $(OBJ) $(OBJ:.o=.d) $(OBJ:.o=.gcno) $(OBJ:.o=.gcda) $(OUT)
 
 .PHONY: clean

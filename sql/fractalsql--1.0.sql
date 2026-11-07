@@ -926,7 +926,7 @@ BEGIN
             -- as the caller, so a caller without SELECT on the source
             -- relation gets Postgres's own "permission denied for table
             -- X" and the row is marked 'failed' -- the documented
-            -- gate-16 behavior, unchanged and still produced by the
+            -- behavior, unchanged and still produced by the
             -- engine's own privilege system rather than by a bespoke
             -- re-implementation of it.
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r.created_by) THEN
@@ -974,6 +974,17 @@ BEGIN
 
         n_processed := n_processed + 1;
     END LOOP;
+
+    -- Retention: finished work is not kept forever. 'done' rows older than an hour and 'failed'
+    -- rows older than a day are dropped on every pass, so the queue cannot grow without bound. Best effort:
+    -- a caller without DELETE on the queue simply skips the prune.
+    BEGIN
+        DELETE FROM fractal_vectorizer_queue
+         WHERE (status = 'done'   AND updated_at < now() - interval '1 hour')
+            OR (status = 'failed' AND updated_at < now() - interval '1 day');
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
 
     RETURN n_processed;
 END;
@@ -1471,8 +1482,49 @@ COMMENT ON FUNCTION fractal_morphological_complexity(float8[], int4) IS
 CREATE TABLE fractalsql_feature_store (
     doc_id     bigint PRIMARY KEY,
     features   float8[] NOT NULL,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    -- Provenance: who wrote the vector and where it came from.
+    created_by name NOT NULL DEFAULT current_user,
+    updated_by name NOT NULL DEFAULT current_user,
+    source     text NOT NULL DEFAULT ''
 );
+
+-- Ownership and provenance enforcement. The table is writable by PUBLIC, so
+-- without this any role could overwrite another role's vector for a doc_id and
+-- steer every k-NN scan over the store. A row's creator is pinned to the role
+-- that inserted it; only that role (or a member of it, or a superuser) may
+-- overwrite the row; every write stamps updated_by/updated_at. SECURITY
+-- INVOKER, so current_user is the role actually performing the write.
+CREATE FUNCTION fractal_feature_store_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        NEW.created_by := current_user;
+        NEW.updated_by := current_user;
+        RETURN NEW;
+    END IF;
+    IF NEW.created_by IS DISTINCT FROM OLD.created_by THEN
+        RAISE EXCEPTION 'fractal_feature_store_guard: created_by is immutable (doc_id=%)', OLD.doc_id;
+    END IF;
+    IF current_user <> OLD.created_by AND NOT pg_has_role(current_user, OLD.created_by, 'USAGE') THEN
+        RAISE EXCEPTION 'fractal_feature_store_guard: the vector for doc_id=% belongs to role "%"; overwrite refused (a member of that role or a superuser may overwrite it)',
+            OLD.doc_id, OLD.created_by
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    NEW.updated_by := current_user;
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER fractal_feature_store_guard_ins
+    BEFORE INSERT ON fractalsql_feature_store
+    FOR EACH ROW EXECUTE FUNCTION fractal_feature_store_guard();
+CREATE TRIGGER fractal_feature_store_guard_upd
+    BEFORE UPDATE ON fractalsql_feature_store
+    FOR EACH ROW EXECUTE FUNCTION fractal_feature_store_guard();
 
 COMMENT ON TABLE fractalsql_feature_store IS
   'One named feature vector per doc_id, written by fractal_store_morphology '
@@ -1485,14 +1537,18 @@ GRANT SELECT, INSERT, UPDATE ON fractalsql_feature_store TO PUBLIC;
 
 CREATE FUNCTION fractal_store_morphology(
     doc_id        int8,
-    feature_array float8[]
+    feature_array float8[],
+    source        text DEFAULT ''
 ) RETURNS void
 AS 'MODULE_PATHNAME', 'fractal_store_morphology'
 LANGUAGE C VOLATILE STRICT;
 
-COMMENT ON FUNCTION fractal_store_morphology(int8, float8[]) IS
+COMMENT ON FUNCTION fractal_store_morphology(int8, float8[], text) IS
   'Upserts feature_array against doc_id in fractalsql_feature_store '
-  '(insert, or overwrite if doc_id already has a stored vector). Postgres-'
+  '(insert, or overwrite if doc_id already has a vector written by the same '
+  'role, a role the caller is a member of, or any role for a superuser; an '
+  'overwrite of another role vector is refused). The optional source records '
+  'where the vector came from. Postgres-'
   'side named feature store -- see fractal_mine_topology_negatives for the '
   'matching k-NN read side.';
 
@@ -2073,6 +2129,21 @@ COMMENT ON FUNCTION fractal_audit_log(text, jsonb) IS
   'id, updated, convert_from(blob, ''UTF8'')::jsonb FROM fractalsql_ledger '
   'WHERE kind = 2 ORDER BY id. Errors with ''enterprise tier not loaded'' '
   'until fractalsql.enterprise_lib is set.';
+
+-- fractal_audit_log() appends to the tamper-evident decision-audit chain. With the default
+-- PUBLIC EXECUTE any role that can run SQL could forge an (unattributed) chain entry, so it
+-- is revoked as well; grant it to the roles that own the audit trail, e.g.
+--   GRANT EXECUTE ON FUNCTION fractal_audit_log(text, jsonb) TO audit_writer;
+-- Existing databases: run the REVOKE below by hand.
+REVOKE EXECUTE ON FUNCTION fractal_audit_log(text, jsonb) FROM PUBLIC;
+
+CREATE FUNCTION fractal_lock_destructive()
+RETURNS text
+AS 'MODULE_PATHNAME', 'fractal_lock_destructive'
+LANGUAGE C VOLATILE;
+
+COMMENT ON FUNCTION fractal_lock_destructive() IS
+  'One-way latch for this connection: after it runs, fractal_ledger_flush/load/compact/reset_soft/reset_hard and fractal_audit_log refuse. There is no unlock. The MCP server calls it on its connections when FSQL_MCP_READ_ONLY is set.';
 
 CREATE FUNCTION fractal_audit_unpack(blob bytea)
 RETURNS jsonb

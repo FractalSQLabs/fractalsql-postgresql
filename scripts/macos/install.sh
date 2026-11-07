@@ -84,6 +84,9 @@ ${INSTALL} -m 0755 "${HERE}/${SO_FILE}" \
     "${PKGLIBDIR}/${SO_FILE}"
 ${INSTALL} -m 0755 "${HERE}/fractalsql-reasoning-http.so" \
     "${PKGLIBDIR}/fractalsql-reasoning-http.so"
+# The plugin loads only with its detached signature beside it.
+${INSTALL} -m 0644 "${HERE}/fractalsql-reasoning-http.so.sig" \
+    "${PKGLIBDIR}/fractalsql-reasoning-http.so.sig"
 ${INSTALL} -m 0644 "${HERE}/fractalsql.control" \
     "${EXTDIR}/fractalsql.control"
 ${INSTALL} -m 0644 "${HERE}/fractalsql--1.0.sql" \
@@ -98,7 +101,7 @@ ${INSTALL} -m 0644 "${HERE}/fractalsql_agents--1.0.sql" \
 
 echo "Installed:"
 echo "  ${PKGLIBDIR}/${SO_FILE}"
-echo "  ${PKGLIBDIR}/fractalsql-reasoning-http.so"
+echo "  ${PKGLIBDIR}/fractalsql-reasoning-http.so (+ .sig)"
 echo "  ${EXTDIR}/fractalsql.control"
 echo "  ${EXTDIR}/fractalsql--1.0.sql"
 echo "  ${EXTDIR}/fractalsql_agents.control"

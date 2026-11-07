@@ -1,5 +1,7 @@
 // fractalsql-postgresql-mcp — entrypoint (14.1 template filled for libpq).
+#include <cerrno>
 #include <cstdlib>
+#include <string>
 #include <cstring>
 #include <cctype>
 #include <iostream>
@@ -20,16 +22,18 @@
 #include "jsonrpc_server.h"
 #include "transport_stdio.h"
 #include "transport_http.h"
+#include "policy.h"
 #include "schema_lock.h"
 #include "safety_lock.h"
 #include "logging.h"
+#include "lock_paths.h"
 #include "db.h"
 #include "tools_catalog.h"
 
 using namespace fsqlmcp;
 
 #ifndef FSQL_MCP_VERSION
-#define FSQL_MCP_VERSION "2.0.20"
+#define FSQL_MCP_VERSION "2.0.21"
 #endif
 
 static std::string envOr( const char* name, const std::string& def )
@@ -43,6 +47,26 @@ static int envIntOr( const char* name, int def )
 {
     const char* v = std::getenv( name );
     return ( v && *v ) ? std::atoi( v ) : def;
+}
+// A knob that must be a whole number of at least `minValue`. Unset or empty keeps the default; anything
+// else that is not such a number (text, a fraction, a negative, zero) is refused with the variable named.
+// envIntOr's atoi turns "abc" into 0, and a concurrency limit of 0 makes every call wait out the whole
+// queue timeout, so those knobs are checked here instead of silently becoming a hang.
+static bool envIntAtLeast( const char* name, int def, int minValue, int* out, std::string* err )
+{
+    const char* v = std::getenv( name );
+    if( !v || !*v ) { *out = def; return true; }
+    char* end = nullptr;
+    errno = 0;
+    const long n = std::strtol( v, &end, 10 );
+    if( end == v || *end != '\0' || errno == ERANGE || n < minValue || n > 2147483647L )
+    {
+        *err = std::string( name ) + " must be a whole number of at least " + std::to_string( minValue )
+               + " (got '" + v + "')";
+        return false;
+    }
+    *out = static_cast<int>( n );
+    return true;
 }
 // Boolean env knob: "true", "1", "on" or "yes", case-insensitive.
 static bool envBoolOr( const char* name, bool def )
@@ -110,20 +134,10 @@ static std::vector<ToolSpec> filterTools( std::vector<ToolSpec> tools,
     return out;
 }
 
-static char g_selfPathBuf[ 4096 ];
 static std::string selfDir()
 {
-#ifdef _WIN32
-    const DWORD n = GetModuleFileNameA( nullptr, g_selfPathBuf, sizeof( g_selfPathBuf ) );
-    if( n == 0 || n >= sizeof( g_selfPathBuf ) ) return ".";
-#else
-    const ssize_t n = readlink( "/proc/self/exe", g_selfPathBuf, sizeof( g_selfPathBuf ) - 1 );
-    if( n <= 0 ) return ".";
-    g_selfPathBuf[ n ] = '\0';
-#endif
-    std::string p( g_selfPathBuf );
-    const std::size_t slash = p.find_last_of( "\\/" );
-    return slash == std::string::npos ? std::string( "." ) : p.substr( 0, slash );
+    const std::string d = fsqlmcp::selfDirectory();
+    return d.empty() ? std::string( "." ) : d;
 }
 
 static void usage()
@@ -273,6 +287,17 @@ static int maybeRunOneShot( const CliArgs& args, const std::vector<ToolSpec>& fu
 static int checkSafetyGate( const std::string& safetyLockPath, const std::string& renderedSafety )
 {
     std::string diff;
+    if( !lockFileExists( safetyLockPath ) )
+    {
+        if( requireLocks() )
+        {
+            std::cerr << "ERROR: safety-annotation lock '" << safetyLockPath << "' is missing; refusing to start without "
+                      << "the tool-annotation drift check (generate it with --write-safety-annotations-lock, or set "
+                      << "FSQL_MCP_ALLOW_MISSING_LOCKS=true to run without it)\n";
+            return 3;
+        }
+        std::cerr << "WARN: safety-annotation lock '" << safetyLockPath << "' not found; the tool-annotation drift check is skipped\n";
+    }
     if( !checkSafetyAnnotations( safetyLockPath, renderedSafety, &diff ) )
     {
         std::cerr << "safety-annotation lock mismatch (" << safetyLockPath << "):\n"
@@ -288,11 +313,21 @@ static int checkSchemaGate( const std::string& lockPath, const std::string& hash
 {
     std::string expected;
     const LockCheckResult lockResult = checkSchemaLock( lockPath, hash, &expected );
+    if( lockResult == LockCheckResult::Absent )
+    {
+        if( requireLocks() )
+        {
+            std::cerr << "ERROR: schema lock '" << lockPath << "' is missing; refusing to start without the tool-surface "
+                      << "drift check (generate it with --write-schema-lock, or set FSQL_MCP_ALLOW_MISSING_LOCKS=true to run without it)\n";
+            return 2;
+        }
+        std::cerr << "WARN: schema lock '" << lockPath << "' not found; the tool-surface drift check is skipped\n";
+    }
     if( lockResult == LockCheckResult::Warn )
     {
         std::cerr << "schema hash mismatch: expected " << expected << " got " << hash << "; regenerate via "
                                                                                                "fractalsql-postgresql-mcp --write-schema-lock\n";
-        if( envBoolOr( "FSQL_MCP_STRICT_SCHEMA_HASH", false ) ) return 2;
+        if( envBoolOr( "FSQL_MCP_STRICT_SCHEMA_HASH", true ) ) return 2;
     }
     else if( lockResult == LockCheckResult::Ok )
         logging::event( "schema_lock_ok", Json{ { "hash", hash } } );
@@ -305,7 +340,8 @@ static int checkSchemaGate( const std::string& lockPath, const std::string& hash
 // transport's drain/exit code. NOTE: main() routes the result through
 // std::exit — connection threads cut loose at the drain deadline may still
 // be inside a request, and main's stack objects must not be unwound under
-// them (the transport leaks the state such a thread touches by design).
+// them (the transport shares ownership of the state such a thread touches,
+// so it stays valid for as long as the thread needs it).
 static int runHttpMode( const CliArgs& args, Db& db, RowLimitConfig& rowLimits,
                         const std::vector<std::string>& categories,
                         const std::vector<std::string>& whitelist,
@@ -319,15 +355,28 @@ static int runHttpMode( const CliArgs& args, Db& db, RowLimitConfig& rowLimits,
     httpCfg.path = args.httpPath.empty() ? envOr( "FSQL_MCP_HTTP_PATH", "/mcp" ) : args.httpPath;
     httpCfg.authToken     = envOr( "FSQL_MCP_AUTH_TOKEN", "" );
     httpCfg.authTokenFile = envOr( "FSQL_MCP_AUTH_TOKEN_FILE", "" );
+    httpCfg.tokenPolicyFile = envOr( "FSQL_MCP_TOKEN_POLICY_FILE", "" );
+    httpCfg.allowedOrigins = splitCsv( envOr( "FSQL_MCP_ALLOWED_ORIGINS", "" ) );
     httpCfg.shutdownDrainMs = envIntOr( "FSQL_MCP_SHUTDOWN_DRAIN_MS", 5000 );
     httpCfg.tlsEnabled    = args.httpsMode || envBoolOr( "FSQL_MCP_HTTPS", false );
     httpCfg.tlsCertPath   = args.tlsCertFile.empty() ? envOr( "FSQL_MCP_TLS_CERT_FILE", "" ) : args.tlsCertFile;
     httpCfg.tlsKeyPath    = args.tlsKeyFile.empty()  ? envOr( "FSQL_MCP_TLS_KEY_FILE", "" )  : args.tlsKeyFile;
-    if( httpCfg.authToken.empty() && httpCfg.authTokenFile.empty() )
+    if( httpCfg.authToken.empty() && httpCfg.authTokenFile.empty() && httpCfg.tokenPolicyFile.empty() )
     {
-        std::cerr << "the HTTP transport requires FSQL_MCP_AUTH_TOKEN or "
-                     "FSQL_MCP_AUTH_TOKEN_FILE\n";
+        std::cerr << "the HTTP transport requires FSQL_MCP_AUTH_TOKEN, "
+                     "FSQL_MCP_AUTH_TOKEN_FILE or FSQL_MCP_TOKEN_POLICY_FILE\n";
         return 2;
+    }
+    // A credential file that cannot be read or parsed is a startup failure,
+    // never a silent "no authentication": the server would otherwise serve
+    // every request without a credential.
+    {
+        const std::string polErr = tokenPolicyError( httpCfg );
+        if( !polErr.empty() )
+        {
+            std::cerr << "the per-client credential file is not usable: " << polErr << "\n";
+            return 2;
+        }
     }
     if( httpCfg.tlsEnabled && ( httpCfg.tlsCertPath.empty() || httpCfg.tlsKeyPath.empty() ) )
     {
@@ -336,35 +385,46 @@ static int runHttpMode( const CliArgs& args, Db& db, RowLimitConfig& rowLimits,
         return 2;
     }
 
-    ServerConfig serverCfg;
-    serverCfg.serverName = "fractalsql-postgresql-mcp";
-    serverCfg.serverVersion = FSQL_MCP_VERSION;
-    serverCfg.rowLimits = rowLimits;   // same ceiling, same owner (main's frame)
-    serverCfg.readOnlyMode = envBoolOr( "FSQL_MCP_READ_ONLY", false );
+    // The serving state is shared, not stack-scoped: a connection thread that
+    // is still running when the serving code returns keeps using it, so the
+    // session factory holds it alive for as long as any such thread needs it.
+    auto serverCfg = std::make_shared<ServerConfig>();
+    serverCfg->serverName = "fractalsql-postgresql-mcp";
+    serverCfg->serverVersion = FSQL_MCP_VERSION;
+    serverCfg->rowLimits = rowLimits;   // same ceiling, same owner (main's frame)
+    serverCfg->readOnlyMode = envBoolOr( "FSQL_MCP_READ_ONLY", false );
+    // A modern-only deployment refuses the legacy handshake outright.
+    serverCfg->modernOnly = modernEraOnly();
     // cancelHook is set per session in sessionFactory below.
+
+    // Process-global caps stay shared across every per-session server (the
+    // shared-manager pointer must be set before the sessions exist).
+    auto globalConcurrency = std::make_shared<ConcurrencyManager>( concCfg );
+    serverCfg->sharedConcurrency = globalConcurrency.get();
 
     // Each MCP session gets its own database connection and server instance;
     // the concurrency caps stay process-wide via sharedConcurrency.
-    auto sessionFactory = [ &serverCfg, &rowLimits, &concCfg, &categories, &whitelist, agentPartial ]()
+    auto sessionFactory = [ serverCfg, globalConcurrency, &rowLimits, &concCfg,
+                            &categories, &whitelist, agentPartial ]()
                               -> std::shared_ptr<JsonRpcServer>
     {
         auto sessionDb = std::make_shared<Db>();
         try { sessionDb->connect( envOr( "FSQL_MCP_PG_CONN_URI", "" ) );
               sessionDb->applyAgentPartial( agentPartial );
+              sessionDb->applyDestructiveLatch( serverCfg->readOnlyMode );
               for( const std::string& w : sessionDb->startupWarnings() )
                   logging::exceptionDetail( "http-session", sanitizeSecrets( w ) ); }
         catch( const ToolError& e ) { logging::exceptionDetail( "http-session", sanitizeSecrets( e.message ) ); }
-        ServerConfig sc = serverCfg;
+        ServerConfig sc = *serverCfg;
+        // The caps are shared by every session; the manager itself is kept
+        // alive by this factory, which every connection thread holds.
+        sc.sharedConcurrency = globalConcurrency.get();
         sc.cancelHook = [ sessionDb ] { sessionDb->cancel(); };
         // Same category/tool filter as the stdio path; handlers bind to this
         // session's connection.
         std::vector<ToolSpec> sessionTools = buildAllTools( *sessionDb, rowLimits );
         return std::make_shared<JsonRpcServer>( sc, filterTools( std::move( sessionTools ), categories, whitelist ), concCfg );
     };
-    // Process-global caps stay shared across every per-session server (the
-    // shared-manager pointer must be set before the sessions exist).
-    ConcurrencyManager globalConcurrency( concCfg );
-    serverCfg.sharedConcurrency = &globalConcurrency;
     // share the same object shape the stdio path builds (process-global caps)
     return runHttpTransport( httpCfg, [ &db ] { return db.probeAlive(); }, sessionFactory );
 }
@@ -402,8 +462,17 @@ int main( int argc, char** argv )
     const std::string lockBase = envOr( "FSQL_MCP_LOCK_DIR", selfDir_ );
     // Lock file precedence: --schema-lock-path / --safety-lock-path, then
     // FSQL_MCP_SCHEMA_LOCK / FSQL_MCP_SAFETY_LOCK, then the binary's directory.
-    if( args.lockPath.empty() ) args.lockPath = envOr( "FSQL_MCP_SCHEMA_LOCK", lockBase + "/.mcp-schema-lock" );
-    if( args.safetyLockPath.empty() ) args.safetyLockPath = envOr( "FSQL_MCP_SAFETY_LOCK", lockBase + "/.mcp-safety-annotations-lock" );
+    const bool lockDirPinned = std::getenv( "FSQL_MCP_LOCK_DIR" ) != nullptr;
+    if( args.lockPath.empty() )
+    {
+        args.lockPath = envOr( "FSQL_MCP_SCHEMA_LOCK", lockBase + "/.mcp-schema-lock" );
+        if( !std::getenv( "FSQL_MCP_SCHEMA_LOCK" ) && !lockDirPinned ) args.lockPath = withInstalledFallback( args.lockPath );
+    }
+    if( args.safetyLockPath.empty() )
+    {
+        args.safetyLockPath = envOr( "FSQL_MCP_SAFETY_LOCK", lockBase + "/.mcp-safety-annotations-lock" );
+        if( !std::getenv( "FSQL_MCP_SAFETY_LOCK" ) && !lockDirPinned ) args.safetyLockPath = withInstalledFallback( args.safetyLockPath );
+    }
 
     const int oneShotExit = maybeRunOneShot( args, full, hash, renderedSafety, lockBase );
     if( oneShotExit >= 0 ) return oneShotExit;
@@ -431,6 +500,7 @@ int main( int argc, char** argv )
         db.connect( envOr( "FSQL_MCP_PG_CONN_URI", "" ) );
         db.checkVersion( envOr( "FSQL_MCP_EXPECT_VERSION", FSQL_MCP_VERSION ) );
         db.applyAgentPartial( agentPartial );
+        db.applyDestructiveLatch( envBoolOr( "FSQL_MCP_READ_ONLY", false ) );
     }
     catch( const ToolError& e )
     {
@@ -452,10 +522,17 @@ int main( int argc, char** argv )
                                            : logging::Level::Info } );
 
     ConcurrencyConfig concCfg;
-    concCfg.cheapLimit         = envIntOr( "FSQL_MCP_MAX_CONCURRENT_CHEAP", 50 );
-    concCfg.expensiveLimit     = envIntOr( "FSQL_MCP_MAX_CONCURRENT_EXPENSIVE", 5 );
-    concCfg.expensivePerClient = envIntOr( "FSQL_MCP_MAX_CONCURRENT_EXPENSIVE_PER_CLIENT", 2 );
-    concCfg.maxQueueWaitMs     = envIntOr( "FSQL_MCP_MAX_QUEUE_WAIT_MS", 900'000 );
+    {
+        std::string concErr;
+        if( !envIntAtLeast( "FSQL_MCP_MAX_CONCURRENT_CHEAP", 50, 1, &concCfg.cheapLimit, &concErr )
+            || !envIntAtLeast( "FSQL_MCP_MAX_CONCURRENT_EXPENSIVE", 5, 1, &concCfg.expensiveLimit, &concErr )
+            || !envIntAtLeast( "FSQL_MCP_MAX_CONCURRENT_EXPENSIVE_PER_CLIENT", 2, 1, &concCfg.expensivePerClient, &concErr )
+            || !envIntAtLeast( "FSQL_MCP_MAX_QUEUE_WAIT_MS", 900'000, 1, &concCfg.maxQueueWaitMs, &concErr ) )
+        {
+            std::cerr << concErr << "\n";
+            return 2;
+        }
+    }
 
     // --http PORT wins; FSQL_MCP_TRANSPORT=http (1.2's env-form knob) also
     // selects the HTTP transport for env-only deployments like the compose demo.
@@ -476,6 +553,7 @@ int main( int argc, char** argv )
     serverCfg.serverVersion = FSQL_MCP_VERSION;
     serverCfg.rowLimits = rowLimits;   // same ceiling, same owner
     serverCfg.readOnlyMode = envBoolOr( "FSQL_MCP_READ_ONLY", false );
+    serverCfg.modernOnly = modernEraOnly();
     serverCfg.cancelHook = [ &db ] { db.cancel(); };   // 1.1 $/cancel -> PQcancel
 
     JsonRpcServer server( serverCfg, std::move( tools ), concCfg );

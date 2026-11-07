@@ -198,6 +198,20 @@ namespace fsqlmcp
         // marker instead of a hard raise. Warn-and-continue when the connected
         // engine predates the key (no pg_settings row) or the SET itself errors —
         // same never-fatal stance as checkVersion(); surfaced via startupWarnings().
+        // FSQL_MCP_READ_ONLY: also latch the engine's destructive functions on this connection, so read-only
+        // mode holds even for SQL that bypasses the tool layer. Never fatal (an engine that predates the
+        // function just yields a startup warning; the tool-layer refusal still applies).
+        void applyDestructiveLatch( bool on )
+        {
+            if( !on ) return;
+            try { callScalar( "SELECT fractal_lock_destructive()", {} ); }
+            catch( const ToolError& e )
+            {
+                warnings_.push_back( "FSQL_MCP_READ_ONLY: engine-side destructive latch not applied "
+                                     "(server-side refusal still active): " + e.message );
+            }
+        }
+
         void applyAgentPartial( bool on )
         {
             if( !on ) return;

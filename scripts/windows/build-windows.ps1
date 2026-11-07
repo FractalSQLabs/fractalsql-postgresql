@@ -247,6 +247,25 @@ $linkArgs = @(
     $CryptoLib,
     'ws2_32.lib', 'advapi32.lib', 'secur32.lib', 'bcrypt.lib'
 )
+# A DLL that a running process still has loaded cannot be replaced, and the linker's own error for it
+# (LNK1104) does not say why. Say so up front.
+if (Test-Path $Dll) {
+    try { Remove-Item -Force $Dll -ErrorAction Stop }
+    catch {
+        # Name the process that has the DLL loaded (processes that deny module access are skipped).
+        $holders = @()
+        foreach ($proc in (Get-Process -ErrorAction SilentlyContinue)) {
+            try {
+                if ($proc.Modules | Where-Object { $_.FileName -eq $Dll }) {
+                    $cmd = try { (Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)" -ErrorAction Stop).CommandLine } catch { '' }
+                    $holders += "$($proc.ProcessName) (PID $($proc.Id)) $cmd"
+                }
+            } catch { }
+        }
+        $who = if ($holders.Count -gt 0) { "Loaded by: $($holders -join '; ')." } else { "Could not tell which process (run PowerShell as Administrator to list every process's modules, or use Resource Monitor > Associated Handles > search for fractalsql.dll)." }
+        throw "cannot replace ${Dll}: a running process has it loaded. $who Stop that process (a postgres.exe left behind by an interrupted test run? for the test cluster: pg_ctl -D <datadir> -m immediate stop) and re-run."
+    }
+}
 Write-Host "[build-windows] cl.exe (link) $($linkArgs -join ' ')"
 $out = & cl.exe @linkArgs 2>&1
 $out | ForEach-Object { Write-Host $_ }

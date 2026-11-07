@@ -23,12 +23,14 @@ fractal_search(
 ) RETURNS float8[]
 ```
 
+`iterations` x `population_size` x `diffusion_factor` x the vector length must not exceed 2,147,483,648 (about a minute of work) in one call; each limit is checked on its own and then their product, and a larger search is refused.
+
 ### Arguments
 | Argument | Type | Default | Range | Description |
 | --- | --- | --- | --- | --- |
 | `query` | `float8[]` | (Required) | — | The target vector to converge toward. |
 | `iterations` | `int4` | `30` | 1–10,000 | Number of SFS generations to run. |
-| `population_size` | `int4` | `50` | 1–100,000 | Number of particles per generation. |
+| `population_size` | `int4` | `50` | 2–10,000 | Number of particles per generation. |
 | `diffusion_factor` | `int4` | `2` | 1–32 | SFS MDN (walk-per-particle count). |
 
 ### Query-Vector Dimension Limit

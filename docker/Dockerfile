@@ -81,7 +81,7 @@ ARG CORE_VARIANT=community-sovereign-c
 # --------------------------------------------------------------------
 # Stage: PG 14 builder
 # --------------------------------------------------------------------
-FROM postgres:14-bookworm AS build-pg14
+FROM postgres:14-bookworm@sha256:a389ed49344afc8f4444efd4eb512965df07aaa6ed84b239b54a23246e9fe347 AS build-pg14
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -119,7 +119,7 @@ RUN ARCH=$(uname -m) \
 # --------------------------------------------------------------------
 # Stage: PG 15 builder
 # --------------------------------------------------------------------
-FROM postgres:15-bookworm AS build-pg15
+FROM postgres:15-bookworm@sha256:daeac543477e189e334f159133f4be6dae739b005cec2dfb9d482509fed05465 AS build-pg15
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -157,7 +157,7 @@ RUN ARCH=$(uname -m) \
 # --------------------------------------------------------------------
 # Stage: PG 16 builder
 # --------------------------------------------------------------------
-FROM postgres:16-bookworm AS build-pg16
+FROM postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938 AS build-pg16
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -195,7 +195,7 @@ RUN ARCH=$(uname -m) \
 # --------------------------------------------------------------------
 # Stage: PG 17 builder
 # --------------------------------------------------------------------
-FROM postgres:17-bookworm AS build-pg17
+FROM postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5 AS build-pg17
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -233,7 +233,7 @@ RUN ARCH=$(uname -m) \
 # --------------------------------------------------------------------
 # Stage: PG 18 builder
 # --------------------------------------------------------------------
-FROM postgres:18-bookworm AS build-pg18
+FROM postgres:18-bookworm@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8 AS build-pg18
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -329,7 +329,7 @@ COPY --from=build-pg18 /fractalsql_pg18.so /fractalsql_pg18.so
 # caller does, and fractalsql.http_url/http_embed_url point at the "ollama"
 # compose service -- see docker-compose.yml and docs/docker-demo.md).
 # --------------------------------------------------------------------
-FROM postgres:18-bookworm AS demo
+FROM postgres:18-bookworm@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8 AS demo
 # libcurl4: runtime dependency of the bundled reasoning plugin (dynamic
 # link). Not needed for Sniper/Scout search on its own, but required
 # once fractalsql.reasoning_plugin is set.
@@ -363,11 +363,18 @@ COPY fractalsql_agents/sql/fractalsql_agents--1.0.sql /usr/share/postgresql/18/e
 # time -- `uname -m` yields x86_64 / aarch64, matching the dir suffixes.
 COPY include/linux-x86_64/fractalsql-reasoning-http.so  /usr/lib/postgresql/18/lib/fractalsql-reasoning-http.x86_64.so
 COPY include/linux-aarch64/fractalsql-reasoning-http.so /usr/lib/postgresql/18/lib/fractalsql-reasoning-http.aarch64.so
+# Each plugin's detached signature travels with it and is renamed the same way, so the
+# installed plugin finds <plugin>.sig beside it.
+COPY include/linux-x86_64/fractalsql-reasoning-http.so.sig  /usr/lib/postgresql/18/lib/fractalsql-reasoning-http.x86_64.so.sig
+COPY include/linux-aarch64/fractalsql-reasoning-http.so.sig /usr/lib/postgresql/18/lib/fractalsql-reasoning-http.aarch64.so.sig
 RUN set -e \
  && ARCH=$(uname -m) \
  && mv "/usr/lib/postgresql/18/lib/fractalsql-reasoning-http.${ARCH}.so" \
         /usr/lib/postgresql/18/lib/fractalsql-reasoning-http.so \
- && rm -f /usr/lib/postgresql/18/lib/fractalsql-reasoning-http.*.so
+ && mv "/usr/lib/postgresql/18/lib/fractalsql-reasoning-http.${ARCH}.so.sig" \
+        /usr/lib/postgresql/18/lib/fractalsql-reasoning-http.so.sig \
+ && rm -f /usr/lib/postgresql/18/lib/fractalsql-reasoning-http.*.so \
+          /usr/lib/postgresql/18/lib/fractalsql-reasoning-http.*.so.sig
 # Init scripts run by the official entrypoint on first start, in lexical
 # order: 10-fractalsql.sql (base) then 20-fractalsql-agents.sql (agents,
 # after base is present). Both are single CREATE EXTENSION IF NOT EXISTS.

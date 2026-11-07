@@ -175,6 +175,7 @@ mkdir -p "${STAGE}" "${DIST}"
 
 install -m 0755 "fractalsql${DLSUFFIX}"    "${STAGE}/fractalsql${DLSUFFIX}"
 install -m 0755 "${REASONING_SO}"       "${STAGE}/fractalsql-reasoning-http.so"
+install -m 0644 "${REASONING_SO}.sig"   "${STAGE}/fractalsql-reasoning-http.so.sig"
 install -m 0644 fractalsql.control      "${STAGE}/fractalsql.control"
 install -m 0644 sql/fractalsql--1.0.sql "${STAGE}/fractalsql--1.0.sql"
 # Dependent fractalsql_agents extension (pure PL/pgSQL; requires='fractalsql',

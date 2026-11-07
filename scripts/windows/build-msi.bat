@@ -93,7 +93,12 @@ if not exist "include\windows-x86_64\fractalsql-reasoning-http.dll" (
     echo ==^> ERROR: include\windows-x86_64\fractalsql-reasoning-http.dll missing -- re-run the vendored-artifact deploy step
     popd & exit /b 1
 )
+if not exist "include\windows-x86_64\fractalsql-reasoning-http.dll.sig" (
+    echo ==^> ERROR: include\windows-x86_64\fractalsql-reasoning-http.dll.sig missing -- the plugin loads only with its signature; re-run the vendored-artifact deploy step
+    popd & exit /b 1
+)
 copy /Y "include\windows-x86_64\fractalsql-reasoning-http.dll" "%STAGE%\fractalsql-reasoning-http.dll" > nul
+copy /Y "include\windows-x86_64\fractalsql-reasoning-http.dll.sig" "%STAGE%\fractalsql-reasoning-http.dll.sig" > nul
 :after_reasoning_dll
 
 REM MCP server exe — shipped in a mcp\ subfolder of the install root

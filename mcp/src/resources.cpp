@@ -1,3 +1,6 @@
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include "resources.h"
 #include "db.h"
 #include "errors.h"
@@ -69,8 +72,17 @@ namespace fsqlmcp
         if( uri.rfind( "fractalsql://ledger/", 0 ) == 0 )
         {
             const std::string kindStr = uri.substr( std::string( "fractalsql://ledger/" ).size() );
+            // Parsed without exceptions: throwing a ToolError from inside a catch( ... ) funclet crashes the
+            // Windows MSVC ASan runtime (__FrameHandler3::GetUnwindTryBlock), and std::stoi also accepted "1abc".
             int kind = 0;
-            try { kind = std::stoi( kindStr ); } catch( ... ) { throw ToolError( ErrorClass::Schema, "ledger kind must be an integer" ); }
+            {
+                char* end = nullptr;
+                errno = 0;
+                const long v = std::strtol( kindStr.c_str(), &end, 10 );
+                if( kindStr.empty() || end == kindStr.c_str() || *end != '\0' || errno == ERANGE || v < INT_MIN || v > INT_MAX )
+                    throw ToolError( ErrorClass::Schema, "ledger kind must be an integer" );
+                kind = static_cast<int>( v );
+            }
             if( kind != 1 && kind != 2 )
                 throw ToolError( ErrorClass::Schema, "ledger kind must be 1 (QTL chain) or 2 (decision-audit chain)" );
             const auto t = g_db->callScalar( "SELECT fractal_ledger_verify($1::int4)", { std::to_string( kind ) } );

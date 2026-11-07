@@ -26,8 +26,8 @@
 --     is unaffected.
 --
 -- Concurrency / cross-session persistence (parallel last-writer-wins
--- flush, and load-in-a-fresh-backend) are exercised by build_test gate 25
--- (gate_25_enterprise_stress / Gate25EnterpriseStress), which can fork
+-- flush, and load-in-a-fresh-backend) are exercised by the build_test
+-- harness's enterprise-stress phase, which can fork
 -- parallel psql backends -- not something a single `psql -f` can do.
 --
 -- Activate in the Docker demo container (enterprise assets are NOT shipped
@@ -148,7 +148,7 @@ BEGIN
     RAISE NOTICE 'Enterprise stress + tamper-evidence demo: ACTIVE -- all phases ran clean.';
 EXCEPTION
     WHEN object_not_in_prerequisite_state THEN
-        RAISE NOTICE 'Enterprise tier not loaded. fractal_ledger_* and fractal_audit_unpack are enterprise-tier features and are dormant on this community image. To activate: stage libfractalsql-enterprise-sovereign-c.so into the container, run "ALTER SYSTEM SET fractalsql.enterprise_lib = ''<path>''; SELECT pg_reload_conf();", then re-run this demo. Concurrency/cross-session coverage lives in build_test gate 25.';
+        RAISE NOTICE 'Enterprise tier not loaded. fractal_ledger_* and fractal_audit_unpack are enterprise-tier features and are dormant on this community image. To activate: stage libfractalsql-enterprise-sovereign-c.so into the container, run "ALTER SYSTEM SET fractalsql.enterprise_lib = ''<path>''; SELECT pg_reload_conf();", then re-run this demo. Concurrency/cross-session coverage lives in the build_test harness.';
 END $$;
 
 \echo ''

@@ -451,6 +451,7 @@ to synthesize a read of the result. No vertical demo is wired to it.
 | `table_names` | `text[]` | `NULL` | the tables the agent may query |
 | `max_retries` | `int` | `2` | how many correction loops on EXPLAIN/execution failure |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
+| `auto_execute` | `bool` | `false` | run the generated SQL (`true`), or only generate and validate it (`false`) |
 
 **How it works.** (1) `fractal_sql_agent(question, table_names, max_retries, true)`:
 NL→SQL→execute with `auto_execute=true` so `result_json` carries the real row
@@ -472,13 +473,23 @@ INSERT INTO agents_demo_data VALUES
 SELECT analysis, generated_sql, result_json
 FROM fractal_agent_data_analyst(
     'total amount spent per category in agents_demo_data',
-    ARRAY['agents_demo_data'], 2);
+    ARRAY['agents_demo_data'], 2, '{}', true);
 ```
 
 **Notes.** No empty-table guard: there is no fixed table to pre-check;
 `fractal_sql_agent` handles its own errors and reports empty/failed results via
 `execution_status`. Guard the LLM-facing `fractal_sql_agent` step with a
 restricted role (see [Safe Agency & Guardrails](#safe-agency--guardrails)).
+
+**`auto_execute` defaults to `false`.** Executing
+LLM-generated SQL is an explicit, per-call opt-in at every layer — the
+engine-level function and the MCP tool alike. Without the trailing `true`, the
+statement is still generated and validated (the statement allowlist plus
+`EXPLAIN`), and `generated_sql` comes back so you can run it yourself — but it
+is **not** executed, `result_json` is `NULL`, and the reasoning step is skipped
+entirely (there is no result to read, so `analysis` is `NULL` too). With
+`auto_execute => true` the full path runs: the statement executes under the
+caller's role and `analysis` is the reason call's read of the real rows.
 
 ---
 
@@ -1212,6 +1223,8 @@ silently returning NULL, and falls back to the documented defaults on
 optional ones), where a `STRICT` declaration would short-circuit that to
 a silent NULL result.
 
+`n_bits` must be between 1 and 33,554,424, and the whole log (`length(state_log)`) times `n_bits` must not exceed 268,435,456; a larger request is an error.
+
 `state_log` is a `float8[]` holding the agent's states flattened row-major
 (`n_states = length(state_log) / dim` doubles, the same convention
 `fractal_search_telemetry` uses for corpus flattening). Each state is
@@ -1330,8 +1343,8 @@ from that demo. Run it with:
 psql -d <your_database> -f demo/demo-agents.sql
 ```
 
-The `build_test` harness gate 23 (`build_test.sh` / `build_test.ps1`)
-smoke-tests the same compositions in a throwaway cluster with a mock reasoning
-canary, so the agent wiring is also covered by the automated regression suite.
+The `build_test` harness (`build_test.sh` / `build_test.ps1`) smoke-tests the
+same compositions in a throwaway cluster with a mock reasoning canary, so the
+agent wiring is also covered by the automated regression suite.
 See [the agents demo](../demo/README.md) and
 [`getting-started.md`](getting-started.md) to get a cluster running first.

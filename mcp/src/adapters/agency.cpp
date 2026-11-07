@@ -287,18 +287,35 @@ namespace fsqlmcp
 
         t.push_back( ToolSpec{ "fractal_agent_data_analyst", "agency", ToolClass::Expensive,
             { Str("question",true,"Natural-language question."), StrArray("table_names",false,"Tables to scope to (null = auto-discover)."),
-              Int("max_retries",false,"Self-correction retries.",2), Str("context",false,"Optional JSON context.","{}") },
-            std::nullopt, false, false,
-            [&db]( const Json& a, CallCtx& ) { return agentRow( db, "fractal_agent_data_analyst", {
-                PgBind::s( "text", a.at( "question" ).get<std::string>() ),
-                a.contains( "table_names" ) && !a.at( "table_names" ).is_null()
-                    ? std::optional<PgBind>( PgBind::textArr( vectors::stringArrayToJsonText( a.at( "table_names" ), "table_names" ) ) )
-                    : std::nullopt,
-                bindIf( a, "max_retries", "int4" ), bindIf( a, "context", "text" ) } ); } } );
+              Int("max_retries",false,"Self-correction retries.",2), Str("context",false,"Optional JSON context.","{}"),
+              Bool_("auto_execute",false,"Default false: only generate and validate the SQL (no execution, no analysis). true is an explicit opt-in to run the generated SQL under this connection's role and analyse the real result.",false) },
+            std::nullopt, true, false,
+            [&db]( const Json& a, CallCtx& ) {
+                // Execution is an explicit per-call opt-in. Without it the
+                // generated statement is produced and validated but never run.
+                const bool exec = a.value( "auto_execute", false );
+                std::optional<PgBind> tables =
+                    a.contains( "table_names" ) && !a.at( "table_names" ).is_null()
+                        ? std::optional<PgBind>( PgBind::textArr( vectors::stringArrayToJsonText( a.at( "table_names" ), "table_names" ) ) )
+                        : std::nullopt;
+                if( exec )
+                    return agentRow( db, "fractal_agent_data_analyst", {
+                        PgBind::s( "text", a.at( "question" ).get<std::string>() ), tables,
+                        bindIf( a, "max_retries", "int4" ), bindIf( a, "context", "text" ),
+                        // The engine's own auto_execute defaults to FALSE:
+                        // the opt-in has to be forwarded explicitly, or the engine
+                        // would only generate the SQL and never run it.
+                        PgBind::s( "boolean", "true" ) } );
+                Json r = agentRow( db, "fractal_sql_agent", {
+                    PgBind::s( "text", a.at( "question" ).get<std::string>() ), tables,
+                    bindIf( a, "max_retries", "int4" ), PgBind::s( "boolean", "false" ) } );
+                if( r.is_object() ) { r["auto_execute"] = false; r["analysis"] = nullptr; }
+                return r; } } );
         t.back().description = std::string("The horizontal catch-all: NL question -> fractal_sql_agent (NL->SQL->"
             "execute with its own retry loop) -> a reasoned analysis of the real result. Returns {analysis, "
-            "generated_sql, result_json, reasoning_step_failed}. Runs the generated SQL under whatever this connection can touch — "
-            "least-privilege guidance applies.") + kReasoningAgent + kPartialNote + kDataNote;
+            "generated_sql, result_json, reasoning_step_failed}. auto_execute defaults to FALSE: the call then only generates and "
+            "validates SQL (analysis null, result_json null). Pass auto_execute=true to run the generated SQL under whatever this connection "
+            "can touch — least-privilege guidance applies.") + kReasoningAgent + kPartialNote + kDataNote;
         t.back().openWorldHint = true; t.back().secretHint = true;
 
         // Returns a SETOF (up to k rows), not a single composite row.

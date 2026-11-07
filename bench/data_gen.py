@@ -40,14 +40,11 @@ from pgvector.psycopg import register_vector
 
 
 def validate_dsn(raw: str) -> str:
-    """Portability hardening (sibling v2.0.8's bench-arg guard class, PG half):
-    the --dsn CLI value is connection INPUT, not trusted config. Reject
+    """The --dsn CLI value is connection INPUT, not trusted config. Reject
     control characters (a newline inside a conninfo keyword/value line
     smuggles a second keyword past operators reading logs), and reject
     keywords that make the connection a side channel rather than a bench
-    target (options= -c injection, passfile=, service=, hostfile=). The
-    containment the sqlite column gives its --db file path is impossible
-    here (a DSN has no filesystem path); this is the equivalent input pin.
+    target (options= -c injection, passfile=, service=, hostfile=).
     Returns the validated string unchanged."""
     if any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
         raise SystemExit("bench: --dsn contains control characters; refusing")

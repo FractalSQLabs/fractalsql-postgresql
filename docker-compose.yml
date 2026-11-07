@@ -5,12 +5,12 @@ services:
       dockerfile: docker/Dockerfile
       target: demo
     environment:
-      POSTGRES_PASSWORD: fractalsql
+      POSTGRES_PASSWORD: ${FSQL_DEMO_PASSWORD:?set FSQL_DEMO_PASSWORD in .env (see .env.example)}
       POSTGRES_DB: fractalsql_demo
-      FSQL_REASONING_HTTP_TIMEOUT_MS: "330000"
-      FSQL_REASONING_HTTP_LOW_SPEED_SECS: "300"
+      FSQL_REASONING_HTTP_TIMEOUT_MS: "120000"
+      FSQL_REASONING_HTTP_LOW_SPEED_SECS: "60"
     ports:
-      - "15432:5432"
+      - "127.0.0.1:15432:5432"
     command: >
       postgres
       -c fractalsql.reasoning_plugin=/usr/lib/postgresql/18/lib/fractalsql-reasoning-http.so
@@ -28,7 +28,7 @@ services:
       retries: 10
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.9.0@sha256:2ea3b768a8f2dcd4d910f838d79702bb952089414dd578146619c0a939647ac6}   # pinned; override via OLLAMA_IMAGE_TAG (pin by @sha256 digest for production)
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -38,7 +38,7 @@ services:
       retries: 30
 
   pull-model:
-    image: ollama/ollama:latest
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.9.0@sha256:2ea3b768a8f2dcd4d910f838d79702bb952089414dd578146619c0a939647ac6}   # pinned; override via OLLAMA_IMAGE_TAG (pin by @sha256 digest for production)
     profiles: ["pull-model"]
     depends_on:
       ollama:
@@ -48,13 +48,13 @@ services:
     entrypoint: ["/bin/sh", "-c", "ollama pull gpt-oss:20b && ollama pull nomic-embed-text"]
 
   pgvector-init:
-    image: postgres:18-bookworm
+    image: postgres:18-bookworm@sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8
     profiles: ["pgvector"]
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      PGPASSWORD: fractalsql
+      PGPASSWORD: ${FSQL_DEMO_PASSWORD:?set FSQL_DEMO_PASSWORD in .env (see .env.example)}
     entrypoint:
       - /bin/sh
       - -c
@@ -82,7 +82,7 @@ services:
   # container env deliberately does NOT set FSQL_MCP_TRANSPORT -- stdio is
   # the server's default -- so both shapes work from one container.
   mcp:
-    image: gcc:13-bookworm
+    image: gcc:13-bookworm@sha256:20eec427045c47d0aad1bd28c81d435916c327cd992240aa78350f755d04d04a
     depends_on:
       postgres:
         condition: service_healthy
@@ -92,11 +92,11 @@ services:
       PGPORT: "5432"
       PGDATABASE: fractalsql_demo
       PGUSER: postgres
-      PGPASSWORD: fractalsql
+      PGPASSWORD: ${FSQL_DEMO_PASSWORD:?set FSQL_DEMO_PASSWORD in .env (see .env.example)}
       # Auth for the exposed HTTP transport (docs/docker-demo.md's
       # connect-an-MCP-client path). Change it for anything beyond a
       # toy; rotation is a restart (env-var form, per spec 10.3).
-      FSQL_MCP_AUTH_TOKEN: fractalsql-demo-token
+      FSQL_MCP_AUTH_TOKEN: ${FSQL_DEMO_TOKEN:?set FSQL_DEMO_TOKEN in .env (see .env.example)}
       # The server's own bind default is 127.0.0.1 (loopback only). Inside a
       # container the listener must reach the container's network namespace
       # for the published port to work, so the all-interfaces bind is
@@ -104,6 +104,8 @@ services:
       # the host's LOOPBACK, so the demo's MCP endpoint stays off the host's
       # network (the demo token is a toy either way).
       FSQL_MCP_HTTP_HOST: "0.0.0.0"
+      # The container binds every interface, but the published port below is loopback-only on the host.
+      FSQL_MCP_ALLOW_PLAINTEXT_NONLOOPBACK: "true"
     ports:
       # spec 9.1: 18765:8765 on the new mcp service (the optional
       # SSE/HTTP transport's demo exposure; stdio needs none). Published on

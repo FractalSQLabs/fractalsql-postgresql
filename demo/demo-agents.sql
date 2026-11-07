@@ -235,12 +235,17 @@ FROM fractal_agent_recommend_diverse(
 -- =============================================================================
 
 -- 9. fractal_agent_data_analyst (horizontal NL->SQL->reason).
--- Composes fractal_sql_agent (auto_execute=true: NL->SQL->run via SPI, with a
--- subtransaction that captures execution failures into result_json) then
--- fractal_reason over the result. generated_sql is the agent's real generated
--- statement; result_json is the real executed row count (or a captured
--- execution-failure reason); analysis is the real fractal_reason read. The
--- horizontal catch-all -- no vertical demo is wired to it.
+-- Composes fractal_sql_agent then fractal_reason over the result.
+-- auto_execute is the caller's EXPLICIT opt-in: the engine's own
+-- default is false, so without the trailing 'true' the statement is
+-- generated and validated but NOT run (result_json and analysis come back
+-- NULL, and the reason step is skipped -- there is no result to read).
+-- With auto_execute=true the run is the full NL->SQL->run-via-SPI path, with a
+-- subtransaction that captures execution failures into result_json.
+-- generated_sql is the agent's real generated statement; result_json is the
+-- real executed row count (or a captured execution-failure reason); analysis
+-- is the real fractal_reason read. The horizontal catch-all -- no vertical
+-- demo is wired to it.
 DROP TABLE IF EXISTS agents_demo_data;
 CREATE TABLE agents_demo_data (id int PRIMARY KEY, category text, amount float8);
 INSERT INTO agents_demo_data VALUES
@@ -252,7 +257,7 @@ INSERT INTO agents_demo_data VALUES
 SELECT analysis, generated_sql, result_json
 FROM fractal_agent_data_analyst(
     'total amount spent per category in agents_demo_data',
-    ARRAY['agents_demo_data'], 2);
+    ARRAY['agents_demo_data'], 2, '{}', true);
 
 -- 10. fractal_agent_patient_deterioration_triage (medtech).
 -- Composes a cohort-restricted hybrid search (fractal_hybrid_clinical_search)
