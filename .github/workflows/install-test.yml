@@ -108,7 +108,7 @@ jobs:
 
           # Start postgres without systemd. Debian's postgresql-common
           # package relocates postgresql.conf to /etc/postgresql/<ver>/main/
-          # (out of PGDATA) -- a bare `pg_ctl -D PGDATA start` can't find
+          # (out of PGDATA) -- a bare "pg_ctl -D PGDATA start" can't find
           # it ("could not access the server configuration file"). The
           # correct Debian tool for this split layout is pg_ctlcluster.
           su postgres -c "pg_ctlcluster \${PG_VER} main start"
@@ -229,11 +229,29 @@ jobs:
             # their own mocks/adversarial plugins -- don't fight that
             # here. Local-socket auth is peer, so these run via
             # su postgres -c same as everything else in this script.
+            # The evil-plugin test builds its own throwaway plugin, which has no
+            # .sig, and the host refuses an unsigned plugin by default. Opt out for
+            # that one test only, in the postmaster's environment (Debian reads
+            # /etc/postgresql/<ver>/main/environment at start), and restore the
+            # default afterwards. The shipped plugin's signature is already
+            # verified by the round-trip above.
+            ENVF="/etc/postgresql/\${PG_VER}/main/environment"
             for t in test_text_to_sql_schema_context.py test_scout.py \
                      test_text_to_sql_evil_nonterminating.py test_text_to_sql_fuzz.py; do
               echo "--- tests/\${t} ---"
-              su postgres -c "cd /work && FRACTALSQL_DSN='postgresql:///postgres' FRACTALSQL_REASONING_PLUGIN='\${PLUGIN}' python3 tests/\${t}" \
-                || { echo "FAIL: tests/\${t}"; exit 1; }
+              unsigned=0
+              if [ "\${t}" = "test_text_to_sql_evil_nonterminating.py" ]; then
+                unsigned=1
+                echo "FSQL_REASONING_REQUIRE_SIGNATURE = '0'" >> "\${ENVF}"
+                su postgres -c "pg_ctlcluster \${PG_VER} main restart"
+              fi
+              rc=0
+              su postgres -c "cd /work && FRACTALSQL_DSN='postgresql:///postgres' FRACTALSQL_REASONING_PLUGIN='\${PLUGIN}' python3 tests/\${t}" || rc=\$?
+              if [ "\${unsigned}" = 1 ]; then
+                sed -i '/^FSQL_REASONING_REQUIRE_SIGNATURE/d' "\${ENVF}"
+                su postgres -c "pg_ctlcluster \${PG_VER} main restart"
+              fi
+              [ "\${rc}" -eq 0 ] || { echo "FAIL: tests/\${t}"; exit 1; }
             done
           fi
           SCRIPT
