@@ -57,7 +57,7 @@ DFA's complement: localizes *where* a series' mean and/or variance shifted, inst
 **Signature**: `fractal_change_point_detect(series float8[], win int4, threshold float8 DEFAULT 2.0, max_points int4 DEFAULT 16) RETURNS int8[]`
 Sliding two-sample test over adjacent windows of `win` samples; flags a boundary when the mean differs by more than `threshold` pooled-standard-deviation units or the variance ratio exceeds `threshold` squared. Returns ascending boundary indices, up to `max_points`. Requires at least `2 * win` points.
 
-> **Engine note (`max_points` default).** The default is `16` here, and `16` in both MCP layers. The SQLite edition's *SQL-level* default is `64`, so a call that relies on the default can return up to four times as many boundary indices there. Pass `max_points` explicitly when the two engines must agree exactly.
+> **Note (`max_points` default).** The default is `16` at both the SQL and MCP layers, so a call made through either surface returns the same number of boundary indices. Pass `max_points` explicitly when a specific count matters.
 
 ### `fractal_periodogram`
 **Classical Periodogram**
@@ -95,7 +95,11 @@ SELECT fractal_change_point_detect(
 **Topological Persistence**
 Topological analysis over a point cloud's Vietoris-Rips filtration, capped at 512 points.
 
-**Signature**: `fractal_tda_persistence_diagram(points float8[], dim int4, max_dim int4 DEFAULT 1, max_thresh float8 DEFAULT 1.0, max_h0_bars int4 DEFAULT 64) RETURNS record`
+**Signature**: `fractal_tda_persistence_diagram(points float8[], dim int4, max_dim int4, max_thresh float8, max_h0_bars int4 DEFAULT 64) RETURNS record`
+
+`max_dim` and `max_thresh` are required: `max_dim` is `0` (the exact 0-dimensional bars only) or `1` (the bars plus the graph cycle-rank estimate), and `max_thresh` is the filtration threshold (> 0). A call that relied on the old defaults now passes them explicitly.
+
+The MCP tool publishes `max_dim` as optional with a default of `0` -- the exact H0 bars, with no graph cycle-rank estimate.
 **Return**: `h0_bars` (jsonb birth/death pairs) is an exact 0-dimensional persistence computation (single-linkage clustering). `betti1` (only computed when `max_dim = 1`) is the underlying graph's cycle rank, **not** full simplicial $H_1$: it over-counts true $H_1$ whenever a filled triangle exists in the data. A full simplicial computation (what Ripser/GUDHI do via boundary-matrix reduction) is out of scope.
 
 ### `fractal_state_fingerprint`
@@ -107,7 +111,8 @@ Random-hyperplane SimHash (Charikar 2002): projects a state vector onto `n_bits`
 `n_bits` must be between 1 and 33,554,424 (a 4 MiB fingerprint), and `n_bits` times the vector length must not exceed 268,435,456 (about a second of work); a larger value is an error.
 
 The fingerprint is `(n_bits + 7) / 8` bytes: the sign of each projection packed MSB-first.
-The `seed` default is `0.0` — the same default the SQLite edition uses, so a fingerprint computed here is comparable with one computed there. The seed selects the random hyperplanes: a different seed means a different (and therefore not comparable) fingerprint.
+The `n_bits` default is 128 bits, so a fingerprint is 16 bytes wide by default.
+The `seed` default is `0.0`, so a fingerprint computed with the default seed is comparable with one computed with an explicit seed of 0.0. The seed selects the random hyperplanes: a different seed means a different (and therefore not comparable) fingerprint.
 Two nearly-identical states collapse to the same or a very low Hamming-distance fingerprint, unlike an exact hash's all-or-nothing sensitivity to floating-point noise.
 
 ### `fractal_cycle_detect`

@@ -134,15 +134,15 @@ namespace fsqlmcp
             "top max_peaks bins, descending power. Catches network-beaconing/retry-cadence DFA alone misses.";
 
         t.push_back( ToolSpec{ "fractal_spectrogram_entropy", "analytics", ToolClass::Cheap,
-            { Vec("series", true, "Time-ordered series (n >= win)."),
-              Int("win", false, "Frame length, 8..512.", 64),
+            { Vec("series", true, "Time-ordered series (n >= window)."),
+              Int("window", false, "Frame length, 8..512.", 64),
               Int("hop", false, "Samples between frame starts, >= 1.", 32),
               Int("max_frames", false, "Max frames returned, 1..4096.", 4096) },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 auto call = pgSelectCall( "fractal_spectrogram_entropy", {
                     PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "series" ), "series" ) ),
-                    bindOrDefault( a, "win", "int4", "64" ), bindOrDefault( a, "hop", "int4", "32" ),
+                    bindOrDefault( a, "window", "int4", "64" ), bindOrDefault( a, "hop", "int4", "32" ),
                     bindOrDefault( a, "max_frames", "int4", "4096" ) }, false );
                 const auto r = db.callScalar( call.first, call.second );
                 if( !r ) return Json( nullptr );
@@ -158,33 +158,37 @@ namespace fsqlmcp
         // by decodeField), betti1 is int8.
         t.push_back( ToolSpec{ "fractal_tda_persistence_diagram", "analytics", ToolClass::Cheap,
             { Vec("points", true, "Point cloud (capped at 512 points)."), Int("dim", true, "Spatial dimension."),
-              Int("max_dim", false, "0 (H0 only) or 1 (H0 + Betti-1 graph-cycle-rank estimate).", 1),
-              Num("max_thresh", false, "Filtration threshold.", 1.0), Int("max_h0_bars", false, "Max H0 bars returned.", 64) },
+              Int("max_dim", false, "0 (H0 only) or 1 (H0 + Betti-1 graph-cycle-rank estimate).", 0),
+              Num("max_thresh", true, "Filtration threshold (> 0)."), Int("max_h0_bars", false, "Max H0 bars returned.", 64) },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
+                // max_dim and max_thresh are REQUIRED by the SQL function, so
+                // the adapter always binds them: max_dim takes the tool's own
+                // default of 0, max_thresh is required by the tool too.
                 auto call = pgSelectCall( "fractal_tda_persistence_diagram", {
                     PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "points" ), "points" ) ),
                     PgBind::s( "int4", a.at( "dim" ).dump() ),
-                    bindIf( a, "max_dim", "int4" ), bindIf( a, "max_thresh", "float8" ),
+                    bindOrDefault( a, "max_dim", "int4", "0" ),
+                    PgBind::s( "float8", a.at( "max_thresh" ).dump() ),
                     bindIf( a, "max_h0_bars", "int4" ) }, true );
                 auto row = db.callRow( call.first, call.second );
                 if( !row ) throw ToolError( ErrorClass::Engine, "fractal_tda_persistence_diagram returned no row" );
                 return *row;
             } } );
-        t.back().description = "Topological persistence over a point cloud's Vietoris-Rips filtration. Returns the "
-            "composite row {h0_bars, betti1} — betti1 is the underlying GRAPH's cycle rank (an integer), NOT full "
-            "simplicial H1 — over-counts when a filled triangle exists.";
+        t.back().description = "EXPERIMENTAL. Topological persistence over a point cloud's Vietoris-Rips filtration. "
+            "Returns the composite row {h0_bars, betti1} — betti1 is the underlying GRAPH's cycle rank (an integer), "
+            "NOT full simplicial H1 — over-counts when a filled triangle exists.";
 
         t.push_back( ToolSpec{ "fractal_state_fingerprint", "analytics", ToolClass::Cheap,
-            { Vec("vec", true, "State vector."), Int("n_bits", true, "SimHash bits."), Num("seed", false, "SimHash seed.", 0.0) },
+            { Vec("vector", true, "State vector."), Int("n_bits", false, "SimHash bits.", 128), Int("seed", false, "SimHash seed.", 0.0) },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
-                // "seed" is optional and defaults to 0.0, matching the SQL function.
+                // "seed" is optional and defaults to 0, matching the SQL function.
                 // The seed picks the random hyperplanes, so fingerprints are only
                 // comparable when computed with the same seed.
                 auto call = pgSelectCall( "fractal_state_fingerprint", {
-                    PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "vec" ), "vec" ) ),
-                    PgBind::s( "int4", a.at( "n_bits" ).dump() ),
+                    PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "vector" ), "vector" ) ),
+                    bindOrDefault( a, "n_bits", "int4", "128" ),
                     bindOrDefault( a, "seed", "float8", "0.0" ) }, false );
                 const auto r = db.callScalar( call.first, call.second );
                 if( !r ) return Json( nullptr );
@@ -236,11 +240,11 @@ namespace fsqlmcp
             "representation. For 0 < p < 1 this is NOT a proper metric — never substitute silently for cosine/L2.";
 
         t.push_back( ToolSpec{ "fractal_vector_quantize_int8", "analytics", ToolClass::Cheap,
-            { Vec("v", true, "Vector to quantize.") }, std::nullopt, false, true,
+            { Vec("vector", true, "Vector to quantize.") }, std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 const std::string sql = "SELECT * FROM fractal_vector_quantize_int8("
                     "fractal_vector_from_float8_array($1::float8[]))";
-                auto row = db.callRow( sql, { pgFloat8ArrayLiteral( vectors::vectorParamToText( a.at( "v" ), "v" ) ) } );
+                auto row = db.callRow( sql, { pgFloat8ArrayLiteral( vectors::vectorParamToText( a.at( "vector" ), "vector" ) ) } );
                 if( !row ) throw ToolError( ErrorClass::Engine, "fractal_vector_quantize_int8 returned no row" );
                 Json out = *row;
                 if( out.is_object() && out.contains( "codes" ) && out[ "codes" ].is_string() )
@@ -248,14 +252,14 @@ namespace fsqlmcp
                 return out;   // {codes: hex, scale: float}
             } } );
         t.back().description = "Symmetric int8 quantization of one vector — 4x compression. Returns "
-            "{codes: hex, scale}; dequantize via v[i] ~= codes[i]*scale.";
+            "{codes: hex, scale}; dequantize via vector[i] ~= codes[i]*scale.";
 
         t.push_back( ToolSpec{ "fractal_vector_quantize_binary", "analytics", ToolClass::Cheap,
-            { Vec("v", true, "Vector to quantize.") }, std::nullopt, false, true,
+            { Vec("vector", true, "Vector to quantize.") }, std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 const std::string sql = "SELECT fractal_vector_quantize_binary("
                     "fractal_vector_from_float8_array($1::float8[]))";
-                const auto r = db.callScalar( sql, { pgFloat8ArrayLiteral( vectors::vectorParamToText( a.at( "v" ), "v" ) ) } );
+                const auto r = db.callScalar( sql, { pgFloat8ArrayLiteral( vectors::vectorParamToText( a.at( "vector" ), "vector" ) ) } );
                 if( !r ) return Json( nullptr );
                 return Json( vectors::byteaTextToHex( *r ) );
             } } );
@@ -326,10 +330,10 @@ namespace fsqlmcp
             "number. Returns {dimension, lacunarity} (jsonb).";
 
         // Postgres folds use_obl/diffusion_mode into trailing optionals; seed int8 DEFAULT NULL
-        // (NOT a required seed like SQLite — do not require it here).
+        // (the seed is not required here).
         t.push_back( ToolSpec{ "fractal_optimize_portfolio", "analytics", ToolClass::Cheap,
             { Vec("mu", true, "Expected returns."), Vec("cov", true, "Flattened 1-D row-major n x n covariance."),
-              Int("k", true, "Max nonzero assets."), NullableNum("seed", "RNG seed."),
+              Int("k", true, "Max nonzero assets."), Int("seed", false, "RNG seed."),
               Bool_("use_obl", false, "Opposition-Based Learning per SFS trial (off by default; doubles the affected step's cost).", false),
               StrEnum("diffusion_mode", false, "'gaussian' or 'levy' (heavy-tailed, can escape local optima).", "gaussian") },
             std::nullopt, false, true,
@@ -347,7 +351,7 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_optimize_portfolio_multimodal", "analytics", ToolClass::Cheap,
             { Vec("mu", true, "Expected returns."), Vec("cov", true, "Flattened covariance."), Int("k", true, "Max nonzero assets."),
               Int("n_restarts", false, "Independent restarts.", 8), Num("overlap_threshold", false, "Asset-overlap threshold.", 0.15),
-              Num("quality_frac", false, "Quality fraction gate.", 0.90), NullableNum("seed", "RNG seed."),
+              Num("quality_frac", false, "Quality fraction gate.", 0.90), Int("seed", false, "RNG seed."),
               Bool_("use_obl", false, "Requires an enterprise core build with OBL support.", false),
               StrEnum("diffusion_mode", false, "'gaussian' or 'levy'.", "gaussian") },
             std::nullopt, false, true,
@@ -365,7 +369,7 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_optimize_portfolio_multimodal_pareto", "analytics", ToolClass::Cheap,
             { Vec("mu", true, "Expected returns."), Vec("cov", true, "Flattened covariance."), Int("k", true, "Max nonzero assets."),
               Int("n_restarts", false, "Independent restarts.", 8), Int("max_front", false, "Pareto-front cap (1<=max_front<=n_restarts).", 8),
-              NullableNum("seed", "RNG seed."), Bool_("use_obl", false, "OBL per trial.", false),
+              Int("seed", false, "RNG seed."), Bool_("use_obl", false, "OBL per trial.", false),
               StrEnum("diffusion_mode", false, "'gaussian' or 'levy'.", "gaussian") },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) { return scalarJson( db, "fractal_optimize_portfolio_multimodal_pareto", {
@@ -383,7 +387,7 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_optimize_subset", "analytics", ToolClass::Cheap,
             { Vec("item_values", true, "Per-item scores."), Vec("upper_bounds", true, "Per-item weight cap, each in [0,1]."),
               Int("k", true, "Max nonzero items."), Vec("prev_weights", false, "Previous weights (enables turnover_penalty)."),
-              Num("turnover_penalty", false, "Only meaningful with prev_weights set.", 0.0), NullableNum("seed", "RNG seed.") },
+              Num("turnover_penalty", false, "Only meaningful with prev_weights set.", 0.0), Int("seed", false, "RNG seed.") },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) { return scalarJson( db, "fractal_optimize_subset", {
                 PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "item_values" ), "item_values" ) ),

@@ -236,6 +236,12 @@
 #                      Bearer-token check. Standalone (no cluster);
 #                      live-DB leg self-skips without PG* env. Skips
 #                      without openssl/python3/make+g++/pkg-config.
+#   51  mcp_faults     FAULT ONLY (--fault, Linux, not under a sanitizer): the MCP
+#                      server under tests/oom_preload.c with one allocation, file
+#                      call or socket call failing inside each tool call; the server
+#                      may answer any way it likes, but it must still be running and
+#                      answering afterwards. Skips without python3/make+g++/pkg-config
+#                      libpq+openssl. Not in DEFAULT, not in CI.                 ~7m
 #   52  mcp_conformance  the conformance driver (mcp/tests/          ~30s
 #                      mcp_conformance.py): one driver that starts
 #                      the server the way each kind of client starts
@@ -254,7 +260,14 @@
 #   DEFAULT = 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23  pre-push / CI (one major)
 #             24 25 26 27 28 29 30 31 32 33 38 39 40 41 42 43 44 45 46 47 48 50 52
 #   FUZZ    = 21 49                                    --fuzz, not part of DEFAULT (adds real wall-time)
-#   MCP     = 01 33 38 40 41 42 50 51 52               --gate mcp: the MCP server gates only
+#   MCP     = 01 33 38 40 41 42 50 52                  --gate mcp: the MCP server gates only
+#                                                       (with --fault, gate 51 joins it)
+#   FAULT   = 51                                       --fault runs DEFAULT, then ADDS gate 51 after it
+#                                                       (51 injects one allocation, file or socket failure inside
+#                                                       each MCP tool call; Linux only, and it skips under a
+#                                                       sanitizer -- the fault shim and the sanitizer runtime cannot
+#                                                       both interpose the allocator. Deliberately NOT in DEFAULT and
+#                                                       not in CI: --fault is a local, on-demand run.)
 #
 # Cross-version: pass --cross to run DEFAULT against every installed
 # major in 14..18 (skips majors whose server binaries are absent). This
@@ -265,13 +278,20 @@
 #   ./build_test.sh --quick
 #   ./build_test.sh --pg 15
 #   ./build_test.sh --cross
+#   ./build_test.sh --profile       # Linux: valgrind memcheck over the extension (a postmaster under valgrind, the demo
+#                                   # kits through psql) and the MCP server's probes and running server; tests/valgrind_run.sh.
+#                                   # Fails on a memcheck error or definite/indirect leak with a frame in our code (palloc
+#                                   # memory is invisible to valgrind). Not in any gate set.
 #   ./build_test.sh --fuzz          # gates 21 and 49 -- libFuzzer smoke, no cluster
+#   ./build_test.sh --fault         # DEFAULT, then gate 51 -- the MCP server under injected allocation, file
+#                                   # and socket failures (Linux only; a local run, not part of CI)
 #   ./build_test.sh --gate 04
 #   ./build_test.sh --gate mcp      # only the MCP server gates (add --asan/--ubsan/--tsan)
 #   ./build_test.sh --gate mcp --tsan   # MCP server under ThreadSanitizer (it alone:
 #                                    # the extension runs inside postgres and stays plain)
 #   ./build_test.sh --list
-#   ./build_test.sh --coverage      # gcov-instrumented build; DEFAULT
+#   ./build_test.sh --coverage      # gcov-instrumented build; the report must reach FSQL_COV_MIN (default 80)%
+#                                   # lines, functions and branches; DEFAULT
 #                                    # gates; lcov/genhtml report after
 #
 # --coverage notes:
@@ -368,10 +388,16 @@ fsql_pg_dlsuffix() {
   return 0
 }
 
-DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 33 38 39 40 41 42 43 44 45 46 47 48 50 52 53)
+DEFAULT_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 33 38 39 40 41 42 43 44 45 46 47 48 50 52 53 54 55)
 QUICK_GATES=(01 02)
 FUZZ_GATES=(21 49)
-MCP_GATES=(01 33 38 40 41 42 50 51 52)
+MCP_GATES=(01 33 38 40 41 42 50 52)
+# The fault gates. A fault gate injects an allocation, file or socket failure and proves the
+# server survives it, so it needs a fault shim (Linux only) and cannot run under a sanitizer
+# (the shim and the sanitizer runtime cannot both interpose the allocator). They are
+# deliberately NOT in DEFAULT_GATES and not in CI: --fault is a local, on-demand run.
+FAULT_GATES=(51)
+MCP_FAULT_GATES=(51)   # the fault gates that are also MCP server gates (--gate mcp --fault)
 
 PG_MAJOR="${PG_MAJOR:-16}"
 MODE="default"
@@ -412,18 +438,25 @@ while [[ $# -gt 0 ]]; do
     --quick)   MODE="quick" ;;
     --cross)   MODE="cross" ;;
     --fuzz)    MODE="fuzz" ;;
+    --fault)   MODE="fault" ;;
     --pg)      PG_MAJOR="$2"; shift ;;
     --gate)    ONE_GATE="$2"; shift ;;
     --coverage) COVERAGE=1 ;;
+    --profile)  exec "$HERE/tests/valgrind_run.sh" ;;
     --asan)    ASAN=1 ;;
     --ubsan)   UBSAN=1 ;;
     --tsan)    TSAN=1 ;;
-    --list)    printf "gates: %s\nfuzz gates: %s\nmcp gates: %s\n" "${DEFAULT_GATES[*]}" "${FUZZ_GATES[*]}" "${MCP_GATES[*]}"; exit 0 ;;
+    --list)    printf "gates: %s\nfuzz gates: %s\nmcp gates: %s\nfault gates: %s\n" "${DEFAULT_GATES[*]}" "${FUZZ_GATES[*]}" "${MCP_GATES[*]}" "${FAULT_GATES[*]}"; exit 0 ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
 done
+
+# The coverage floor (lines, functions and branches each at or above FSQL_COV_MIN, default 80) applies to the full measurement: --coverage
+# over the default gate set. A run restricted to one gate, or to --quick/--fuzz, only reports.
+COV_FULL=0
+if [[ "$COVERAGE" -eq 1 && -z "$ONE_GATE" && "$MODE" == "default" ]]; then COV_FULL=1; fi
 
 if [[ "$TSAN" -eq 1 && "$ASAN" -eq 1 ]]; then
   echo "--tsan cannot be combined with --asan (their runtimes cannot share a binary)" >&2
@@ -902,6 +935,19 @@ run_coverage_report() {
       print ""
     }' "$TMPROOT/fractalsql_bt_coverage.info"
 
+  if [[ "${COV_FULL:-0}" -eq 1 ]]; then
+    local floor="${FSQL_COV_MIN:-80}" pct name v i=0
+    pct="$(awk -F: '
+      /^LF:/ { lf += $2 } /^LH:/ { lh += $2 } /^FNF:/ { fnf += $2 } /^FNH:/ { fnh += $2 }
+      /^BRDA:/ { split($2, p, ","); if (substr(p[2], 1, 1) != "e") { brf++; if (p[4] != "-" && p[4]+0 > 0) brh++ } }
+      END { printf "%.1f %.1f %.1f", (lf ? 100*lh/lf : 100), (fnf ? 100*fnh/fnf : 100), (brf ? 100*brh/brf : 100) }' "$TMPROOT/fractalsql_bt_coverage.info")"
+    for name in lines functions branches; do
+      i=$((i + 1)); v="$(printf '%s' "$pct" | cut -d' ' -f$i)"
+      if awk -v v="$v" -v t="$floor" 'BEGIN { exit !(v + 0 >= t + 0) }'; then pass "coverage: $name $v% (floor $floor%)"
+      else fail "coverage: $name $v% is below the $floor% floor"; fi
+    done
+  fi
+
   # no_exception_branch=1 is applied to genhtml ONLY: see the IMPORTANT
   # note in the mcp/ capture section below (passing it to lcov
   # --capture/--extract instead zeroes BRF/BRH entirely for this
@@ -1228,7 +1274,7 @@ gate_01_build() {
 
 gate_02_smoke() {
   local ver; ver=$("${PSQL[@]}" -c "SELECT fractal_version();" 2>&1)
-  [[ "$ver" = "2.0.21" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.21)"
+  [[ "$ver" = "2.0.22" ]] && pass "02 smoke: version=$ver" || fail "02 smoke: version='$ver' (want 2.0.22)"
   # fractal_search convergence: cosine similarity to query ~1
   local r; r=$("${PSQL[@]}" -c "
      WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
@@ -1498,16 +1544,16 @@ gate_09_guc_superuser() {
     && pass "09 guc_superuser: the boundary is per-key -- a non-superuser still reads a non-superuser-only key" \
     || fail "09 guc_superuser: expected text_to_sql_max_attempts to stay readable, got: $rRead2"
 
-  # ---- T-G: the typed config surface (fractalsql_set_config() /
-  # fractalsql_get_config(), src/fractalsql.c's fsql_cfg_keys[] table).
+  # ---- T-G: the typed config surface (fractal_config_set() /
+  # fractal_config_get(), src/fractalsql.c's fsql_cfg_keys[] table).
   # This is the SQL-callable wrapper over the fractalsql.* GUCs, and
   # it is what promises typed validation, a per-key privilege boundary,
   # a scope boundary, and an error naming the known keys.
-  local rG; rG=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('nope');" 2>&1)
+  local rG; rG=$("${PSQL[@]}" -c "SELECT fractal_config_get('nope');" 2>&1)
   grep -q 'unknown config key "nope"' <<< "$rG" && grep -q "Known keys:" <<< "$rG" \
     && pass "09 cfg: an unknown key is an error that lists the known keys (get)" \
     || fail "09 cfg: expected an unknown-key error naming the known keys, got: $rG"
-  local rG2; rG2=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('nope','x');" 2>&1)
+  local rG2; rG2=$("${PSQL[@]}" -c "SELECT fractal_config_set('nope','x');" 2>&1)
   grep -q 'unknown config key "nope"' <<< "$rG2" \
     && pass "09 cfg: an unknown key is an error, never a silent no-op (set)" \
     || fail "09 cfg: expected an unknown-key error, got: $rG2"
@@ -1517,13 +1563,13 @@ gate_09_guc_superuser() {
   # bare form used to be matched case-SENSITIVELY (fsql_cfg_lookup()
   # folded only the prefixed spelling), which contradicted both the
   # function's own contract and the SQL COMMENT on the two functions.
-  local rG3; rG3=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('text_to_sql_max_attempts');" 2>&1)
-  local rG4; rG4=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('fractalsql.text_to_sql_max_attempts');" 2>&1)
+  local rG3; rG3=$("${PSQL[@]}" -c "SELECT fractal_config_get('text_to_sql_max_attempts');" 2>&1)
+  local rG4; rG4=$("${PSQL[@]}" -c "SELECT fractal_config_get('fractalsql.text_to_sql_max_attempts');" 2>&1)
   [[ "$rG3" = "$rG4" ]] && grep -qE '^[0-9]+$' <<< "$rG3" \
     && pass "09 cfg: the bare key and the GUC spelling return the same value" \
     || fail "09 cfg: expected the two spellings to agree, got bare='$rG3' prefixed='$rG4'"
-  local rG5; rG5=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('TEXT_TO_SQL_MAX_ATTEMPTS');" 2>&1)
-  local rG6; rG6=$("${PSQL[@]}" -c "SELECT fractalsql_get_config('FRACTALSQL.text_to_sql_max_attempts');" 2>&1)
+  local rG5; rG5=$("${PSQL[@]}" -c "SELECT fractal_config_get('TEXT_TO_SQL_MAX_ATTEMPTS');" 2>&1)
+  local rG6; rG6=$("${PSQL[@]}" -c "SELECT fractal_config_get('FRACTALSQL.text_to_sql_max_attempts');" 2>&1)
   [[ "$rG5" = "$rG3" && "$rG6" = "$rG3" ]] \
     && pass "09 cfg: both key spellings are matched case-insensitively" \
     || fail "09 cfg: expected case-insensitive matching, got bare-upper='$rG5' prefixed-upper='$rG6' (expected '$rG3')"
@@ -1532,11 +1578,11 @@ gate_09_guc_superuser() {
   # own value -- current_setting() has to agree with it in the SAME
   # session (the write is session-scoped, so a separate connection would
   # read a fresh backend's untouched default).
-  local rG7; rG7=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('agent_partial_reasoning_fail','yes') || '=' || fractalsql_get_config('agent_partial_reasoning_fail') || '=' || current_setting('fractalsql.agent_partial_reasoning_fail');" 2>&1)
+  local rG7; rG7=$("${PSQL[@]}" -c "SELECT fractal_config_set('agent_partial_reasoning_fail','yes') || '=' || fractal_config_get('agent_partial_reasoning_fail') || '=' || current_setting('fractalsql.agent_partial_reasoning_fail');" 2>&1)
   [[ "$rG7" = "on=on=on" ]] \
     && pass "09 cfg: a bool key canonicalizes 'yes' to 'on' and the value lands in the GUC itself" \
     || fail "09 cfg: expected on=on=on, got: $rG7"
-  local rG8; rG8=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('agent_partial_reasoning_fail','tru');" 2>&1)
+  local rG8; rG8=$("${PSQL[@]}" -c "SELECT fractal_config_set('agent_partial_reasoning_fail','tru');" 2>&1)
   grep -q "expects a boolean" <<< "$rG8" && grep -q "Accepted spellings" <<< "$rG8" \
     && pass "09 cfg: a bool key rejects an unrecognised spelling and names the accepted ones" \
     || fail "09 cfg: expected a boolean rejection, got: $rG8"
@@ -1544,19 +1590,19 @@ gate_09_guc_superuser() {
   # Typed validation: int, enum, and the documented order -- the VALUE is
   # validated before the privilege and scope checks, so a bad value is
   # reported as a bad value even for a key a session may not change.
-  local rG9; rG9=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('http_num_ctx','notanint');" 2>&1)
+  local rG9; rG9=$("${PSQL[@]}" -c "SELECT fractal_config_set('http_num_ctx','notanint');" 2>&1)
   grep -q "expects an integer" <<< "$rG9" \
     && pass "09 cfg: an int key rejects a non-integer" \
     || fail "09 cfg: expected an integer rejection, got: $rG9"
-  local rG10; rG10=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('http_num_ctx','1048577');" 2>&1)
+  local rG10; rG10=$("${PSQL[@]}" -c "SELECT fractal_config_set('http_num_ctx','1048577');" 2>&1)
   grep -q "must be between 0 and 1048576" <<< "$rG10" \
     && pass "09 cfg: an int key rejects a value outside its range" \
     || fail "09 cfg: expected a range rejection, got: $rG10"
-  local rG11; rG11=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('text_to_sql_allowed_statements','drop');" 2>&1)
+  local rG11; rG11=$("${PSQL[@]}" -c "SELECT fractal_config_set('text_to_sql_allowed_statements','drop');" 2>&1)
   grep -q "must be one of: select|select_insert_update" <<< "$rG11" \
     && pass "09 cfg: an enum key rejects a value outside its member list" \
     || fail "09 cfg: expected an enum rejection, got: $rG11"
-  local rG12; rG12=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('text_to_sql_max_attempts','99');" 2>&1)
+  local rG12; rG12=$("${PSQL[@]}" -c "SELECT fractal_config_set('text_to_sql_max_attempts','99');" 2>&1)
   grep -q "must be between 1 and 10" <<< "$rG12" \
     && pass "09 cfg: an invalid value is reported BEFORE the scope check (text_to_sql_max_attempts is reload-scoped)" \
     || fail "09 cfg: expected the value error to win over the scope error, got: $rG12"
@@ -1564,47 +1610,47 @@ gate_09_guc_superuser() {
   # The scope boundary: a reload-scoped (PGC_SIGHUP) key cannot be changed
   # in a session, and the error names the ALTER SYSTEM + pg_reload_conf()
   # path instead of silently doing nothing.
-  local rG13; rG13=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('text_to_sql_max_attempts','3');" 2>&1)
+  local rG13; rG13=$("${PSQL[@]}" -c "SELECT fractal_config_set('text_to_sql_max_attempts','3');" 2>&1)
   grep -q "is reload-scoped and cannot be changed in a session" <<< "$rG13" \
     && grep -q "ALTER SYSTEM SET" <<< "$rG13" && grep -q "pg_reload_conf" <<< "$rG13" \
     && pass "09 cfg: a reload-scoped key refuses a session change and names the ALTER SYSTEM + pg_reload_conf path" \
     || fail "09 cfg: expected the reload-scoped refusal with the ALTER SYSTEM hint, got: $rG13"
   # ... while a session-settable key (PGC_USERSET / PGC_SUSET) IS writable
   # in a session, and the canonical value comes back.
-  local rG14; rG14=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('enterprise_ledger_key','cfgtest');" 2>&1)
+  local rG14; rG14=$("${PSQL[@]}" -c "SELECT fractal_config_set('enterprise_ledger_key','cfgtest');" 2>&1)
   [[ "$rG14" = "cfgtest" ]] \
     && pass "09 cfg: a session-settable key (enterprise_ledger_key) is writable in a session" \
     || fail "09 cfg: expected the value to be accepted, got: $rG14"
 
   # NULL arguments are argument faults, not "unset".
-  local rG15; rG15=$("${PSQL[@]}" -c "SELECT fractalsql_set_config(NULL,'x');" 2>&1)
+  local rG15; rG15=$("${PSQL[@]}" -c "SELECT fractal_config_set(NULL,'x');" 2>&1)
   grep -q "the key must not be NULL" <<< "$rG15" \
     && pass "09 cfg: set rejects a NULL key" \
     || fail "09 cfg: expected the NULL-key rejection, got: $rG15"
-  local rG16; rG16=$("${PSQL[@]}" -c "SELECT fractalsql_set_config('text_to_sql_max_attempts',NULL);" 2>&1)
+  local rG16; rG16=$("${PSQL[@]}" -c "SELECT fractal_config_set('text_to_sql_max_attempts',NULL);" 2>&1)
   grep -q "the value must not be NULL" <<< "$rG16" \
     && pass "09 cfg: set rejects a NULL value" \
     || fail "09 cfg: expected the NULL-value rejection, got: $rG16"
-  local rG17; rG17=$("${PSQL[@]}" -c "SELECT fractalsql_get_config(NULL);" 2>&1)
+  local rG17; rG17=$("${PSQL[@]}" -c "SELECT fractal_config_get(NULL);" 2>&1)
   grep -q "the key must not be NULL" <<< "$rG17" \
     && pass "09 cfg: get rejects a NULL key" \
     || fail "09 cfg: expected the NULL-key rejection, got: $rG17"
 
   # The config API enforces the SAME per-key privilege boundary the GUCs
   # carry -- and, like the GUCs, it is per-key, not blanket.
-  local rL1; rL1=$("${lowpriv_psql[@]}" -c "SELECT fractalsql_set_config('http_url','http://x');" 2>&1)
+  local rL1; rL1=$("${lowpriv_psql[@]}" -c "SELECT fractal_config_set('http_url','http://x');" 2>&1)
   grep -q "is a superuser-only setting" <<< "$rL1" \
     && pass "09 cfg: a non-superuser cannot SET a superuser-only key through the config API" \
     || fail "09 cfg: expected the superuser-only rejection, got: $rL1"
-  local rL2; rL2=$("${lowpriv_psql[@]}" -c "SELECT fractalsql_get_config('http_url');" 2>&1)
+  local rL2; rL2=$("${lowpriv_psql[@]}" -c "SELECT fractal_config_get('http_url');" 2>&1)
   grep -q "is a superuser-only setting" <<< "$rL2" \
     && pass "09 cfg: a non-superuser cannot READ a superuser-only key through the config API" \
     || fail "09 cfg: expected the superuser-only rejection, got: $rL2"
-  local rL3; rL3=$("${lowpriv_psql[@]}" -c "SELECT fractalsql_get_config('text_to_sql_max_attempts');" 2>&1)
+  local rL3; rL3=$("${lowpriv_psql[@]}" -c "SELECT fractal_config_get('text_to_sql_max_attempts');" 2>&1)
   grep -qE '^[0-9]+$' <<< "$rL3" \
     && pass "09 cfg: the config API's privilege boundary is per-key -- a non-superuser still reads a non-superuser-only key" \
     || fail "09 cfg: expected text_to_sql_max_attempts to stay readable, got: $rL3"
-  local rL4; rL4=$("${lowpriv_psql[@]}" -c "SELECT fractalsql_set_config('agent_partial_reasoning_fail','on');" 2>&1)
+  local rL4; rL4=$("${lowpriv_psql[@]}" -c "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" 2>&1)
   [[ "$rL4" = "on" ]] \
     && pass "09 cfg: a non-superuser may set a non-superuser-only, session-settable key" \
     || fail "09 cfg: expected the set to be accepted, got: $rL4"
@@ -3008,19 +3054,19 @@ gate_22_v2_functions() {
   # tda_persistence_diagram: dim=0; point count not a multiple of dim; a
   # too-few-points (n_points=1) instance rejected by the core (the "2 <=
   # n_points <= 512" bound); max_dim outside {0,1}.
-  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0]::float8[], 0);" 2>&1)
+  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0]::float8[], 0, 1, 1.0);" 2>&1)
   grep <<< "$r" -q "dim must be > 0" \
     && pass "22 rejection: tda_persistence_diagram rejects dim<=0" \
     || fail "22 rejection: expected a dim<=0 rejection, got: $r"
-  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,1.0]::float8[], 3);" 2>&1)
+  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,1.0]::float8[], 3, 1, 1.0);" 2>&1)
   grep <<< "$r" -q "points length (2) must be a multiple of dim (3)" \
     && pass "22 rejection: tda_persistence_diagram rejects a point list that is not a multiple of dim" \
     || fail "22 rejection: expected a points-length rejection, got: $r"
-  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0]::float8[], 2);" 2>&1)
+  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0]::float8[], 2, 1, 1.0);" 2>&1)
   grep <<< "$r" -q "2 <= n_points" \
     && pass "22 rejection: tda_persistence_diagram rejects a single-point cloud (n_points >= 2)" \
     || fail "22 rejection: expected a too-few-points rejection, got: $r"
-  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0,2.0,2.0]::float8[], 2, 2);" 2>&1)
+  r=$("${PSQL[@]}" -c "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0,2.0,2.0]::float8[], 2, 2, 1.0);" 2>&1)
   grep <<< "$r" -q "max_dim in {0,1}" \
     && pass "22 rejection: tda_persistence_diagram rejects max_dim=2 (core supports only {0,1})" \
     || fail "22 rejection: expected a max_dim rejection, got: $r"
@@ -4270,7 +4316,7 @@ gate_52_mcp_conformance() {
   MCPC_GATE=52 \
   MCPC_LOCK_DIR="$HERE/mcp" \
   MCPC_PASSTHROUGH_ENV="PGHOST,PGPORT,PGUSER,PGPASSWORD,PGDATABASE,PGSSLMODE" \
-  MCPC_READ_TOOL="fractalsql_get_version" \
+  MCPC_READ_TOOL="fractal_version" \
   MCPC_READ_ARGS='{}' \
   MCPC_STATE_TOOL="fractal_diversify_enable" \
   MCPC_STATE_ARGS='{}' \
@@ -4515,9 +4561,9 @@ cp null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_ch
 periodogram short	E:fractalsql: fractal_periodogram rc=-1 (need n >= 4)	SELECT * FROM fractal_periodogram(ARRAY[1,2,3]::float8[],4)
 periodogram peaks 0	E:fractalsql: max_peaks must be > 0	SELECT * FROM fractal_periodogram(ARRAY[1,2,3,4,5,6,7,8]::float8[],0)
 periodogram null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_periodogram(ARRAY[1,NULL,3,4,5]::float8[],4)
-tda dim 0	E:fractalsql: dim must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],0)
-tda ragged	E:fractalsql: points length (3) must be a multiple of dim (2)	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3]::float8[],2)
-tda max_dim	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,-1)
+tda dim 0	E:fractalsql: dim must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],0,1,1.0)
+tda ragged	E:fractalsql: points length (3) must be a multiple of dim (2)	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3]::float8[],2,1,1.0)
+tda max_dim	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,-1,1.0)
 tda thresh	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,1,-1.0)
 tda bars	E:fractalsql: max_h0_bars must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,1,1.0,0)
 drift win	E:fractalsql: window must be > 0	SELECT fractal_dimension_drift(ARRAY[1,2,3,4]::float8[],0)
@@ -4627,6 +4673,17 @@ explore bad col	E:column "nope" does not exist	SELECT * FROM fractal_search_expl
 explore no table	E:relation "bt_nope" does not exist	SELECT * FROM fractal_search_explore('bt_nope','emb',ARRAY[1,2]::float8[])
 explore bad opts	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[1,2]::float8[],'[1]'::jsonb)
 explore pop	E:fractalsql: population_size 0 out of range [2, 10000]	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[1,2]::float8[],'{"population_size":0}')
+explore empty query	E:	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[]::float8[])
+explore huge pop dim	E:	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY(SELECT 0.1 FROM generate_series(1,30000))::float8[],'{"population_size":10000}')
+explore null opts	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],NULL)
+explore opts num	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"iterations":2,"population_size":4,"walk":0.5}')
+reason null ctx	NONE	SELECT fractal_reason('hello', NULL)
+reason cfg all	NONE	SELECT fractal_config_set('http_token','tok'), fractal_config_set('http_model','mdl'), fractal_config_set('http_url','http://127.0.0.1:1/v1'), fractal_reason('hello')
+embed cfg all	NONE	SELECT fractal_config_set('http_token','tok'), fractal_config_set('http_embed_model','emb-m'), fractal_config_set('http_embed_url','http://127.0.0.1:1/v1/embeddings'), fractal_embed('hello')
+t2s cfg all	NONE	SELECT fractal_config_set('http_token','tok'), fractal_config_set('http_model','mdl'), fractal_config_set('http_url','http://127.0.0.1:1/v1'), fractal_text_to_sql('list the tables')
+sql agent nulls	NONE	SELECT fractal_sql_agent('count rows', NULL, NULL, NULL)
+sql agent cfg	NONE	SELECT fractal_config_set('http_token','tok'), fractal_config_set('http_model','mdl'), fractal_sql_agent('count rows', NULL, 1, true)
+search agent nulls	NONE	SELECT fractal_search_agent('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'q',NULL,NULL)
 explore ok	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"iterations":3,"population_size":5}')
 explore str opt	OK	SELECT * FROM fractal_search_explore('bt_g44','emb',ARRAY[0.1,0.2]::float8[],'{"iterations":"x"}')
 search iter 0	E:fractalsql: iterations 0 out of range [1, 10000]	SELECT fractal_search(ARRAY[1,2]::float8[],0)
@@ -4654,19 +4711,19 @@ schema empty arr	E:fractal_schema_context: no visible tables found	SELECT fracta
 schema null elem	E:fractal_schema_context: no visible tables found	SELECT fractal_schema_context(ARRAY[NULL]::text[])
 schema hint	OK	SELECT length(fractal_schema_context(ARRAY['bt_g44'],'embedding'))>0
 t2s null tables elem	E:fractal_schema_context: no visible tables found	SELECT fractal_text_to_sql('q',ARRAY[NULL]::text[])
-getcfg unknown	E:fractalsql_get_config: unknown config key "nope"	SELECT fractalsql_get_config('nope')
-getcfg secret	OK	SELECT fractalsql_get_config('enterprise_ledger_key')
-getcfg prefixed	OK	SELECT fractalsql_get_config('fractalsql.http_url')
-getcfg null	E:fractalsql_get_config: the key must not be NULL	SELECT fractalsql_get_config(NULL)
-getcfg all keys	OK	SELECT k,fractalsql_get_config(k) FROM unnest(ARRAY['reasoning_plugin','http_url','http_model','http_allow_plaintext','http_embed_url','http_embed_model','http_think','http_think_provider','http_native_url','http_num_ctx','text_to_sql_max_attempts','text_to_sql_allowed_statements','text_to_sql_use_review','enterprise_lib','enterprise_require_signature','agent_partial_reasoning_fail']) k
-setcfg unknown	E:fractalsql_set_config: unknown config key "nope"	SELECT fractalsql_set_config('nope','x')
-setcfg null val	E:fractalsql_set_config: the value must not be NULL	SELECT fractalsql_set_config('agent_partial_reasoning_fail',NULL)
-setcfg bad bool	E:fractalsql_set_config: "agent_partial_reasoning_fail" expects a boolea	SELECT fractalsql_set_config('agent_partial_reasoning_fail','maybe')
-setcfg ok	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','on')
-setcfg reload	E:fractalsql_set_config: "fractalsql.http_url" is reload-scoped and cann	SELECT fractalsql_set_config('http_url','http://x')
-setcfg secret	NONE	SELECT fractalsql_set_config('enterprise_ledger_key','abc')
-setcfg max_attempts bad	E:fractalsql_set_config: "text_to_sql_max_attempts" expects an integer	SELECT fractalsql_set_config('text_to_sql_max_attempts','abc')
-setcfg prefixed	OK	SELECT fractalsql_set_config('fractalsql.agent_partial_reasoning_fail','off')
+getcfg unknown	E:fractal_config_get: unknown config key "nope"	SELECT fractal_config_get('nope')
+getcfg secret	OK	SELECT fractal_config_get('enterprise_ledger_key')
+getcfg prefixed	OK	SELECT fractal_config_get('fractalsql.http_url')
+getcfg null	E:fractal_config_get: the key must not be NULL	SELECT fractal_config_get(NULL)
+getcfg all keys	OK	SELECT k,fractal_config_get(k) FROM unnest(ARRAY['reasoning_plugin','http_url','http_model','http_allow_plaintext','http_embed_url','http_embed_model','http_think','http_think_provider','http_native_url','http_num_ctx','text_to_sql_max_attempts','text_to_sql_allowed_statements','text_to_sql_use_review','enterprise_lib','enterprise_require_signature','agent_partial_reasoning_fail']) k
+setcfg unknown	E:fractal_config_set: unknown config key "nope"	SELECT fractal_config_set('nope','x')
+setcfg null val	E:fractal_config_set: the value must not be NULL	SELECT fractal_config_set('agent_partial_reasoning_fail',NULL)
+setcfg bad bool	E:fractal_config_set: "agent_partial_reasoning_fail" expects a boolea	SELECT fractal_config_set('agent_partial_reasoning_fail','maybe')
+setcfg ok	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','on')
+setcfg reload	E:fractal_config_set: "fractalsql.http_url" is reload-scoped and cann	SELECT fractal_config_set('http_url','http://x')
+setcfg secret	NONE	SELECT fractal_config_set('enterprise_ledger_key','abc')
+setcfg max_attempts bad	E:fractal_config_set: "text_to_sql_max_attempts" expects an integer	SELECT fractal_config_set('text_to_sql_max_attempts','abc')
+setcfg prefixed	OK	SELECT fractal_config_set('fractalsql.agent_partial_reasoning_fail','off')
 ledger verify kind	OK	SELECT fractal_ledger_verify(3)
 ledger verify null	OK	SELECT fractal_ledger_verify(NULL)
 ledger verify 1	OK	SELECT fractal_ledger_verify(1)
@@ -4738,6 +4795,14 @@ vec typmod junk	E:fractal_vector: invalid dimension "2x"	SELECT '[1,2]'::fractal
 vec typmod empty str	E:fractal_vector: invalid dimension ""	SELECT '[1,2]'::fractal_vector('')
 vec typmod negative	E:fractal_vector dimension must be between 1 and 32767, got -1	SELECT '[1,2]'::fractal_vector(-1)
 vec typmod null	NONE	SELECT '[1,2]'::fractal_vector(NULL)
+vec hamming stored	OK	WITH t AS MATERIALIZED (SELECT '\x0f'::bytea a, '\xf0'::bytea b) SELECT fractal_vector_hamming_distance(a,b) FROM t
+vec hamming stored mismatch	E:fractal_vector_hamming_distance: length mismatch (1 vs 2 bytes)	WITH t AS MATERIALIZED (SELECT '\x0f'::bytea a, '\xf000'::bytea b) SELECT fractal_vector_hamming_distance(a,b) FROM t
+vec hamming stored long	OK	WITH t AS MATERIALIZED (SELECT decode(repeat('ab',3000),'hex') a, decode(repeat('ba',3000),'hex') b) SELECT fractal_vector_hamming_distance(a,b) FROM t
+vec hamming stored null	NONE	SELECT fractal_vector_hamming_distance(NULL::bytea,'\x01'::bytea)
+vec lp stored	OK	WITH t AS MATERIALIZED (SELECT '[1,2]'::fractal_vector a, '[3,5]'::fractal_vector b) SELECT fractal_vector_lp_distance(a,b,2) FROM t
+vec quant int8 stored	OK	WITH t AS MATERIALIZED (SELECT '[0.5,-1,2]'::fractal_vector a) SELECT fractal_vector_quantize_int8(a) FROM t
+vec quant binary stored	OK	WITH t AS MATERIALIZED (SELECT '[0.5,-1,2]'::fractal_vector a) SELECT fractal_vector_quantize_binary(a) FROM t
+vec lp stored mismatch	E:fractal_vector: dimension mismatch (2 vs 3)	WITH t AS MATERIALIZED (SELECT '[1,2]'::fractal_vector a, '[3,5,6]'::fractal_vector b) SELECT fractal_vector_lp_distance(a,b,2) FROM t
 vec hamming long eq	OK	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),decode(repeat('ab',200),'hex'))
 vec hamming long diff	OK	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),decode(repeat('ba',200),'hex'))
 vec hamming long mismatch	E:fractal_vector_hamming_distance: length mismatch (200 vs 201 bytes)	SELECT fractal_vector_hamming_distance(decode(repeat('ab',200),'hex'),decode(repeat('ab',201),'hex'))
@@ -4777,45 +4842,45 @@ loop one state	E:fractalsql: state_log must contain at least 2 states	SELECT * F
 loop repeating	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(v) FROM (SELECT CASE WHEN i%2=0 THEN 1.0 ELSE 2.0 END AS v FROM generate_series(1,80) i) s),2)
 loop wander	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(sin(i*1.7)+i*0.05) FROM generate_series(1,96) i),2)
 loop thresh	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(sin(i*1.3)) FROM generate_series(1,64) i),4,64,1.0,8)
-setcfg http_num_ctx=abc	E:fractalsql_set_config: "http_num_ctx" expects an integer	SELECT fractalsql_set_config('http_num_ctx','abc')
-setcfg http_num_ctx=99999999999999999999	E:fractalsql_set_config: "http_num_ctx" expects an integer	SELECT fractalsql_set_config('http_num_ctx','99999999999999999999')
-setcfg http_num_ctx=-5	E:fractalsql_set_config: "http_num_ctx" must be between 0 and 1048576	SELECT fractalsql_set_config('http_num_ctx','-5')
-setcfg http_num_ctx=2000000	E:fractalsql_set_config: "http_num_ctx" must be between 0 and 1048576	SELECT fractalsql_set_config('http_num_ctx','2000000')
-setcfg http_num_ctx=4096	E:fractalsql_set_config: "fractalsql.http_num_ctx" is reload-scoped and 	SELECT fractalsql_set_config('http_num_ctx','4096')
-setcfg text_to_sql_max_attempts=0	E:fractalsql_set_config: "text_to_sql_max_attempts" must be between 1 an	SELECT fractalsql_set_config('text_to_sql_max_attempts','0')
-setcfg text_to_sql_max_attempts=11	E:fractalsql_set_config: "text_to_sql_max_attempts" must be between 1 an	SELECT fractalsql_set_config('text_to_sql_max_attempts','11')
-setcfg text_to_sql_max_attempts=3x	E:fractalsql_set_config: "text_to_sql_max_attempts" expects an integer	SELECT fractalsql_set_config('text_to_sql_max_attempts','3x')
-setcfg text_to_sql_max_attempts=3	E:fractalsql_set_config: "fractalsql.text_to_sql_max_attempts" is reload	SELECT fractalsql_set_config('text_to_sql_max_attempts','3')
-setcfg text_to_sql_allowed_statements=bogus	E:fractalsql_set_config: "text_to_sql_allowed_statements" must be one of	SELECT fractalsql_set_config('text_to_sql_allowed_statements','bogus')
-setcfg text_to_sql_allowed_statements=select	E:fractalsql_set_config: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractalsql_set_config('text_to_sql_allowed_statements','select')
-setcfg text_to_sql_allowed_statements=select_insert_update	E:fractalsql_set_config: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractalsql_set_config('text_to_sql_allowed_statements','select_insert_update')
-setcfg text_to_sql_use_review=maybe	E:fractalsql_set_config: "text_to_sql_use_review" expects a boolean	SELECT fractalsql_set_config('text_to_sql_use_review','maybe')
-setcfg text_to_sql_use_review=on	E:fractalsql_set_config: "fractalsql.text_to_sql_use_review" is reload-s	SELECT fractalsql_set_config('text_to_sql_use_review','on')
-setcfg http_allow_plaintext=no	E:fractalsql_set_config: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractalsql_set_config('http_allow_plaintext','no')
-setcfg http_allow_plaintext=y	E:fractalsql_set_config: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractalsql_set_config('http_allow_plaintext','y')
-setcfg too long	E:fractalsql_set_config: "http_url" is too long	SELECT fractalsql_set_config('http_url',repeat('x',9000))
-setcfg upper key	E:fractalsql_set_config: "fractalsql.http_url" is reload-scoped and cann	SELECT fractalsql_set_config('FractalSQL.HTTP_URL','http://x')
-setcfg long key	E:fractalsql_set_config: unknown config key "kkkkkkkkkkkkkkkkkkkkkkkkkkk	SELECT fractalsql_set_config(repeat('k',200),'x')
-setcfg bool on	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','on')
-setcfg bool 1	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','1')
-setcfg bool true	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','true')
-setcfg bool yes	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','yes')
-setcfg bool t	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','t')
-setcfg bool y	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','y')
-setcfg bool TRUE	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','TRUE')
-setcfg bool off	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','off')
-setcfg bool 0	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','0')
-setcfg bool false	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','false')
-setcfg bool no	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','no')
-setcfg bool f	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','f')
-setcfg bool n	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','n')
-setcfg bool Off	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','Off')
-getcfg reasoning_plugin	OK	SELECT fractalsql_get_config('reasoning_plugin')
-getcfg http_model	OK	SELECT fractalsql_get_config('http_model')
-getcfg http_embed_url	OK	SELECT fractalsql_get_config('http_embed_url')
-getcfg http_think	OK	SELECT fractalsql_get_config('http_think')
-getcfg enterprise_lib	OK	SELECT fractalsql_get_config('enterprise_lib')
-getcfg http_token	OK	SELECT fractalsql_get_config('http_token')
+setcfg http_num_ctx=abc	E:fractal_config_set: "http_num_ctx" expects an integer	SELECT fractal_config_set('http_num_ctx','abc')
+setcfg http_num_ctx=99999999999999999999	E:fractal_config_set: "http_num_ctx" expects an integer	SELECT fractal_config_set('http_num_ctx','99999999999999999999')
+setcfg http_num_ctx=-5	E:fractal_config_set: "http_num_ctx" must be between 0 and 1048576	SELECT fractal_config_set('http_num_ctx','-5')
+setcfg http_num_ctx=2000000	E:fractal_config_set: "http_num_ctx" must be between 0 and 1048576	SELECT fractal_config_set('http_num_ctx','2000000')
+setcfg http_num_ctx=4096	E:fractal_config_set: "fractalsql.http_num_ctx" is reload-scoped and 	SELECT fractal_config_set('http_num_ctx','4096')
+setcfg text_to_sql_max_attempts=0	E:fractal_config_set: "text_to_sql_max_attempts" must be between 1 an	SELECT fractal_config_set('text_to_sql_max_attempts','0')
+setcfg text_to_sql_max_attempts=11	E:fractal_config_set: "text_to_sql_max_attempts" must be between 1 an	SELECT fractal_config_set('text_to_sql_max_attempts','11')
+setcfg text_to_sql_max_attempts=3x	E:fractal_config_set: "text_to_sql_max_attempts" expects an integer	SELECT fractal_config_set('text_to_sql_max_attempts','3x')
+setcfg text_to_sql_max_attempts=3	E:fractal_config_set: "fractalsql.text_to_sql_max_attempts" is reload	SELECT fractal_config_set('text_to_sql_max_attempts','3')
+setcfg text_to_sql_allowed_statements=bogus	E:fractal_config_set: "text_to_sql_allowed_statements" must be one of	SELECT fractal_config_set('text_to_sql_allowed_statements','bogus')
+setcfg text_to_sql_allowed_statements=select	E:fractal_config_set: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractal_config_set('text_to_sql_allowed_statements','select')
+setcfg text_to_sql_allowed_statements=select_insert_update	E:fractal_config_set: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractal_config_set('text_to_sql_allowed_statements','select_insert_update')
+setcfg text_to_sql_use_review=maybe	E:fractal_config_set: "text_to_sql_use_review" expects a boolean	SELECT fractal_config_set('text_to_sql_use_review','maybe')
+setcfg text_to_sql_use_review=on	E:fractal_config_set: "fractalsql.text_to_sql_use_review" is reload-s	SELECT fractal_config_set('text_to_sql_use_review','on')
+setcfg http_allow_plaintext=no	E:fractal_config_set: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractal_config_set('http_allow_plaintext','no')
+setcfg http_allow_plaintext=y	E:fractal_config_set: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractal_config_set('http_allow_plaintext','y')
+setcfg too long	E:fractal_config_set: "http_url" is too long	SELECT fractal_config_set('http_url',repeat('x',9000))
+setcfg upper key	E:fractal_config_set: "fractalsql.http_url" is reload-scoped and cann	SELECT fractal_config_set('FractalSQL.HTTP_URL','http://x')
+setcfg long key	E:fractal_config_set: unknown config key "kkkkkkkkkkkkkkkkkkkkkkkkkkk	SELECT fractal_config_set(repeat('k',200),'x')
+setcfg bool on	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','on')
+setcfg bool 1	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','1')
+setcfg bool true	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','true')
+setcfg bool yes	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','yes')
+setcfg bool t	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','t')
+setcfg bool y	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','y')
+setcfg bool TRUE	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','TRUE')
+setcfg bool off	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','off')
+setcfg bool 0	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','0')
+setcfg bool false	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','false')
+setcfg bool no	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','no')
+setcfg bool f	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','f')
+setcfg bool n	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','n')
+setcfg bool Off	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','Off')
+getcfg reasoning_plugin	OK	SELECT fractal_config_get('reasoning_plugin')
+getcfg http_model	OK	SELECT fractal_config_get('http_model')
+getcfg http_embed_url	OK	SELECT fractal_config_get('http_embed_url')
+getcfg http_think	OK	SELECT fractal_config_get('http_think')
+getcfg enterprise_lib	OK	SELECT fractal_config_get('enterprise_lib')
+getcfg http_token	OK	SELECT fractal_config_get('http_token')
 telemetry empty	E:fractalsql: no corpus rows to search	SELECT * FROM fractal_search_telemetry('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],2)
 hybrid empty	E:fractalsql: doc_ids cohort matched no rows in bt_g44z.emb	SELECT * FROM fractal_hybrid_clinical_search('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44z),ARRAY['(0,1)']),2)
 explore empty	E:fractalsql: bt_g44z.emb has no rows to explore	SELECT count(*) FROM fractal_search_explore('bt_g44z','emb',ARRAY[0.1,0.2]::float8[])
@@ -5238,9 +5303,9 @@ gate_47_fault_injection() {
   fault_sweep "diversify"        "SELECT fractal_diversify_enable(); SELECT fractal_diversify_set_params(5); SELECT fractal_feedback_report(1,'positive'); SELECT fractal_explain_result(); SELECT fractal_detect_collapse(); SELECT fractal_diversify_disable()"
   fault_sweep "diversify dq"     "SELECT fractal_diversify_enable(); SELECT fractal_diversify_current_dq(); SELECT fractal_diversify_overhead_p99_us(); SELECT fractal_isolate_background(1); SELECT fractal_diversify_disable()"
   fault_sweep "periodogram"      "SELECT * FROM fractal_periodogram(ARRAY[1,2,3,4,5,6,7,8]::float8[], 4)"
-  fault_sweep "tda"              "SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4,5,6]::float8[], 2)"
+  fault_sweep "tda"              "SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4,5,6]::float8[], 2, 1, 1.0)"
   fault_sweep "portfolio"        "SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2,0.15]::float8[], ARRAY[1,0,0,0,1,0,0,0,1]::float8[], 2, 7)"
-  fault_sweep "set_config"       "SELECT fractalsql_set_config('http_model', 'bt-model'); SELECT fractalsql_get_config('http_model')"
+  fault_sweep "set_config"       "SELECT fractal_config_set('http_model', 'bt-model'); SELECT fractal_config_get('http_model')"
   fault_sweep "store/mine"       "SELECT fractal_store_morphology(1, ARRAY[0.1,0.2]::float8[]); SELECT count(*) FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2]::float8[], 2)"
 
   # ---- enterprise mock: ledger / audit ----------------------------------
@@ -6901,6 +6966,66 @@ SQL
   return 0
 }
 
+# 55 ledger_env: the ledger settings read from the POSTMASTER's environment once per process -- the head anchor log (FSQL_LEDGER_ANCHOR_LOG)
+# and audit redaction (FSQL_AUDIT_REDACT), which no SQL can change -- plus the row cap (the fractalsql.ledger_max_rows GUC, set per round). The cluster is restarted twice with
+# different values (a real set, then odd ones: a bad cap, the syslog anchor, truncate mode) and the audit and ledger functions run under each
+# with the mock enterprise core loaded. Asserts the cap refuses at the limit, the anchor lines reach the server log (or not), the chain still
+# verifies, and redacted entries land in the chain. The cluster is put back as it was.
+gate_55_ledger_env() {
+  local mock_so="$TMPROOT/fractalsql_bt_ledger_env_${PG_MAJOR}.so" round log_from out
+  rm -f "$mock_so"
+  cc -shared -fPIC -std=c99 -Iinclude tests/mock_enterprise_core.c -o "$mock_so" 2>/tmp/fractalsql_bt_gate55_build.log \
+    || { cat /tmp/fractalsql_bt_gate55_build.log >&2; fail "55 ledger_env: mock .so failed to build"; return; }
+  "${PSQL[@]}" -c "ALTER SYSTEM SET fractalsql.enterprise_require_signature = off;" >/dev/null 2>&1
+  for round in "CAP=4 FSQL_LEDGER_ANCHOR_LOG=stderr FSQL_AUDIT_REDACT=hash" "CAP=default FSQL_LEDGER_ANCHOR_LOG=syslog FSQL_AUDIT_REDACT=truncate" "CAP=0 FSQL_LEDGER_ANCHOR_LOG=bogus"; do
+    "$BIN/pg_ctl" -D "$DATADIR" -m fast stop >/dev/null 2>&1
+    if ! env ${round#CAP=* } "$BIN/pg_ctl" -D "$DATADIR" -w -l "$DATADIR/log" \
+           -o "-p $PORT -k $SOCKDIR -c listen_addresses='' -c shared_preload_libraries=$SO" start >/tmp/fractalsql_bt_gate55_restart.log 2>&1; then
+      fail "55 ledger_env: could not restart the cluster with [$round]"; continue
+    fi
+    pg_set_guc fractalsql.enterprise_lib "'$mock_so'" "$mock_so" || { fail "55 ledger_env: could not point enterprise_lib at the mock"; continue; }
+    case "$round" in   # the row cap is a reload-scope GUC (fractalsql.ledger_max_rows), set here per round
+      CAP=4*) pg_set_guc fractalsql.ledger_max_rows 4 4 || fail "55 ledger_env: could not set the row cap" ;;
+      CAP=0*) pg_set_guc fractalsql.ledger_max_rows 0 0 || fail "55 ledger_env: could not set the row cap" ;;
+      *) "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.ledger_max_rows; SELECT pg_reload_conf();" >/dev/null 2>&1 ;;
+    esac
+    "${PSQL[@]}" -c "DROP TABLE IF EXISTS fractalsql_ledger CASCADE; DROP TABLE IF EXISTS fractalsql_ledger_head CASCADE;" >/dev/null 2>&1
+    log_from="$(wc -l < "$DATADIR/log")"
+    out=$("${PSQL[@]}" 2>&1 <<'SQL'
+SELECT fractal_audit_log('env.test', '{"q":"customer secret text","n":1}'::jsonb);
+SELECT fractal_audit_log('env.test', '{"n":2}'::jsonb);
+SELECT fractal_audit_log('env.test', '"scalar payload"'::jsonb);
+SELECT fractal_audit_log('env.test', '[1,2,3]'::jsonb);
+SELECT fractal_audit_log('env.test', '{"n":5}'::jsonb);
+SELECT fractal_audit_log('env.test', '{"n":6}'::jsonb);
+SELECT 'V2:' || fractal_ledger_verify(2)::text;
+SELECT fractal_ledger_flush();
+SELECT fractal_ledger_flush();
+SELECT 'V1:' || fractal_ledger_verify(1)::text;
+SELECT 'N:' || count(*) FROM fractalsql_ledger;
+SQL
+)
+    if grep -qE "server closed the connection|could not connect" <<< "$out"; then fail "55 ledger_env [$round]: a backend crashed -- $out"; continue; fi
+    grep -q '"ok": true' <<< "$out" && pass "55 ledger_env [$round]: the chain verifies" || fail "55 ledger_env [$round]: expected an ok verify, got: $out"
+    case "$round" in
+      CAP=4*)
+        grep -qiE "fractalsql_ledger is full" <<< "$out" \
+          && pass "55 ledger_env: the row cap refuses appends at the limit" || fail "55 ledger_env: expected the cap to refuse an append, got: $out"
+        tail -n +"$((log_from + 1))" "$DATADIR/log" | grep -q '"event":"ledger_head"' \
+          && pass "55 ledger_env: the stderr anchor publishes the chain head to the server log" || fail "55 ledger_env: no ledger_head line reached the server log" ;;
+      *bogus*)
+        tail -n +"$((log_from + 1))" "$DATADIR/log" | grep -q '"event":"ledger_head"' \
+          && fail "55 ledger_env: an unknown anchor mode published a head" || pass "55 ledger_env: an unknown anchor mode publishes nothing" ;;
+    esac
+  done
+  "${PSQL[@]}" -c "ALTER SYSTEM RESET fractalsql.enterprise_lib; ALTER SYSTEM RESET fractalsql.enterprise_require_signature; ALTER SYSTEM RESET fractalsql.ledger_max_rows; DROP TABLE IF EXISTS fractalsql_ledger CASCADE; DROP TABLE IF EXISTS fractalsql_ledger_head CASCADE;" >/dev/null 2>&1
+  "$BIN/pg_ctl" -D "$DATADIR" -m fast stop >/dev/null 2>&1
+  "$BIN/pg_ctl" -D "$DATADIR" -w -l "$DATADIR/log" -o "-p $PORT -k $SOCKDIR -c listen_addresses='' -c shared_preload_libraries=$SO" \
+     start >/tmp/fractalsql_bt_gate55_restore.log 2>&1
+  rm -f "$mock_so"
+  return 0
+}
+
 # The 5 C-native Agent functions (src/fractalsql.c): fractal_search_
 # agent, fractal_agent_plan_explore, fractal_agent_trajectory_predict,
 # fractal_agent_detect_loop, fractal_rag_agent, plus their shared helper
@@ -7368,6 +7493,37 @@ gate_39_extract_parse() {
     printf '%s\n' "$out" | sed 's/^/         /'
     fail "39 extract_parse: see driver output above"
   fi
+  return 0
+}
+
+# 54 redact_unit: tests/redact_unit.c, the header-level unit test of src/fsql_audit_redact.h (the audit trail's redaction: hash and
+# truncate modes, buffer limits, every JSON shape the walker handles, malformed documents, string escapes with surrogate pairs, and
+# allocation failure in the walker). The SQL gates reach that code only through the enterprise audit path, which a community build never
+# runs, so without this its branches are dead in a --coverage run. Built with ASan+UBSan under --asan/--ubsan, with gcov under --coverage
+# (an object named src/_redact_unit.o, so its counters ADD to the build's, as gate 39's do).
+gate_54_redact_unit() {
+  local cc
+  cc="$(pick_cc)" || { skip "54 redact_unit (no C compiler on PATH -- set FSQL_CC)"; return 0; }
+  [[ -f tests/redact_unit.c ]] || { skip "54 redact_unit (tests/redact_unit.c not present)"; return 0; }
+  local obj="src/_redact_unit.o" covflags=() sanflags=()
+  [[ "$COVERAGE" -eq 1 ]] && covflags+=(--coverage)
+  [[ "$ASAN" -eq 1 ]] && sanflags+=(-fsanitize=address -fno-omit-frame-pointer)
+  [[ "$UBSAN" -eq 1 ]] && sanflags+=(-fsanitize=undefined -fno-sanitize-recover=undefined)
+  rm -f "$obj"
+  local log="$TMPROOT/fractalsql_bt_redact_unit_build.log" bin="$TMPROOT/fractalsql_bt_redact_unit"
+  if ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cc" -std=c11 -O1 -g -Wno-unused-function ${covflags[@]+"${covflags[@]}"} ${sanflags[@]+"${sanflags[@]}"} \
+        -Isrc -c tests/redact_unit.c -o "$obj" >"$log" 2>&1 \
+     || ! env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES "$cc" ${covflags[@]+"${covflags[@]}"} ${sanflags[@]+"${sanflags[@]}"} "$obj" -o "$bin" >>"$log" 2>&1; then
+    tail -5 "$log" | sed 's/^/         /'; fail "54 redact_unit: the unit test did not build (see $log)"; rm -f "$obj"; return 0
+  fi
+  local out rc
+  # LeakSanitizer does not exist on macOS: asking for it there makes the ASan runtime itself refuse to start.
+  local leaks=1; [[ "$(uname -s)" == Darwin ]] && leaks=0
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES ASAN_OPTIONS=detect_leaks=$leaks "$bin" 2>&1)"; rc=$?
+  rm -f "$obj"
+  if [[ "$COVERAGE" -ne 1 ]]; then rm -f "${obj%.o}.gcno" "${obj%.o}.gcda"; fi
+  if [[ $rc -eq 0 ]]; then pass "54 redact_unit: $(tail -1 <<< "$out")"
+  else printf '%s\n' "$out" | tail -12 | sed 's/^/         /'; fail "54 redact_unit: see the output above"; fi
   return 0
 }
 
@@ -7978,13 +8134,14 @@ run_major() {
       41) gate_41_db_probe ;;   # DB-less leg (PG* env unset)
       42) gate_42_concurrency_probe ;;
       53) gate_53_plugin_sig_vendored ;;
+      54) gate_54_redact_unit ;;
     esac
   done
   # gates 02-20 need a live cluster
   local need_db=0
   for g in "${gates[@]}"; do
     case "$g" in
-      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26|27|28|29|30|31|32|33|41|43|44|45|46|47|50|51|52) need_db=1 ;;
+      02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|22|23|24|25|26|27|28|29|30|31|32|33|41|43|44|45|46|47|50|51|52|55) need_db=1 ;;
       *) ;;   # 01/21/38/39/40/42 (and 41's DB-less leg) run standalone above -- intentional no-op
     esac
   done
@@ -8030,6 +8187,7 @@ run_major() {
         29) gate_29_vector_ops ;;
         30) gate_30_new_primitives ;;
         31) gate_31_enterprise_mock ;;
+        55) gate_55_ledger_env ;;
         32) gate_32_sovereign_agents ;;
         33) gate_33_mcp_smoke ;;
         50) gate_50_mcp_cli ;;
@@ -8052,7 +8210,11 @@ run_major() {
 
 # --- dispatch ---------------------------------------------------------
 if [[ "$ONE_GATE" = "mcp" ]]; then
-  run_major "$PG_MAJOR" "${MCP_GATES[@]}"
+  # The MCP server gates only. A fault gate is one of them only when faults were asked for
+  # (--gate mcp --fault): on its own, --gate mcp runs no fault injection.
+  MCP_RUN=("${MCP_GATES[@]}")
+  [[ "$MODE" == "fault" ]] && MCP_RUN+=("${MCP_FAULT_GATES[@]}")
+  run_major "$PG_MAJOR" "${MCP_RUN[@]}"
 elif [[ -n "$ONE_GATE" ]]; then
   run_major "$PG_MAJOR" "$ONE_GATE"
 elif [[ "$MODE" = "quick" ]]; then
@@ -8061,6 +8223,8 @@ elif [[ "$MODE" = "cross" ]]; then
   for v in 14 15 16 17 18; do run_major "$v" "${DEFAULT_GATES[@]}"; done
 elif [[ "$MODE" = "fuzz" ]]; then
   run_major "$PG_MAJOR" "${FUZZ_GATES[@]}"
+elif [[ "$MODE" = "fault" ]]; then
+  run_major "$PG_MAJOR" "${DEFAULT_GATES[@]}" "${FAULT_GATES[@]}"
 else
   run_major "$PG_MAJOR" "${DEFAULT_GATES[@]}"
 fi

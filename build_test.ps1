@@ -977,7 +977,7 @@ function PgSwapPlugin($path) {
 
 function Gate02Smoke {
     $ver = Psql -Sql "SELECT fractal_version();"
-    if ($ver -eq '2.0.21') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.21)" }
+    if ($ver -eq '2.0.22') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.22)" }
     $r = Psql -Sql @"
 WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
 SELECT CASE WHEN sqrt(v[1]*v[1]+v[2]*v[2])>1e-9
@@ -1217,20 +1217,20 @@ function Gate09GucSuperuser {
         Fail "09 guc_superuser: expected text_to_sql_max_attempts to stay readable, got: $rRead2"
     }
 
-    # ---- T-G: the typed config surface (fractalsql_set_config() /
-    # fractalsql_get_config(), src\fractalsql.c's fsql_cfg_keys[] table).
+    # ---- T-G: the typed config surface (fractal_config_set() /
+    # fractal_config_get(), src\fractalsql.c's fsql_cfg_keys[] table).
     # This is the SQL-callable wrapper over the fractalsql.* GUCs, and
     # it is what promises typed validation, a per-key privilege
     # boundary, a scope boundary, and an error naming the known keys.
     # None of that was asserted anywhere before: the surface compiled
     # and loaded, but no gate ever called it.
-    $rG = Psql -Sql "SELECT fractalsql_get_config('nope');"
+    $rG = Psql -Sql "SELECT fractal_config_get('nope');"
     if ($rG -match 'unknown config key "nope"' -and $rG -match 'Known keys:') {
         Pass "09 cfg: an unknown key is an error that lists the known keys (get)"
     } else {
         Fail "09 cfg: expected an unknown-key error naming the known keys, got: $rG"
     }
-    $rG2 = Psql -Sql "SELECT fractalsql_set_config('nope','x');"
+    $rG2 = Psql -Sql "SELECT fractal_config_set('nope','x');"
     if ($rG2 -match 'unknown config key "nope"') {
         Pass "09 cfg: an unknown key is an error, never a silent no-op (set)"
     } else {
@@ -1243,15 +1243,15 @@ function Gate09GucSuperuser {
     # case-SENSITIVELY (fsql_cfg_lookup() folded only the prefixed
     # spelling), which contradicted both the function's own contract
     # and the SQL COMMENT on the two functions.
-    $rG3 = Psql -Sql "SELECT fractalsql_get_config('text_to_sql_max_attempts');"
-    $rG4 = Psql -Sql "SELECT fractalsql_get_config('fractalsql.text_to_sql_max_attempts');"
+    $rG3 = Psql -Sql "SELECT fractal_config_get('text_to_sql_max_attempts');"
+    $rG4 = Psql -Sql "SELECT fractal_config_get('fractalsql.text_to_sql_max_attempts');"
     if ($rG3 -eq $rG4 -and $rG3 -match '^\d+$') {
         Pass "09 cfg: the bare key and the GUC spelling return the same value"
     } else {
         Fail "09 cfg: expected the two spellings to agree, got bare='$rG3' prefixed='$rG4'"
     }
-    $rG5 = Psql -Sql "SELECT fractalsql_get_config('TEXT_TO_SQL_MAX_ATTEMPTS');"
-    $rG6 = Psql -Sql "SELECT fractalsql_get_config('FRACTALSQL.text_to_sql_max_attempts');"
+    $rG5 = Psql -Sql "SELECT fractal_config_get('TEXT_TO_SQL_MAX_ATTEMPTS');"
+    $rG6 = Psql -Sql "SELECT fractal_config_get('FRACTALSQL.text_to_sql_max_attempts');"
     if ($rG5 -eq $rG3 -and $rG6 -eq $rG3) {
         Pass "09 cfg: both key spellings are matched case-insensitively"
     } else {
@@ -1263,13 +1263,13 @@ function Gate09GucSuperuser {
     # SAME session. One Psql call = one backend = one session, which
     # matters: the write is session-scoped, so a separate call would
     # read a fresh backend's untouched default.
-    $rG7 = Psql -Sql "SELECT fractalsql_set_config('agent_partial_reasoning_fail','yes') || '=' || fractalsql_get_config('agent_partial_reasoning_fail') || '=' || current_setting('fractalsql.agent_partial_reasoning_fail');"
+    $rG7 = Psql -Sql "SELECT fractal_config_set('agent_partial_reasoning_fail','yes') || '=' || fractal_config_get('agent_partial_reasoning_fail') || '=' || current_setting('fractalsql.agent_partial_reasoning_fail');"
     if ($rG7 -eq 'on=on=on') {
         Pass "09 cfg: a bool key canonicalizes 'yes' to 'on' and the value lands in the GUC itself"
     } else {
         Fail "09 cfg: expected on=on=on, got: $rG7"
     }
-    $rG8 = Psql -Sql "SELECT fractalsql_set_config('agent_partial_reasoning_fail','tru');"
+    $rG8 = Psql -Sql "SELECT fractal_config_set('agent_partial_reasoning_fail','tru');"
     if ($rG8 -match 'expects a boolean' -and $rG8 -match 'Accepted spellings') {
         Pass "09 cfg: a bool key rejects an unrecognised spelling and names the accepted ones"
     } else {
@@ -1280,25 +1280,25 @@ function Gate09GucSuperuser {
     # the VALUE is validated before the privilege and scope checks, so
     # a bad value is reported as a bad value even for a key a session
     # may not change.
-    $rG9 = Psql -Sql "SELECT fractalsql_set_config('http_num_ctx','notanint');"
+    $rG9 = Psql -Sql "SELECT fractal_config_set('http_num_ctx','notanint');"
     if ($rG9 -match 'expects an integer') {
         Pass "09 cfg: an int key rejects a non-integer"
     } else {
         Fail "09 cfg: expected an integer rejection, got: $rG9"
     }
-    $rG10 = Psql -Sql "SELECT fractalsql_set_config('http_num_ctx','1048577');"
+    $rG10 = Psql -Sql "SELECT fractal_config_set('http_num_ctx','1048577');"
     if ($rG10 -match 'must be between 0 and 1048576') {
         Pass "09 cfg: an int key rejects a value outside its range"
     } else {
         Fail "09 cfg: expected a range rejection, got: $rG10"
     }
-    $rG11 = Psql -Sql "SELECT fractalsql_set_config('text_to_sql_allowed_statements','drop');"
+    $rG11 = Psql -Sql "SELECT fractal_config_set('text_to_sql_allowed_statements','drop');"
     if ($rG11 -match 'must be one of: select\|select_insert_update') {
         Pass "09 cfg: an enum key rejects a value outside its member list"
     } else {
         Fail "09 cfg: expected an enum rejection, got: $rG11"
     }
-    $rG12 = Psql -Sql "SELECT fractalsql_set_config('text_to_sql_max_attempts','99');"
+    $rG12 = Psql -Sql "SELECT fractal_config_set('text_to_sql_max_attempts','99');"
     if ($rG12 -match 'must be between 1 and 10') {
         Pass "09 cfg: an invalid value is reported BEFORE the scope check (text_to_sql_max_attempts is reload-scoped)"
     } else {
@@ -1308,7 +1308,7 @@ function Gate09GucSuperuser {
     # The scope boundary: a reload-scoped (PGC_SIGHUP) key cannot be
     # changed in a session, and the error names the ALTER SYSTEM +
     # pg_reload_conf() path instead of silently doing nothing.
-    $rG13 = Psql -Sql "SELECT fractalsql_set_config('text_to_sql_max_attempts','3');"
+    $rG13 = Psql -Sql "SELECT fractal_config_set('text_to_sql_max_attempts','3');"
     if ($rG13 -match 'is reload-scoped and cannot be changed in a session' -and $rG13 -match 'ALTER SYSTEM SET' -and $rG13 -match 'pg_reload_conf') {
         Pass "09 cfg: a reload-scoped key refuses a session change and names the ALTER SYSTEM + pg_reload_conf path"
     } else {
@@ -1316,7 +1316,7 @@ function Gate09GucSuperuser {
     }
     # ... while a session-settable key (PGC_USERSET / PGC_SUSET) IS
     # writable in a session, and the canonical value comes back.
-    $rG14 = Psql -Sql "SELECT fractalsql_set_config('enterprise_ledger_key','cfgtest');"
+    $rG14 = Psql -Sql "SELECT fractal_config_set('enterprise_ledger_key','cfgtest');"
     if ($rG14 -eq 'cfgtest') {
         Pass "09 cfg: a session-settable key (enterprise_ledger_key) is writable in a session"
     } else {
@@ -1324,19 +1324,19 @@ function Gate09GucSuperuser {
     }
 
     # NULL arguments are argument faults, not "unset".
-    $rG15 = Psql -Sql "SELECT fractalsql_set_config(NULL,'x');"
+    $rG15 = Psql -Sql "SELECT fractal_config_set(NULL,'x');"
     if ($rG15 -match 'the key must not be NULL') {
         Pass "09 cfg: set rejects a NULL key"
     } else {
         Fail "09 cfg: expected the NULL-key rejection, got: $rG15"
     }
-    $rG16 = Psql -Sql "SELECT fractalsql_set_config('text_to_sql_max_attempts',NULL);"
+    $rG16 = Psql -Sql "SELECT fractal_config_set('text_to_sql_max_attempts',NULL);"
     if ($rG16 -match 'the value must not be NULL') {
         Pass "09 cfg: set rejects a NULL value"
     } else {
         Fail "09 cfg: expected the NULL-value rejection, got: $rG16"
     }
-    $rG17 = Psql -Sql "SELECT fractalsql_get_config(NULL);"
+    $rG17 = Psql -Sql "SELECT fractal_config_get(NULL);"
     if ($rG17 -match 'the key must not be NULL') {
         Pass "09 cfg: get rejects a NULL key"
     } else {
@@ -1345,25 +1345,25 @@ function Gate09GucSuperuser {
 
     # The config API enforces the SAME per-key privilege boundary the
     # GUCs carry -- and, like the GUCs, it is per-key, not blanket.
-    $rL1 = Psql -Sql "SELECT fractalsql_set_config('http_url','http://x');" -User 'bt_lowpriv2'
+    $rL1 = Psql -Sql "SELECT fractal_config_set('http_url','http://x');" -User 'bt_lowpriv2'
     if ($rL1 -match 'is a superuser-only setting') {
         Pass "09 cfg: a non-superuser cannot SET a superuser-only key through the config API"
     } else {
         Fail "09 cfg: expected the superuser-only rejection, got: $rL1"
     }
-    $rL2 = Psql -Sql "SELECT fractalsql_get_config('http_url');" -User 'bt_lowpriv2'
+    $rL2 = Psql -Sql "SELECT fractal_config_get('http_url');" -User 'bt_lowpriv2'
     if ($rL2 -match 'is a superuser-only setting') {
         Pass "09 cfg: a non-superuser cannot READ a superuser-only key through the config API"
     } else {
         Fail "09 cfg: expected the superuser-only rejection, got: $rL2"
     }
-    $rL3 = Psql -Sql "SELECT fractalsql_get_config('text_to_sql_max_attempts');" -User 'bt_lowpriv2'
+    $rL3 = Psql -Sql "SELECT fractal_config_get('text_to_sql_max_attempts');" -User 'bt_lowpriv2'
     if ($rL3 -match '^\d+$') {
         Pass "09 cfg: the config API's privilege boundary is per-key -- a non-superuser still reads a non-superuser-only key"
     } else {
         Fail "09 cfg: expected text_to_sql_max_attempts to stay readable, got: $rL3"
     }
-    $rL4 = Psql -Sql "SELECT fractalsql_set_config('agent_partial_reasoning_fail','on');" -User 'bt_lowpriv2'
+    $rL4 = Psql -Sql "SELECT fractal_config_set('agent_partial_reasoning_fail','on');" -User 'bt_lowpriv2'
     if ($rL4 -eq 'on') {
         Pass "09 cfg: a non-superuser may set a non-superuser-only, session-settable key"
     } else {
@@ -2619,16 +2619,16 @@ INSERT INTO bt_combined_docs (emb) VALUES
     if ($rk2 -match 'k must satisfy 1 <= k <= n_assets') { Pass "22 rejection: optimize_portfolio rejects k>n_assets" }
     else { Fail "22 rejection: expected the k>n_assets rejection, got: $rk2" }
 
-    $rt1 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0]::float8[], 0);"
+    $rt1 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0]::float8[], 0, 1, 1.0);"
     if ($rt1 -match 'dim must be > 0') { Pass "22 rejection: tda_persistence_diagram rejects dim<=0" }
     else { Fail "22 rejection: expected a dim<=0 rejection, got: $rt1" }
-    $rt2 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,1.0]::float8[], 3);"
+    $rt2 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,1.0]::float8[], 3, 1, 1.0);"
     if ($rt2 -match [regex]::Escape('points length (2) must be a multiple of dim (3)')) { Pass "22 rejection: tda_persistence_diagram rejects a point list that is not a multiple of dim" }
     else { Fail "22 rejection: expected a points-length rejection, got: $rt2" }
-    $rt3 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0]::float8[], 2);"
+    $rt3 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0]::float8[], 2, 1, 1.0);"
     if ($rt3 -match '2 <= n_points') { Pass "22 rejection: tda_persistence_diagram rejects a single-point cloud (n_points >= 2)" }
     else { Fail "22 rejection: expected a too-few-points rejection, got: $rt3" }
-    $rt4 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0,2.0,2.0]::float8[], 2, 2);"
+    $rt4 = Psql -Sql "SELECT fractal_tda_persistence_diagram(ARRAY[0.0,0.0,1.0,1.0,2.0,2.0]::float8[], 2, 2, 1.0);"
     if ($rt4 -match 'max_dim in \{0,1\}') { Pass "22 rejection: tda_persistence_diagram rejects max_dim=2 (core supports only {0,1})" }
     else { Fail "22 rejection: expected a max_dim rejection, got: $rt4" }
 
@@ -5582,10 +5582,32 @@ function BuildMcpServerMsvc([string]$GateLabel) {
     # (mcp\scripts\windows\build-asan.bat / build-ubsan.bat, into
     # mcp\dist\windows-mcp-asan / windows-mcp-ubsan) and built once per run.
     if ($Asan -or $Ubsan) {
-        if ($script:McpSanExe -and (Test-Path -LiteralPath $script:McpSanExe)) { return $script:McpSanExe }
         $sanScript = if ($Asan) { 'build-asan.bat' } else { 'build-ubsan.bat' }
         $sanDist   = if ($Asan) { 'windows-mcp-asan' } else { 'windows-mcp-ubsan' }
         $sanExe    = Join-Path $RepoRoot "mcp\dist\$sanDist\fractalsql-postgresql-mcp.exe"
+        # The committed lock files must travel with the binary. The server
+        # resolves its two locks relative to its OWN executable directory
+        # (mcp\src\main.cpp's selfDir()) and REFUSES TO START without them
+        # (exit 2) -- the tool-surface drift check is fail-closed by design.
+        # The sanitized exe lands in mcp\dist\<san>\ , and dist\ is
+        # gitignored, so on a fresh checkout there is NO lock beside it and
+        # every MCP gate (33/38/50/52) dies with "schema lock ... is
+        # missing; refusing to start". build_test.sh copies the same two
+        # files next to its built server for exactly this reason (its
+        # build_mcp_server step); do the same here. Done BEFORE the
+        # already-built check, so a cached exe also gets them -- and the
+        # dist dir is created first, since on a fresh checkout it does
+        # not exist yet (Copy-Item into a missing dir throws, and
+        # $ErrorActionPreference is 'Stop').
+        $sanDir = Split-Path -Parent $sanExe
+        New-Item -ItemType Directory -Force -Path $sanDir | Out-Null
+        foreach ($lockName in @('.mcp-schema-lock', '.mcp-safety-annotations-lock')) {
+            $src = Join-Path $RepoRoot "mcp\$lockName"
+            if (Test-Path -LiteralPath $src) {
+                Copy-Item -LiteralPath $src -Destination $sanDir -Force
+            }
+        }
+        if ($script:McpSanExe -and (Test-Path -LiteralPath $script:McpSanExe)) { return $script:McpSanExe }
         Remove-Item -LiteralPath $sanExe -ErrorAction SilentlyContinue
         Write-Host "         [$($GateLabel.Split(' ')[0])] building mcp server ($sanScript)..."
         $boot = Join-Path $env:TEMP 'fractalsql_bt_mcp_san_build.bat'
@@ -5941,7 +5963,7 @@ function Gate52McpConformance {
     $env:MCPC_GATE                 = '52'
     $env:MCPC_LOCK_DIR             = (Join-Path $RepoRoot 'mcp')
     $env:MCPC_PASSTHROUGH_ENV      = 'PGHOST,PGPORT,PGUSER,PGPASSWORD,PGDATABASE,PGSSLMODE'
-    $env:MCPC_READ_TOOL            = 'fractalsql_get_version'
+    $env:MCPC_READ_TOOL            = 'fractal_version'
     $env:MCPC_READ_ARGS            = '{}'
     $env:MCPC_STATE_TOOL           = 'fractal_diversify_enable'
     $env:MCPC_STATE_ARGS           = '{}'
@@ -6474,9 +6496,9 @@ cp null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT fractal_ch
 periodogram short	E:fractalsql: fractal_periodogram rc=-1 (need n >= 4)	SELECT * FROM fractal_periodogram(ARRAY[1,2,3]::float8[],4)
 periodogram peaks 0	E:fractalsql: max_peaks must be > 0	SELECT * FROM fractal_periodogram(ARRAY[1,2,3,4,5,6,7,8]::float8[],0)
 periodogram null elem	E:fractalsql: query must be 1-D non-null float8[]	SELECT * FROM fractal_periodogram(ARRAY[1,NULL,3,4,5]::float8[],4)
-tda dim 0	E:fractalsql: dim must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],0)
-tda ragged	E:fractalsql: points length (3) must be a multiple of dim (2)	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3]::float8[],2)
-tda max_dim	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,-1)
+tda dim 0	E:fractalsql: dim must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],0,1,1.0)
+tda ragged	E:fractalsql: points length (3) must be a multiple of dim (2)	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3]::float8[],2,1,1.0)
+tda max_dim	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,-1,1.0)
 tda thresh	E:fractalsql: fractal_tda_persistence_diagram rc=-1 (2 <= n_points <= 51	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,1,-1.0)
 tda bars	E:fractalsql: max_h0_bars must be > 0	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4]::float8[],2,1,1.0,0)
 drift win	E:fractalsql: window must be > 0	SELECT fractal_dimension_drift(ARRAY[1,2,3,4]::float8[],0)
@@ -6613,19 +6635,19 @@ schema empty arr	E:fractal_schema_context: no visible tables found	SELECT fracta
 schema null elem	E:fractal_schema_context: no visible tables found	SELECT fractal_schema_context(ARRAY[NULL]::text[])
 schema hint	OK	SELECT length(fractal_schema_context(ARRAY['bt_g44'],'embedding'))>0
 t2s null tables elem	E:fractal_schema_context: no visible tables found	SELECT fractal_text_to_sql('q',ARRAY[NULL]::text[])
-getcfg unknown	E:fractalsql_get_config: unknown config key "nope"	SELECT fractalsql_get_config('nope')
-getcfg secret	OK	SELECT fractalsql_get_config('enterprise_ledger_key')
-getcfg prefixed	OK	SELECT fractalsql_get_config('fractalsql.http_url')
-getcfg null	E:fractalsql_get_config: the key must not be NULL	SELECT fractalsql_get_config(NULL)
-getcfg all keys	OK	SELECT k,fractalsql_get_config(k) FROM unnest(ARRAY['reasoning_plugin','http_url','http_model','http_allow_plaintext','http_embed_url','http_embed_model','http_think','http_think_provider','http_native_url','http_num_ctx','text_to_sql_max_attempts','text_to_sql_allowed_statements','text_to_sql_use_review','enterprise_lib','enterprise_require_signature','agent_partial_reasoning_fail']) k
-setcfg unknown	E:fractalsql_set_config: unknown config key "nope"	SELECT fractalsql_set_config('nope','x')
-setcfg null val	E:fractalsql_set_config: the value must not be NULL	SELECT fractalsql_set_config('agent_partial_reasoning_fail',NULL)
-setcfg bad bool	E:fractalsql_set_config: "agent_partial_reasoning_fail" expects a boolea	SELECT fractalsql_set_config('agent_partial_reasoning_fail','maybe')
-setcfg ok	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','on')
-setcfg reload	E:fractalsql_set_config: "fractalsql.http_url" is reload-scoped and cann	SELECT fractalsql_set_config('http_url','http://x')
-setcfg secret	NONE	SELECT fractalsql_set_config('enterprise_ledger_key','abc')
-setcfg max_attempts bad	E:fractalsql_set_config: "text_to_sql_max_attempts" expects an integer	SELECT fractalsql_set_config('text_to_sql_max_attempts','abc')
-setcfg prefixed	OK	SELECT fractalsql_set_config('fractalsql.agent_partial_reasoning_fail','off')
+getcfg unknown	E:fractal_config_get: unknown config key "nope"	SELECT fractal_config_get('nope')
+getcfg secret	OK	SELECT fractal_config_get('enterprise_ledger_key')
+getcfg prefixed	OK	SELECT fractal_config_get('fractalsql.http_url')
+getcfg null	E:fractal_config_get: the key must not be NULL	SELECT fractal_config_get(NULL)
+getcfg all keys	OK	SELECT k,fractal_config_get(k) FROM unnest(ARRAY['reasoning_plugin','http_url','http_model','http_allow_plaintext','http_embed_url','http_embed_model','http_think','http_think_provider','http_native_url','http_num_ctx','text_to_sql_max_attempts','text_to_sql_allowed_statements','text_to_sql_use_review','enterprise_lib','enterprise_require_signature','agent_partial_reasoning_fail']) k
+setcfg unknown	E:fractal_config_set: unknown config key "nope"	SELECT fractal_config_set('nope','x')
+setcfg null val	E:fractal_config_set: the value must not be NULL	SELECT fractal_config_set('agent_partial_reasoning_fail',NULL)
+setcfg bad bool	E:fractal_config_set: "agent_partial_reasoning_fail" expects a boolea	SELECT fractal_config_set('agent_partial_reasoning_fail','maybe')
+setcfg ok	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','on')
+setcfg reload	E:fractal_config_set: "fractalsql.http_url" is reload-scoped and cann	SELECT fractal_config_set('http_url','http://x')
+setcfg secret	NONE	SELECT fractal_config_set('enterprise_ledger_key','abc')
+setcfg max_attempts bad	E:fractal_config_set: "text_to_sql_max_attempts" expects an integer	SELECT fractal_config_set('text_to_sql_max_attempts','abc')
+setcfg prefixed	OK	SELECT fractal_config_set('fractalsql.agent_partial_reasoning_fail','off')
 ledger verify kind	OK	SELECT fractal_ledger_verify(3)
 ledger verify null	OK	SELECT fractal_ledger_verify(NULL)
 ledger verify 1	OK	SELECT fractal_ledger_verify(1)
@@ -6736,45 +6758,45 @@ loop one state	E:fractalsql: state_log must contain at least 2 states	SELECT * F
 loop repeating	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(v) FROM (SELECT CASE WHEN i%2=0 THEN 1.0 ELSE 2.0 END AS v FROM generate_series(1,80) i) s),2)
 loop wander	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(sin(i*1.7)+i*0.05) FROM generate_series(1,96) i),2)
 loop thresh	OK	SELECT * FROM fractal_agent_detect_loop('a',(SELECT array_agg(sin(i*1.3)) FROM generate_series(1,64) i),4,64,1.0,8)
-setcfg http_num_ctx=abc	E:fractalsql_set_config: "http_num_ctx" expects an integer	SELECT fractalsql_set_config('http_num_ctx','abc')
-setcfg http_num_ctx=99999999999999999999	E:fractalsql_set_config: "http_num_ctx" expects an integer	SELECT fractalsql_set_config('http_num_ctx','99999999999999999999')
-setcfg http_num_ctx=-5	E:fractalsql_set_config: "http_num_ctx" must be between 0 and 1048576	SELECT fractalsql_set_config('http_num_ctx','-5')
-setcfg http_num_ctx=2000000	E:fractalsql_set_config: "http_num_ctx" must be between 0 and 1048576	SELECT fractalsql_set_config('http_num_ctx','2000000')
-setcfg http_num_ctx=4096	E:fractalsql_set_config: "fractalsql.http_num_ctx" is reload-scoped and 	SELECT fractalsql_set_config('http_num_ctx','4096')
-setcfg text_to_sql_max_attempts=0	E:fractalsql_set_config: "text_to_sql_max_attempts" must be between 1 an	SELECT fractalsql_set_config('text_to_sql_max_attempts','0')
-setcfg text_to_sql_max_attempts=11	E:fractalsql_set_config: "text_to_sql_max_attempts" must be between 1 an	SELECT fractalsql_set_config('text_to_sql_max_attempts','11')
-setcfg text_to_sql_max_attempts=3x	E:fractalsql_set_config: "text_to_sql_max_attempts" expects an integer	SELECT fractalsql_set_config('text_to_sql_max_attempts','3x')
-setcfg text_to_sql_max_attempts=3	E:fractalsql_set_config: "fractalsql.text_to_sql_max_attempts" is reload	SELECT fractalsql_set_config('text_to_sql_max_attempts','3')
-setcfg text_to_sql_allowed_statements=bogus	E:fractalsql_set_config: "text_to_sql_allowed_statements" must be one of	SELECT fractalsql_set_config('text_to_sql_allowed_statements','bogus')
-setcfg text_to_sql_allowed_statements=select	E:fractalsql_set_config: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractalsql_set_config('text_to_sql_allowed_statements','select')
-setcfg text_to_sql_allowed_statements=select_insert_update	E:fractalsql_set_config: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractalsql_set_config('text_to_sql_allowed_statements','select_insert_update')
-setcfg text_to_sql_use_review=maybe	E:fractalsql_set_config: "text_to_sql_use_review" expects a boolean	SELECT fractalsql_set_config('text_to_sql_use_review','maybe')
-setcfg text_to_sql_use_review=on	E:fractalsql_set_config: "fractalsql.text_to_sql_use_review" is reload-s	SELECT fractalsql_set_config('text_to_sql_use_review','on')
-setcfg http_allow_plaintext=no	E:fractalsql_set_config: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractalsql_set_config('http_allow_plaintext','no')
-setcfg http_allow_plaintext=y	E:fractalsql_set_config: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractalsql_set_config('http_allow_plaintext','y')
-setcfg too long	E:fractalsql_set_config: "http_url" is too long	SELECT fractalsql_set_config('http_url',repeat('x',9000))
-setcfg upper key	E:fractalsql_set_config: "fractalsql.http_url" is reload-scoped and cann	SELECT fractalsql_set_config('FractalSQL.HTTP_URL','http://x')
-setcfg long key	E:fractalsql_set_config: unknown config key "kkkkkkkkkkkkkkkkkkkkkkkkkkk	SELECT fractalsql_set_config(repeat('k',200),'x')
-setcfg bool on	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','on')
-setcfg bool 1	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','1')
-setcfg bool true	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','true')
-setcfg bool yes	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','yes')
-setcfg bool t	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','t')
-setcfg bool y	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','y')
-setcfg bool TRUE	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','TRUE')
-setcfg bool off	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','off')
-setcfg bool 0	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','0')
-setcfg bool false	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','false')
-setcfg bool no	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','no')
-setcfg bool f	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','f')
-setcfg bool n	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','n')
-setcfg bool Off	OK	SELECT fractalsql_set_config('agent_partial_reasoning_fail','Off')
-getcfg reasoning_plugin	OK	SELECT fractalsql_get_config('reasoning_plugin')
-getcfg http_model	OK	SELECT fractalsql_get_config('http_model')
-getcfg http_embed_url	OK	SELECT fractalsql_get_config('http_embed_url')
-getcfg http_think	OK	SELECT fractalsql_get_config('http_think')
-getcfg enterprise_lib	OK	SELECT fractalsql_get_config('enterprise_lib')
-getcfg http_token	OK	SELECT fractalsql_get_config('http_token')
+setcfg http_num_ctx=abc	E:fractal_config_set: "http_num_ctx" expects an integer	SELECT fractal_config_set('http_num_ctx','abc')
+setcfg http_num_ctx=99999999999999999999	E:fractal_config_set: "http_num_ctx" expects an integer	SELECT fractal_config_set('http_num_ctx','99999999999999999999')
+setcfg http_num_ctx=-5	E:fractal_config_set: "http_num_ctx" must be between 0 and 1048576	SELECT fractal_config_set('http_num_ctx','-5')
+setcfg http_num_ctx=2000000	E:fractal_config_set: "http_num_ctx" must be between 0 and 1048576	SELECT fractal_config_set('http_num_ctx','2000000')
+setcfg http_num_ctx=4096	E:fractal_config_set: "fractalsql.http_num_ctx" is reload-scoped and 	SELECT fractal_config_set('http_num_ctx','4096')
+setcfg text_to_sql_max_attempts=0	E:fractal_config_set: "text_to_sql_max_attempts" must be between 1 an	SELECT fractal_config_set('text_to_sql_max_attempts','0')
+setcfg text_to_sql_max_attempts=11	E:fractal_config_set: "text_to_sql_max_attempts" must be between 1 an	SELECT fractal_config_set('text_to_sql_max_attempts','11')
+setcfg text_to_sql_max_attempts=3x	E:fractal_config_set: "text_to_sql_max_attempts" expects an integer	SELECT fractal_config_set('text_to_sql_max_attempts','3x')
+setcfg text_to_sql_max_attempts=3	E:fractal_config_set: "fractalsql.text_to_sql_max_attempts" is reload	SELECT fractal_config_set('text_to_sql_max_attempts','3')
+setcfg text_to_sql_allowed_statements=bogus	E:fractal_config_set: "text_to_sql_allowed_statements" must be one of	SELECT fractal_config_set('text_to_sql_allowed_statements','bogus')
+setcfg text_to_sql_allowed_statements=select	E:fractal_config_set: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractal_config_set('text_to_sql_allowed_statements','select')
+setcfg text_to_sql_allowed_statements=select_insert_update	E:fractal_config_set: "fractalsql.text_to_sql_allowed_statements" is 	SELECT fractal_config_set('text_to_sql_allowed_statements','select_insert_update')
+setcfg text_to_sql_use_review=maybe	E:fractal_config_set: "text_to_sql_use_review" expects a boolean	SELECT fractal_config_set('text_to_sql_use_review','maybe')
+setcfg text_to_sql_use_review=on	E:fractal_config_set: "fractalsql.text_to_sql_use_review" is reload-s	SELECT fractal_config_set('text_to_sql_use_review','on')
+setcfg http_allow_plaintext=no	E:fractal_config_set: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractal_config_set('http_allow_plaintext','no')
+setcfg http_allow_plaintext=y	E:fractal_config_set: "fractalsql.http_allow_plaintext" is reload-sco	SELECT fractal_config_set('http_allow_plaintext','y')
+setcfg too long	E:fractal_config_set: "http_url" is too long	SELECT fractal_config_set('http_url',repeat('x',9000))
+setcfg upper key	E:fractal_config_set: "fractalsql.http_url" is reload-scoped and cann	SELECT fractal_config_set('FractalSQL.HTTP_URL','http://x')
+setcfg long key	E:fractal_config_set: unknown config key "kkkkkkkkkkkkkkkkkkkkkkkkkkk	SELECT fractal_config_set(repeat('k',200),'x')
+setcfg bool on	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','on')
+setcfg bool 1	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','1')
+setcfg bool true	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','true')
+setcfg bool yes	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','yes')
+setcfg bool t	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','t')
+setcfg bool y	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','y')
+setcfg bool TRUE	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','TRUE')
+setcfg bool off	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','off')
+setcfg bool 0	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','0')
+setcfg bool false	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','false')
+setcfg bool no	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','no')
+setcfg bool f	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','f')
+setcfg bool n	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','n')
+setcfg bool Off	OK	SELECT fractal_config_set('agent_partial_reasoning_fail','Off')
+getcfg reasoning_plugin	OK	SELECT fractal_config_get('reasoning_plugin')
+getcfg http_model	OK	SELECT fractal_config_get('http_model')
+getcfg http_embed_url	OK	SELECT fractal_config_get('http_embed_url')
+getcfg http_think	OK	SELECT fractal_config_get('http_think')
+getcfg enterprise_lib	OK	SELECT fractal_config_get('enterprise_lib')
+getcfg http_token	OK	SELECT fractal_config_get('http_token')
 telemetry empty	E:fractalsql: no corpus rows to search	SELECT * FROM fractal_search_telemetry('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],2)
 hybrid empty	E:fractalsql: doc_ids cohort matched no rows in bt_g44z.emb	SELECT * FROM fractal_hybrid_clinical_search('bt_g44z','emb',ARRAY[0.1,0.2]::float8[],COALESCE((SELECT array_agg(ctid::text) FROM bt_g44z),ARRAY['(0,1)']),2)
 explore empty	E:fractalsql: bt_g44z.emb has no rows to explore	SELECT count(*) FROM fractal_search_explore('bt_g44z','emb',ARRAY[0.1,0.2]::float8[])
@@ -7201,9 +7223,9 @@ cycle_detect	SELECT * FROM fractal_cycle_detect(ARRAY['\x01','\x02','\x01','\x02
 diversify	SELECT fractal_diversify_enable(); SELECT fractal_diversify_set_params(5); SELECT fractal_feedback_report(1,'positive'); SELECT fractal_explain_result(); SELECT fractal_detect_collapse(); SELECT fractal_diversify_disable()
 diversify dq	SELECT fractal_diversify_enable(); SELECT fractal_diversify_current_dq(); SELECT fractal_diversify_overhead_p99_us(); SELECT fractal_isolate_background(1); SELECT fractal_diversify_disable()
 periodogram	SELECT * FROM fractal_periodogram(ARRAY[1,2,3,4,5,6,7,8]::float8[], 4)
-tda	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4,5,6]::float8[], 2)
+tda	SELECT * FROM fractal_tda_persistence_diagram(ARRAY[1,2,3,4,5,6]::float8[], 2, 1, 1.0)
 portfolio	SELECT fractal_optimize_portfolio(ARRAY[0.1,0.2,0.15]::float8[], ARRAY[1,0,0,0,1,0,0,0,1]::float8[], 2, 7)
-set_config	SELECT fractalsql_set_config('http_model', 'bt-model'); SELECT fractalsql_get_config('http_model')
+set_config	SELECT fractal_config_set('http_model', 'bt-model'); SELECT fractal_config_get('http_model')
 store/mine	SELECT fractal_store_morphology(1, ARRAY[0.1,0.2]::float8[]); SELECT count(*) FROM fractal_mine_topology_negatives(ARRAY[0.1,0.2]::float8[], 2)
 '@
 

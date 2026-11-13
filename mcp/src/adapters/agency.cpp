@@ -147,7 +147,7 @@ namespace fsqlmcp
 
         t.push_back( ToolSpec{ "fractal_agent_allocate", "agency", ToolClass::Expensive,
             { Vec("mu",true,"Expected returns."), Vec("cov",true,"Flattened 1-D row-major n x n covariance."),
-              Int("cardinality",true,"Max nonzero assets."), NullableStr("context","Optional JSON context.") },
+              Int("cardinality",true,"Max nonzero assets."), Str("context",false,"Optional JSON context.") },
             std::nullopt, false, false,
             [&db]( const Json& a, CallCtx& ) { return agentRow( db, "fractal_agent_allocate", {
                 PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "mu" ), "mu" ) ),
@@ -162,7 +162,7 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_agent_rebalance_sibling", "agency", ToolClass::Expensive,
             { Vec("mu",true,"Expected returns."), Vec("cov",true,"Flattened covariance."), Int("cardinality",true,"Max nonzero assets."),
               Str("alloc_table",true,"Allocation-snapshots table."), Str("alloc_emb_col",true,"Allocation embedding column."),
-              Vec("baseline_vec",true,"Baseline allocation vector."), NullableNum("seed","RNG seed."),
+              Vec("baseline_vec",true,"Baseline allocation vector."), Int("seed",false,"RNG seed."),
               Int("k",false,"Neighbors.",5), Str("id_col",false,"Row id column.","id"), Str("context",false,"Optional JSON context.","{}") },
             std::nullopt, false, false,
             [&db]( const Json& a, CallCtx& ) { return agentRow( db, "fractal_agent_rebalance_sibling", {
@@ -188,7 +188,7 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_agent_diverse_portfolios", "agency", ToolClass::Expensive,
             { Vec("mu",true,"Expected returns."), Vec("cov",true,"Flattened covariance."), Int("cardinality",true,"Max nonzero assets."),
               Int("n_restarts",false,"Independent restarts.",8), Num("overlap_threshold",false,"Asset-overlap threshold.",0.15),
-              Num("quality_frac",false,"Quality fraction gate.",0.90), NullableNum("seed","RNG seed."),
+              Num("quality_frac",false,"Quality fraction gate.",0.90), Int("seed",false,"RNG seed."),
               Str("context",false,"Optional JSON context.","{}"), StrEnum("objective_mode",false,"'sharpe' or 'pareto'.","sharpe") },
             std::nullopt, false, false,
             [&db]( const Json& a, CallCtx& ) {
@@ -321,8 +321,8 @@ namespace fsqlmcp
         // Returns a SETOF (up to k rows), not a single composite row.
         t.push_back( ToolSpec{ "fractal_agent_recall_hybrid", "agency", ToolClass::Cheap,
             { Str("mem_table",true,"Memory table."), Str("vec_col",true,"Embedding column."), Vec("query_vec",true,"Query vector."),
-              NullableStr("filter_col","Metadata filter column."), NullableStr("filter_val","Metadata filter value."),
-              Int("k",false,"Neighbors.",5), Str("id_col",false,"Row id column.","id"), NullableStr("content_col","Content column to return.") },
+              Str("filter_col",false,"Metadata filter column."), Str("filter_val",false,"Metadata filter value."),
+              Int("k",false,"Neighbors.",5), Str("id_col",false,"Row id column.","id"), Str("content_col",false,"Content column to return.") },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 auto call = pgSelectCall( "fractal_agent_recall_hybrid", {
@@ -454,7 +454,7 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_agent_trajectory_predict", "agency", ToolClass::Expensive,
             { Str("table_name",true,"Table with a single-column primary key."), Str("vector_col",true,"Embedding column."),
               Int("baseline_id",true,"Baseline row's primary key."), Int("forecast_steps",true,"Reserved for a future extrapolation step.") },
-            std::nullopt, false, false,
+            std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 Json row = agentRow( db, "fractal_agent_trajectory_predict", {
                     PgBind::s( "text", a.at( "table_name" ).get<std::string>() ),
@@ -467,13 +467,14 @@ namespace fsqlmcp
         t.back().description = std::string("Forecast state by matching the drift delta (current - baseline) "
             "against a table's own history. Returns {predicted_state_vector, projected_drift_delta, "
             "risk_threshold_exceeded}.");
+        t.back().idempotentHint = true;   // reads the table and forecasts; writes nothing
         // Closed-world: reads the table's own vectors; no LLM or embedding call.
 
         // Not STRICT (the body applies its own defaults). The result is
         // {agent_id, dfa_exponent, is_loop_detected}.
         t.push_back( ToolSpec{ "fractal_agent_detect_loop", "agency", ToolClass::Cheap,
             { Str("agent_id",true,"Agent identifier."), Vec("state_log",true,"Row-major n_states*dim doubles."),
-              Int("dim",true,"State dimension."), Int("n_bits",false,"SimHash bits.",64), Num("seed",false,"SimHash seed.",42.0),
+              Int("dim",true,"State dimension."), Int("n_bits",false,"SimHash bits.",64), Int("seed",false,"SimHash seed.",42.0),
               Int("hamming_threshold",false,"Cycle-match Hamming tolerance.",0) },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) { return agentRow( db, "fractal_agent_detect_loop", {

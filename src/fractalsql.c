@@ -49,10 +49,10 @@
  *   fractal_edition() -> text
  *   fractal_version() -> text
  *
- *   fractalsql_set_config(key text, value text) -> text
- *   fractalsql_get_config(key text) -> text
+ *   fractal_config_set(key text, value text) -> text
+ *   fractal_config_get(key text) -> text
  *     Typed, per-key-validated access to the fractalsql.* GUCs
- *     (the SQL equivalent of the SQLite edition's fractalsql_set()/fractalsql_get()).
+ *     (the SQL-level fractal_config_set()/fractal_config_get()).
  *
  * Reasoning plugin wiring (optional):
  *   Set in postgresql.conf (restart required):
@@ -204,11 +204,11 @@ static T2SAllowedStmts t2s_allowed_stmts_mode(void);
 static char *fractal_text_to_sql_internal(const char *question, ArrayType *table_names, char *feedback);
 
 #define FSQL_EDITION "Community"
-#define FSQL_VERSION "2.0.21"
+#define FSQL_VERSION "2.0.22"
 
 /* B4-extended (H3) — supply-side DoS guards.
  *
- * Same shape as the redis/valkey blob caps: a SQL caller controls
+ * Same shape as the blob caps elsewhere in this codebase: a SQL caller controls
  * the query-vector dim and the SFS hyperparameters, all of which
  * feed allocations sized as some multiple of dim or pop_size. Cap
  * each at a value well above any realistic workload so adversarial
@@ -259,7 +259,7 @@ static char *fractal_text_to_sql_internal(const char *question, ArrayType *table
 
 /* Widest SimHash fingerprint fractal_state_fingerprint / fractal_cycle_detect
  * accept: 4 MiB of fingerprint. Past it a single call only burns CPU and
- * memory. The same ceiling as the MariaDB and SQLite editions. */
+ * memory. */
 #define FSQL_FINGERPRINT_MAX_BITS 33554424
 
 /* Most random draws one fingerprint (n_bits x vector length) may cost: about
@@ -449,7 +449,7 @@ static bool  g_t2s_use_review       = false;
  * reasoning call would have produced is gone, and the result says so.
  * fractal_reason/fractal_text_to_sql/fractal_sql_agent keep raising even with
  * the flag on -- the raise IS their result (or preempts their data half), the
- * same convention the sqlite engine's da_reason/agents_rag_pipeline port
+ * same convention the da_reason/agents_rag_pipeline port
  * established. PGC_USERSET so any session can SET it per-connection (the MCP
  * server turns it on for its sessions; an operator can ALTER SYSTEM it for a
  * persistent default). */
@@ -4110,7 +4110,7 @@ static const char *const t2s_denied_func_prefixes[] = {
     "fractal_vectorizer_", "fractal_store_", "fractal_diversify_",
     "fractal_feedback_report", "fractal_isolate_background",
     "fractal_agent_feedback_audit", "fractal_agent_recommend_diverse",
-    "fractalsql_set_config", "fractal_sql_agent", "fractal_agent_data_analyst",
+    "fractal_config_set", "fractal_sql_agent", "fractal_agent_data_analyst",
     "set_config", "nextval", "setval", "pg_terminate_backend",
     "pg_cancel_backend", "pg_reload_conf", "pg_read_", "pg_ls_",
     "pg_stat_file", "lo_import", "lo_export", "lo_create", "lo_unlink",
@@ -6806,7 +6806,7 @@ fractal_version(PG_FUNCTION_ARGS)
 }
 
 /* ------------------------------------------------------------------ */
-/* Typed config surface: fractalsql_set_config() / fractalsql_get_config() */
+/* Typed config surface: fractal_config_set() / fractal_config_get() */
 /* ------------------------------------------------------------------ */
 /* The extension's configuration lives in PostgreSQL's GUC machinery --
  * the DefineCustom*Variable calls in _PG_init() above. Until now the
@@ -6816,8 +6816,7 @@ fractal_version(PG_FUNCTION_ARGS)
  * change the one key whose GUC is session-scoped by design.
  *
  * These two functions are the SQL-callable, typed, privilege-aware
- * wrapper over that machinery -- the equivalent of the SQLite edition's
- * fractalsql_set()/fractalsql_get().
+ * wrapper over that machinery: fractal_config_set()/fractal_config_get().
  * They deliberately do NOT introduce a second configuration store:
  * every value they touch IS the GUC's own value, read from and written
  * through the GUC machinery, so current_setting(), SHOW and pg_settings
@@ -6933,7 +6932,7 @@ fsql_cfg_lookup(const char *name)
      * ("fractalsql.http_url"). Folding only the prefixed spelling
      * left the bare one case-sensitive, which contradicted both this
      * function's contract and the SQL COMMENT on
-     * fractalsql_get_config()/fractalsql_set_config(). */
+     * fractal_config_get()/fractal_config_set(). */
     bare = (strncmp(lowered, "fractalsql.", 11) == 0) ? lowered + 11 : lowered;
 
     for (i = 0; i < FSQL_CFG_N; i++)
@@ -6974,7 +6973,7 @@ fsql_cfg_canonical_value(const FsqlCfgKey *k, const char *value)
         if (strlen(value) > FSQL_CFG_MAX_STRING)
             ereport(ERROR,
                     (errcode(ERRCODE_STRING_DATA_LENGTH_MISMATCH),
-                     errmsg("fractalsql_set_config: \"%s\" is too long", k->key),
+                     errmsg("fractal_config_set: \"%s\" is too long", k->key),
                      errdetail("The value must be at most %d bytes.",
                                FSQL_CFG_MAX_STRING)));
         return value;
@@ -6989,13 +6988,13 @@ fsql_cfg_canonical_value(const FsqlCfgKey *k, const char *value)
         if (end == value || *end != '\0' || errno == ERANGE)
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                     errmsg("fractalsql_set_config: \"%s\" expects an integer",
+                     errmsg("fractal_config_set: \"%s\" expects an integer",
                             k->key),
                      errdetail("Got \"%s\".", value)));
         if (v < k->min || v > k->max)
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                     errmsg("fractalsql_set_config: \"%s\" must be between %d and %d",
+                     errmsg("fractal_config_set: \"%s\" must be between %d and %d",
                             k->key, k->min, k->max),
                      errdetail("Got %ld.", v)));
         return value;
@@ -7015,7 +7014,7 @@ fsql_cfg_canonical_value(const FsqlCfgKey *k, const char *value)
             return "off";
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("fractalsql_set_config: \"%s\" expects a boolean", k->key),
+                 errmsg("fractal_config_set: \"%s\" expects a boolean", k->key),
                  errdetail("Accepted spellings: on, off, true, false, yes, no, "
                            "1, 0, t, f, y, n. Got \"%s\".", value)));
         return NULL;   /* not reached */
@@ -7035,7 +7034,7 @@ fsql_cfg_canonical_value(const FsqlCfgKey *k, const char *value)
         }
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("fractalsql_set_config: \"%s\" must be one of: %s",
+                 errmsg("fractal_config_set: \"%s\" must be one of: %s",
                         k->key, k->allowed),
                  errdetail("Got \"%s\".", value)));
         return NULL;   /* not reached */
@@ -7067,7 +7066,7 @@ fsql_cfg_apply(const char *guc, const char *value)
     if (SPI_connect() != SPI_OK_CONNECT)
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("fractalsql_set_config: SPI_connect failed")));
+                 errmsg("fractal_config_set: SPI_connect failed")));
     /* LCOV_EXCL_BR_STOP */
 
     rc = SPI_execute_with_args("SELECT set_config($1::text, $2::text, false)",
@@ -7077,12 +7076,12 @@ fsql_cfg_apply(const char *guc, const char *value)
     if (rc != SPI_OK_SELECT)
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("fractalsql_set_config: could not apply \"%s\"", guc)));
+                 errmsg("fractal_config_set: could not apply \"%s\"", guc)));
 }
 
-PG_FUNCTION_INFO_V1(fractalsql_set_config);
+PG_FUNCTION_INFO_V1(fractal_config_set);
 Datum
-fractalsql_set_config(PG_FUNCTION_ARGS)
+fractal_config_set(PG_FUNCTION_ARGS)
 {
     char            *name;
     char            *value;
@@ -7092,11 +7091,11 @@ fractalsql_set_config(PG_FUNCTION_ARGS)
     if (PG_ARGISNULL(0))
         ereport(ERROR,
                 (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-                 errmsg("fractalsql_set_config: the key must not be NULL")));
+                 errmsg("fractal_config_set: the key must not be NULL")));
     if (PG_ARGISNULL(1))
         ereport(ERROR,
                 (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-                 errmsg("fractalsql_set_config: the value must not be NULL")));
+                 errmsg("fractal_config_set: the value must not be NULL")));
 
     name  = text_to_cstring(PG_GETARG_TEXT_PP(0));
     value = text_to_cstring(PG_GETARG_TEXT_PP(1));
@@ -7105,7 +7104,7 @@ fractalsql_set_config(PG_FUNCTION_ARGS)
     if (k == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("fractalsql_set_config: unknown config key \"%s\"", name),
+                 errmsg("fractal_config_set: unknown config key \"%s\"", name),
                  errdetail("Known keys: %s", fsql_cfg_key_list())));
 
     /* Validate BEFORE the privilege and scope checks: a value that is
@@ -7120,7 +7119,7 @@ fractalsql_set_config(PG_FUNCTION_ARGS)
     if (k->superuser_only && !superuser())
         ereport(ERROR,
                 (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-                 errmsg("fractalsql_set_config: \"%s\" is a superuser-only setting",
+                 errmsg("fractal_config_set: \"%s\" is a superuser-only setting",
                         k->guc),
                  errdetail("The FractalSQL GUC %s is declared GUC_SUPERUSER_ONLY; "
                            "only a superuser may change it.", k->guc)));
@@ -7133,7 +7132,7 @@ fractalsql_set_config(PG_FUNCTION_ARGS)
     if (k->reload_scoped)
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("fractalsql_set_config: \"%s\" is reload-scoped and "
+                 errmsg("fractal_config_set: \"%s\" is reload-scoped and "
                         "cannot be changed in a session", k->guc),
                  errdetail("The FractalSQL GUC %s is PGC_SIGHUP: a session "
                            "cannot change it, exactly as a bare SET cannot.",
@@ -7147,9 +7146,9 @@ fractalsql_set_config(PG_FUNCTION_ARGS)
     PG_RETURN_TEXT_P(cstring_to_text(canon));
 }
 
-PG_FUNCTION_INFO_V1(fractalsql_get_config);
+PG_FUNCTION_INFO_V1(fractal_config_get);
 Datum
-fractalsql_get_config(PG_FUNCTION_ARGS)
+fractal_config_get(PG_FUNCTION_ARGS)
 {
     char            *name;
     const FsqlCfgKey *k;
@@ -7158,7 +7157,7 @@ fractalsql_get_config(PG_FUNCTION_ARGS)
     if (PG_ARGISNULL(0))
         ereport(ERROR,
                 (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-                 errmsg("fractalsql_get_config: the key must not be NULL")));
+                 errmsg("fractal_config_get: the key must not be NULL")));
 
     name = text_to_cstring(PG_GETARG_TEXT_PP(0));
 
@@ -7166,7 +7165,7 @@ fractalsql_get_config(PG_FUNCTION_ARGS)
     if (k == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("fractalsql_get_config: unknown config key \"%s\"", name),
+                 errmsg("fractal_config_get: unknown config key \"%s\"", name),
                  errdetail("Known keys: %s", fsql_cfg_key_list())));
 
     /* Privilege: the same rule as the setter -- a GUC_SUPERUSER_ONLY
@@ -7178,7 +7177,7 @@ fractalsql_get_config(PG_FUNCTION_ARGS)
     if (k->superuser_only && !superuser())
         ereport(ERROR,
                 (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-                 errmsg("fractalsql_get_config: \"%s\" is a superuser-only setting",
+                 errmsg("fractal_config_get: \"%s\" is a superuser-only setting",
                         k->guc),
                  errdetail("The FractalSQL GUC %s is declared GUC_SUPERUSER_ONLY; "
                            "its value is not readable by a non-superuser.",
@@ -7218,8 +7217,8 @@ fractalsql_get_config(PG_FUNCTION_ARGS)
  * core library, never referenced from the community archive (which does
  * not compile them on a clean build). */
 
-/* One-way destructive latch (parity with the sqlite / mariadb / duckdb / valkey
- * ports). fractal_lock_destructive() sets it for this backend; nothing clears
+/* One-way destructive latch (parity with the other ports).
+ * fractal_lock_destructive() sets it for this backend; nothing clears
  * it. Once set, the ledger mutators and fractal_audit_log refuse, so SQL that
  * runs later on the connection -- including model-generated SQL -- cannot undo
  * the lock. The MCP server applies it to its own connections when

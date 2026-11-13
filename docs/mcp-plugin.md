@@ -26,12 +26,7 @@ installed (`fractalsql` + `fractalsql_agents`; see
 [getting-started.md](getting-started.md) — it never creates or changes them
 itself, it is a caller, not an installer) and register it in your MCP client.
 
-Also available: **fractalsql-mariadb-mcp** (shipped in the `fractalsql-mariadb`
-repo — its docs live at `docs/mcp-plugin.md` there) and
-**fractalsql-sqlite-mcp** (shipped in the `fractalsql-sqlite` repo — docs at
-`docs/mcp-plugin.md` there): one server per engine, they know nothing about
-each other, and a single MCP client may register all three at once. Clients
-that support manifest-based discovery can
+Clients that support manifest-based discovery can
 read this server's generated `manifest.json` instead of running the binary
 first.
 
@@ -59,7 +54,7 @@ any reasoning posture.
   it exactly where the engine's docs put it, through this engine's
   `fractalsql.http_url` / `fractalsql.http_model` /
   `fractalsql.http_embed_url` GUCs — via the
-  `fractalsql_configure_reasoning` admin tool (`ALTER SYSTEM SET` +
+  `fractal_configure_reasoning` admin tool (`ALTER SYSTEM SET` +
   `pg_reload_conf()`; see [reasoning-setup.md](reasoning-setup.md)) or an
   operator-side `ALTER SYSTEM SET`. The MCP layer never stores a provider
   token itself.
@@ -111,7 +106,7 @@ Requests whose JSON nests deeper than 128 levels are rejected with a parse error
 FractalSQL's own reasoning/enterprise configuration is **not** duplicated
 here: it lives in the `fractalsql.*` GUCs as
 [reasoning-setup.md](reasoning-setup.md) and [enterprise.md](enterprise.md)
-already document. The admin tool `fractalsql_configure_reasoning` wraps the
+already document. The admin tool `fractal_configure_reasoning` wraps the
 *provider* GUCs via `ALTER SYSTEM SET` + `pg_reload_conf()` and always
 answers "queued; takes effect on the next backend/session" — never "applied".
 
@@ -175,12 +170,12 @@ catalog without running the binary first.
 
 ### 3. The one-line sanity check
 
-Ask the server for `fractalsql_get_version` and expect a real version +
+Ask the server for `fractal_version` and expect a real version +
 edition back:
 
 ```
-> use the fractalsql_get_version tool
-→ {"version": "2.0.21", "edition": "Community"}
+> use the fractal_version tool
+→ {"version": "2.0.22", "edition": "Community"}
 ```
 
 A Community edition string with enterprise-tier tools returning
@@ -401,9 +396,9 @@ schedule.
 
 | Tool | Purpose |
 | --- | --- |
-| `fractalsql_get_version` | `{version, edition}` — the sanity check. |
-| `fractalsql_set_config` / `fractalsql_get_config` | Per-key wrappers over the engine's own `fractalsql.*` GUCs (`set_config(..., false)` / `current_setting()` on the server's dedicated connection; engine-key or `fractalsql.`-prefixed spelling). **Documented keys (enforced):** `reasoning_plugin`, `http_url`, `http_model`, `http_allow_plaintext`, `http_embed_url`, `http_embed_model`, `http_think`, `http_think_provider`, `http_native_url`, `http_num_ctx`, `text_to_sql_max_attempts`, `text_to_sql_allowed_statements`, `text_to_sql_use_review`, `enterprise_lib`, `enterprise_require_signature`, `enterprise_ledger_key`, `agent_partial_reasoning_fail` — `http_token` is excluded as a secret and is never set through the MCP boundary. **Scope honesty:** only `agent_partial_reasoning_fail` is a `PGC_USERSET` key that actually holds a session-level set; the reasoning/http keys are reload-scoped (`PGC_SIGHUP`), so postgres itself refuses the session set ("cannot be changed now") and the tool surfaces a clean error redirecting to `fractalsql_configure_reasoning` (`ALTER SYSTEM SET` + `pg_reload_conf()`) or an operator-side `ALTER SYSTEM SET`, instead of claiming a change took effect. Enterprise-posture keys require `allow_secrets: true` (explicit operator intent — a client UI prompts a human first); superuser-only keys surface the engine's privilege error verbatim. The whole `fractalsql.http_*` family (`http_url`, `http_model`, `http_embed_url`, `http_embed_model`, `http_think`, `http_think_provider`, `http_native_url`, `http_num_ctx`, `http_allow_plaintext`) is `GUC_SUPERUSER_ONLY` in the engine, so a non-superuser session gets that privilege error for those keys on the **get** as well as the set. `destructiveHint`-flagged, and every change is logged with the old and new value (`***` for secrets) — repointing `http_url` silently redirects every later reasoning call on reload. **The `get` half refuses secrets:** `http_token` and `enterprise_ledger_key` are never read back through any MCP tool or resource — check the operator-side `postgresql.conf`/environment that set them. Unset keys return `null`, and values read back via `current_setting` reflect the resolved config-file + reload state for reload-scoped keys. Both tools report `scope` in the result: per-session, this MCP session's dedicated PostgreSQL connection only. |
-| `fractalsql_configure_reasoning` | Sets the reasoning/embeddings GUCs (`http_url`, `http_embed_url`, `http_model`, `http_embed_model`, `http_allow_plaintext`, `http_think`) via `ALTER SYSTEM SET` + `pg_reload_conf()`. The result explicitly states the change is **queued** (SIGHUP-scoped: effective on the next backend/session), not live. Never touches any enterprise GUC, and accepts no secrets — provider tokens stay in the engine's own config surface. `destructiveHint` is set: repointing `http_url` silently reroutes prompts, so every call is logged with the old and new value. |
+| `fractal_version` | `{version, edition}` — the sanity check. |
+| `fractal_config_set` / `fractal_config_get` | Per-key wrappers over the engine's own `fractalsql.*` GUCs (`set_config(..., false)` / `current_setting()` on the server's dedicated connection; engine-key or `fractalsql.`-prefixed spelling). **Documented keys (enforced):** `reasoning_plugin`, `http_url`, `http_model`, `http_allow_plaintext`, `http_embed_url`, `http_embed_model`, `http_think`, `http_think_provider`, `http_native_url`, `http_num_ctx`, `text_to_sql_max_attempts`, `text_to_sql_allowed_statements`, `text_to_sql_use_review`, `enterprise_lib`, `enterprise_require_signature`, `enterprise_ledger_key`, `agent_partial_reasoning_fail` — `http_token` is excluded as a secret and is never set through the MCP boundary. **Scope honesty:** only `agent_partial_reasoning_fail` is a `PGC_USERSET` key that actually holds a session-level set; the reasoning/http keys are reload-scoped (`PGC_SIGHUP`), so postgres itself refuses the session set ("cannot be changed now") and the tool surfaces a clean error redirecting to `fractal_configure_reasoning` (`ALTER SYSTEM SET` + `pg_reload_conf()`) or an operator-side `ALTER SYSTEM SET`, instead of claiming a change took effect. Enterprise-posture keys require `allow_secrets: true` (explicit operator intent — a client UI prompts a human first); superuser-only keys surface the engine's privilege error verbatim. The whole `fractalsql.http_*` family (`http_url`, `http_model`, `http_embed_url`, `http_embed_model`, `http_think`, `http_think_provider`, `http_native_url`, `http_num_ctx`, `http_allow_plaintext`) is `GUC_SUPERUSER_ONLY` in the engine, so a non-superuser session gets that privilege error for those keys on the **get** as well as the set. `destructiveHint`-flagged, and every change is logged with the old and new value (`***` for secrets) — repointing `http_url` silently redirects every later reasoning call on reload. **The `get` half refuses secrets:** `http_token` and `enterprise_ledger_key` are never read back through any MCP tool or resource — check the operator-side `postgresql.conf`/environment that set them. Unset keys return `null`, and values read back via `current_setting` reflect the resolved config-file + reload state for reload-scoped keys. Both tools report `scope` in the result: per-session, this MCP session's dedicated PostgreSQL connection only. |
+| `fractal_configure_reasoning` | Sets the reasoning/embeddings GUCs (`http_url`, `http_embed_url`, `http_model`, `http_embed_model`, `http_allow_plaintext`, `http_think`) via `ALTER SYSTEM SET` + `pg_reload_conf()`. The result explicitly states the change is **queued** (SIGHUP-scoped: effective on the next backend/session), not live. Never touches any enterprise GUC, and accepts no secrets — provider tokens stay in the engine's own config surface. `destructiveHint` is set: repointing `http_url` silently reroutes prompts, so every call is logged with the old and new value. |
 
 ---
 
@@ -976,7 +971,7 @@ narrow, compose-only exception to the least-privilege advice above.
 | `error_class: "connectivity"` | The DB, or the upstream LLM provider inside the engine, was unreachable/timed out. Not the caller's problem — retry later or alert the operator. |
 | Agent result whose `answer` starts with `reasoning_step_failed:` (the C-native `fractal_search_agent`/`fractal_rag_agent`) | Not an error: the agent's computed data half is real and complete, its LLM step failed (provider down/misconfigured — see the `connectivity` row). `fractalsql.agent_partial_reasoning_fail` is on (this server sets it per session; `FSQL_MCP_AGENT_PARTIAL=false` restores the raising behavior). Re-run later for the reasoned half, or check whether you're treating the LLM column as data. |
 | Agent result whose `rationale`/`triage_summary`/`reason`/`analysis` field is `null` while a companion `reasoning_step_failed` field carries the error (the thirteen PL/pgSQL agents) | Not an error: same posture as the row above -- the computed data half is real and complete, the LLM step failed. The two-column contract is the relational form of the `{"<llm>":null,"reasoning_step_failed":"<error>"}` JSON shape, so test the LLM field for `null` rather than sniffing a marker prefix. A missing reasoning plugin is a setup mistake and raises even with the flag on. |
-| `version skew` warning in the server log | The MCP server ships against `fractalsql` `2.0.21` and the target DB reports another `fractal_version()`. Surface mismatches are possible — check the docs' compat matrix (warning only; not a startup failure). |
+| `version skew` warning in the server log | The MCP server ships against `fractalsql` `2.0.22` and the target DB reports another `fractal_version()`. Surface mismatches are possible — check the docs' compat matrix (warning only; not a startup failure). |
 | `server busy` | A concurrency cap was hit (`FSQL_MCP_MAX_CONCURRENT_*`). Retry later; the call was never dispatched. |
 | `fractal_detect_collapse` returns null | No search has run yet on this session, or Diversify is off. Run a search (with Diversify enabled) first. |
 | DFA/box-count results that look like noise | Under-sized input: DFA wants ~24+ points (16 documented), box-counting hundreds, morphology ~256+. The tool descriptions carry the empirically-verified minimums. |

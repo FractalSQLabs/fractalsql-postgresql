@@ -165,7 +165,7 @@ namespace fsqlmcp
     {
         std::vector<ToolSpec> t;
 
-        t.push_back( ToolSpec{ "fractalsql_get_version", "admin", ToolClass::Cheap, {}, std::nullopt, false, true,
+        t.push_back( ToolSpec{ "fractal_version", "admin", ToolClass::Cheap, {}, std::nullopt, false, true,
             [&db]( const Json&, CallCtx& ) {
                 const auto v = db.callScalar( "SELECT fractal_version()", {} );
                 const auto e = db.callScalar( "SELECT fractal_edition()", {} );
@@ -177,10 +177,10 @@ namespace fsqlmcp
             "version differs from what this server was built against (the version-skew guard warns, never hard-fails).";
 
         // The config-key tools over the engine's GUCs, per-session scoped
-        // (POSTGRES analog of the SQLite column's fractalsql_set/get wrappers —
+        // (the wrappers over fractal_config_set/get —
         // keys map 1:1 onto the DefineCustom*Variable surface in src/fractalsql.c;
         // the scope is THIS session's dedicated connection instead of a file).
-        t.push_back( ToolSpec{ "fractalsql_set_config", "admin", ToolClass::Cheap,
+        t.push_back( ToolSpec{ "fractal_config_set", "admin", ToolClass::Cheap,
             { StrEnum( "key", true, "One of the documented config keys (enforced): reasoning_plugin, "
                                     "http_url, http_model, http_allow_plaintext, http_embed_url, "
                                     "http_embed_model, http_think, http_think_provider, http_native_url, "
@@ -214,7 +214,7 @@ namespace fsqlmcp
                 if( std::find_if( kKnownKeys.begin(), kKnownKeys.end(),
                                   [&]( const char* k ) { return asBareKey( key ) == k; } ) == kKnownKeys.end() )
                     throw ToolError( ErrorClass::Schema,
-                        "unknown config key '" + key + "': fractalsql_set_config accepts the documented "
+                        "unknown config key '" + key + "': fractal_config_set accepts the documented "
                         "keys (reasoning_plugin, http_url, http_model, http_allow_plaintext, http_embed_url, "
                         "http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, "
                         "text_to_sql_max_attempts, text_to_sql_allowed_statements, text_to_sql_use_review, "
@@ -324,7 +324,7 @@ namespace fsqlmcp
             "set it instead.";
         t.back().secretHint = true;   // credential-shaped values pass through even though logs redact
 
-        t.push_back( ToolSpec{ "fractalsql_get_config", "admin", ToolClass::Cheap,
+        t.push_back( ToolSpec{ "fractal_config_get", "admin", ToolClass::Cheap,
             { Str( "key", true, "Config key to read back (engine-key or fractalsql.-prefixed spelling)." ) }, std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
                 const std::string key = a.at( "key" ).get<std::string>();
@@ -353,14 +353,14 @@ namespace fsqlmcp
             "non-superuser session gets the server's privilege error verbatim for those keys, exactly as it "
             "does for the other superuser-only settings.";
 
-        t.push_back( ToolSpec{ "fractalsql_configure_reasoning", "admin", ToolClass::Cheap,
-            { NullableStr("provider_url","Chat endpoint URL (e.g. http://127.0.0.1:11434/v1/chat/completions for ollama, or an OpenAI-compatible /v1/chat/completions)."),
-              NullableStr("embed_url","Embeddings endpoint URL (e.g. .../v1/embeddings); a distinct path from chat."),
-              NullableStr("model","Chat model name (e.g. gpt-oss:20b, gpt-4o-mini)."),
-              NullableStr("embed_model","Embedding model name (e.g. nomic-embed-text); never reuse a chat model here."),
+        t.push_back( ToolSpec{ "fractal_configure_reasoning", "admin", ToolClass::Cheap,
+            { Str("provider_url",false,"Chat endpoint URL (e.g. http://127.0.0.1:11434/v1/chat/completions for ollama, or an OpenAI-compatible /v1/chat/completions)."),
+              Str("embed_url",false,"Embeddings endpoint URL (e.g. .../v1/embeddings); a distinct path from chat."),
+              Str("model",false,"Chat model name (e.g. gpt-oss:20b, gpt-4o-mini)."),
+              Str("embed_model",false,"Embedding model name (e.g. nomic-embed-text); never reuse a chat model here."),
               ToolParam{ "allow_plaintext", JsonType::Boolean, false, nullptr,
-                         "Allow plaintext http:// endpoints (needed for local Ollama).", true },
-              NullableStr("think_mode","Reasoning effort for hybrid-thinker models: unset/none (model default), 'off', or any provider-verbatim value (low/medium/high/...).") },
+                         "Allow plaintext http:// endpoints (needed for local Ollama).", false },
+              Str("think_mode",false,"Reasoning effort for hybrid-thinker models: unset/none (model default), 'off', or any provider-verbatim value (low/medium/high/...).") },
             std::nullopt, true, false,
             [&db]( const Json& a, CallCtx& ctx ) {
                 // Collect EVERY requested field FIRST: a call that names a key

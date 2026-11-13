@@ -131,7 +131,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.21"
+          test "\$VERSION" = "2.0.22"
           echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Shipped MCP server verification ---------------------------
@@ -142,8 +142,8 @@ jobs:
               || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
           MCP_V=\$("\${MCP}" --version)
           echo "mcp=\${MCP} version=\${MCP_V}"
-          test "\${MCP_V}" = "2.0.21" \
-              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.21"; exit 1; }
+          test "\${MCP_V}" = "2.0.22" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.22"; exit 1; }
           # The lock files install beside the binary, which is where the server looks for them; run it from
           # another directory so that lookup is what has to find them.
           test -f "\$(dirname "\${MCP}")/.mcp-schema-lock" && test -f "\$(dirname "\${MCP}")/.mcp-safety-annotations-lock" \
@@ -305,8 +305,8 @@ jobs:
               || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
           MCP_V=\$("\${MCP}" --version)
           echo "mcp version=\${MCP_V}"
-          test "\${MCP_V}" = "2.0.21" \
-              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.21"; exit 1; }
+          test "\${MCP_V}" = "2.0.22" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.22"; exit 1; }
           # The lock files install beside the binary, which is where the server looks for them; run it from
           # another directory so that lookup is what has to find them.
           test -f "\$(dirname "\${MCP}")/.mcp-schema-lock" && test -f "\$(dirname "\${MCP}")/.mcp-safety-annotations-lock" \
@@ -427,7 +427,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.21"
+          test "\$VERSION" = "2.0.22"
           echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Shipped MCP server verification ---------------------------
@@ -436,8 +436,8 @@ jobs:
               || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
           MCP_V=\$("\${MCP}" --version)
           echo "mcp=\${MCP} version=\${MCP_V}"
-          test "\${MCP_V}" = "2.0.21" \
-              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.21"; exit 1; }
+          test "\${MCP_V}" = "2.0.22" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.22"; exit 1; }
           # The lock files install beside the binary, which is where the server looks for them; run it from
           # another directory so that lookup is what has to find them.
           test -f "\$(dirname "\${MCP}")/.mcp-schema-lock" && test -f "\$(dirname "\${MCP}")/.mcp-safety-annotations-lock" \
@@ -545,8 +545,8 @@ jobs:
           # (binary + README + locks + manifest) next to install.sh.
           MCP_V=$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --version)
           echo "mcp version=${MCP_V}"
-          test "${MCP_V}" = "2.0.21" \
-              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.21"; exit 1; }
+          test "${MCP_V}" = "2.0.22" \
+              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.22"; exit 1; }
           echo "ok: shipped MCP server --version (macOS)"
           # Run from another directory: the lock files beside the binary must be found, and the tool table loads.
           for f in .mcp-schema-lock .mcp-safety-annotations-lock manifest.json; do
@@ -571,7 +571,7 @@ jobs:
           VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.21"
+          test "${VERSION}" = "2.0.22"
 
           # Search works with no further config.
           psql -d postgres -Atc \
@@ -642,8 +642,8 @@ jobs:
           test -f "$(pg_config --sharedir)/extension/fractalsql.control"
           # Shipped MCP server verification (same check macos-install runs).
           MCP_V=$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --version)
-          test "${MCP_V}" = "2.0.21" \
-              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.21"; exit 1; }
+          test "${MCP_V}" = "2.0.22" \
+              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.22"; exit 1; }
           ( cd "${RUNNER_TEMP}" && test "$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --list-tools | wc -l)" -ge 60 )
           test -e /tmp/"${DIR}"/mcp/.mcp-schema-lock && test -e /tmp/"${DIR}"/mcp/.mcp-safety-annotations-lock
 

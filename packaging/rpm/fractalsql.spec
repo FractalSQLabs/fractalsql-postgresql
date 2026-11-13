@@ -12,7 +12,7 @@
 # prebuilt .so from dist/${arch}/fractalsql_pg${pg_major}.so.
 
 Name:           postgresql-%{pg_major}-fractalsql
-Version:        2.0.21
+Version:        2.0.22
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search extension for PostgreSQL %{pg_major}
 
@@ -113,8 +113,26 @@ install -Dm0644 mcp/manifest.json \
 %{mcpdocdir}/manifest.json
 
 %changelog
+* Fri Nov 13 2026 FractalSQLabs - 2.0.22-1
+- the configuration functions are now fractal_config_set() and
+  fractal_config_get(). The MCP tools follow: fractal_version,
+  fractal_config_set, fractal_config_get, fractal_configure_reasoning.
+- fractal_tda_persistence_diagram() requires max_dim and
+  max_thresh (no defaults). The MCP tool takes max_dim (default 0) and a
+  required max_thresh, and is marked EXPERIMENTAL.
+- MCP: parameters renamed and tidied to the shared standard: window
+  (spectrogram_entropy), vector (state fingerprint and both quantize
+  tools), n_bits optional (default 128), integer seeds, optional
+  parameters published as plain types. trajectory_predict is read-only
+  and idempotent.
+- MCP: FSQL_MCP_DUMP_PROJECTION writes the canonical projection the
+  schema hash is taken over, for diagnosing a lock mismatch.
+- Tests updateed for build_test.sh --profile runs valgrind memcheck over the
+  extension (a postmaster under valgrind, the demo kits) and the MCP
+  server; a unit test of the audit redaction (hash and truncate modes);
+  fuzz-corpus replay for the coverage run; a coverage floor.
 * Sat Nov 07 2026 FractalSQLabs - 2.0.21-1
-- Safety: the reasoning plugin is now signed. It ships with a detached
+- Safety update the reasoning plugin is now signed. It ships with a detached
   Ed25519 signature (.sig) beside it and loads only when that file is
   present and valid; a missing signature is refused unless
   FSQL_REASONING_REQUIRE_SIGNATURE=0 is set in the server environment,
@@ -124,7 +142,7 @@ install -Dm0644 mcp/manifest.json \
   origins, locks and sessions; see docs/mcp-plugin.md.
 - Audit: the text of an agent's question can be hashed or truncated
   before it is written to an audit entry (FSQL_AUDIT_REDACT).
-- Packaging: the plugin's .sig is installed beside the plugin, and the
+- Packaging the plugin's .sig is installed beside the plugin, and the
   Windows installer now includes the reasoning plugin.
 
 * Tue Oct 20 2026 FractalSQLabs - 2.0.20-1

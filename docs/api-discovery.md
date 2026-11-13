@@ -36,8 +36,6 @@ fractal_search(
 ### Query-Vector Dimension Limit
 The query vector may carry up to **16,384 dimensions** — the shared core library's `FSQL_MAX_DIM`, and the ceiling that actually fires (`exceeds FSQL_MAX_DIM`). This engine's own SQL-side guard allows up to 1,048,576, but the core library's limit is always the tighter one, so a query beyond 16,384 dimensions is rejected.
 
-> **Engine note (dimension ceiling).** The SQLite edition caps the same call at **4,096** dimensions (its fixed query arena), even though it links the same core library. A query of 4,097–16,384 dimensions is therefore accepted here and rejected there — the two engines are not interchangeable at the dimension extremes. The rejection text differs too: the sibling reports `query dim N out of range [1, 4096]`, while this engine reports the core library's `exceeds FSQL_MAX_DIM`.
-
 `fractal_search_debug` and `fractal_search_explore` take the same query and share the same limit.
 
 ---

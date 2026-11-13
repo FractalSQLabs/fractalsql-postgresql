@@ -312,15 +312,16 @@ SELECT at_index, cycle_len FROM fractal_cycle_detect(
 -- Two tight 6-point clusters in dim 2. h0_bars is the single-linkage
 -- barcode: here it comes back with 10 bars, all born at 0 -- six dying
 -- at 0.05 and four at 0.0707 -- and no bar outlives its own cluster,
--- because the two clusters sit ~7 units apart, far beyond the default
--- max_thresh of 1.0.
+-- because the two clusters sit ~7 units apart, far beyond the
+-- max_thresh of 1.0 passed below (max_thresh is required).
 -- betti1 is the graph cycle rank: each cluster forms a complete
 -- 6-point graph (15 edges) at this scale, so betti1 = 15+15-12+2 = 20
 -- -- the informational over-count vs. true H1 the TDA section in
 -- docs/api-analytics.md documents (the triangles are not subtracted out).
+-- max_dim=1 asks for the graph cycle-rank estimate alongside the bars.
 SELECT * FROM fractal_tda_persistence_diagram(
     ARRAY[0,0, 0.1,0, 0,0.1, 0.1,0.1, 0.05,0.05, 0.1,0.05,
-          5,5, 5.1,5, 5,5.1, 5.1,5.1, 5.05,5.05, 5.1,5.05]::float8[], 2
+          5,5, 5.1,5, 5,5.1, 5.1,5.1, 5.05,5.05, 5.1,5.05]::float8[], 2, 1, 1.0
 ) AS tda;
 
 -- p=2 matches <-> mathematically (0.1414 for these vectors); p=0.5
