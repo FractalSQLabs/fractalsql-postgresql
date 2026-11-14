@@ -33,7 +33,7 @@
 using namespace fsqlmcp;
 
 #ifndef FSQL_MCP_VERSION
-#define FSQL_MCP_VERSION "2.0.21"
+#define FSQL_MCP_VERSION "2.0.22"
 #endif
 
 static std::string envOr( const char* name, const std::string& def )

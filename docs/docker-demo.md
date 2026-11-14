@@ -81,7 +81,7 @@ dormant-path NOTICE. `run_demo.sh --help` lists the flags
 `response-modes.sql`, which is skipped by default — see
 [Response modes](../demo/README.md#response-modes) for why it needs
 separate treatment. On this image you should see extension version
-**2.0.21**.
+**2.0.22**.
 
 **Alternative: Docker Model Runner (Docker Desktop only).** Skip the
 `ollama` container and use Docker Desktop's built-in Model Runner instead:

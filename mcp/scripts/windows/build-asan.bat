@@ -75,6 +75,25 @@ if errorlevel 1 (
   echo FATAL: asan mcp build failed 1>&2
   exit /b 1
 )
+
+rem The ASan runtime the exe imports (clang_rt.asan_dynamic-x86_64.dll) must
+rem come from the SAME LLVM that compiled the exe. The runtime's thunk-init
+rem table is version-specific, so a mismatched runtime aborts the process at
+rem startup with "Failed to find sanitizer DLL export '__asan_wrap_...'" and
+rem a CHECK failure -- and whichever clang_rt the loader happens to find on
+rem PATH wins, which on a build box with several LLVM installs is the wrong
+rem one. Ship the matching runtime beside the exe: the exe's own directory
+rem is searched before PATH, so the load is deterministic. Same
+rem "travels with the binary" rule the committed MCP lock files follow.
+set "RESDIR="
+for /f "usebackq tokens=*" %%d in (`"%CLANGCL%" -print-resource-dir`) do set "RESDIR=%%d"
+if defined RESDIR (
+  if exist "!RESDIR!\lib\windows\clang_rt.asan_dynamic-x86_64.dll" (
+    copy /y "!RESDIR!\lib\windows\clang_rt.asan_dynamic-x86_64.dll" "%OUTDIR%\" >nul
+  ) else (
+    echo WARN: no asan runtime DLL under "!RESDIR!\lib\windows" -- the exe will load whatever clang_rt.asan_dynamic-x86_64.dll is first on PATH 1>&2
+  )
+)
 echo asan mcp build OK: %OUTDIR%\fractalsql-postgresql-mcp.exe
 endlocal
 exit /b 0

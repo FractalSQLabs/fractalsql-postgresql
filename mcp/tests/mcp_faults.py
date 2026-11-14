@@ -76,7 +76,7 @@ def _calls(tools):
     for t in tools:
         name = t["name"]
         ann = t.get("annotations") or {}
-        if ann.get("destructiveHint") or name.startswith(_SKIP_PREFIX) or name == "fractalsql_get_version":
+        if ann.get("destructiveHint") or name.startswith(_SKIP_PREFIX) or name == "fractal_version":
             continue
         props = (t.get("inputSchema") or {}).get("properties", {})
         required = set((t.get("inputSchema") or {}).get("required", []))

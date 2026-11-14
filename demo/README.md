@@ -109,8 +109,8 @@ actually worked, not just "looks like JSON."
 In the [Docker demo](../docs/docker-demo.md#docker-demo-the-learning-path), the
 `run_demo.sh --include-response-modes` runner shape skips the manual
 three-pass dance above — each mode runs as its own connection with the
-right environment set, matching this procedure. One PostgreSQL caveat
-that the SQLite column doesn't have: the mode env is read on the
+right environment set, matching this procedure. One PostgreSQL caveat:
+the mode env is read on the
 *server* side, so a non-default mode additionally needs the postgres
 service itself restarted with that env (see `run_demo.sh`'s header and
 `response-modes.sql`'s own header for exactly what reaches where).

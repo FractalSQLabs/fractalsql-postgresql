@@ -53,7 +53,7 @@ _INIT = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                     "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cli", "version": "0"}}})
 _LIST = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 _CALL = json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                    "params": {"name": "fractalsql_get_version", "arguments": {}}})
+                    "params": {"name": "fractal_version", "arguments": {}}})
 
 
 def _check(label, cond):
@@ -98,8 +98,8 @@ def one_shot(cwd):
         (["--no-such-flag"], {}, "nonzero"), (["--tool"], {}, "nonzero"), (["--category"], {}, "nonzero"),
         (["--schema-lock-path"], {}, "nonzero"), (["--host"], {}, "nonzero"), (["x"], {}, "nonzero"),
         (["--list-tools"], {}, "zero"),
-        (["--list-tools", "--tool", "fractalsql_get_version"], {}, "zero"),
-        (["--list-tools", "--tool", "fractalsql_get_version,fractal_search,"], {}, "zero"),
+        (["--list-tools", "--tool", "fractal_version"], {}, "zero"),
+        (["--list-tools", "--tool", "fractal_version,fractal_search,"], {}, "zero"),
         (["--list-tools", "--tool", ","], {}, "zero"), (["--list-tools", "--tool", "no_such_tool"], {}, "zero"),
         (["--list-tools", "--tool", ""], {}, "zero"),
         (["--list-tools", "--category", "admin"], {}, "zero"),
@@ -187,7 +187,7 @@ def stdio(cwd):
         rc, out = _session([], env, [_INIT, _LIST, _CALL], cwd)
         ok = _ended_well(rc) and (rc != 0 or '"id":1' in out.replace(" ", ""))
         _record(ok, "stdio %s -> rc %s" % (env, rc))
-    for args in (["--tool", "fractalsql_get_version"], ["--category", "admin"], ["--category", "no_such"],
+    for args in (["--tool", "fractal_version"], ["--category", "admin"], ["--category", "no_such"],
                  ["--tool", ","], ["--host", "127.0.0.1"]):
         rc, out = _session(args, {}, [_INIT, _LIST, _CALL], cwd)
         _record(_ended_well(rc), "stdio %s -> rc %s" % (args, rc))
@@ -279,7 +279,7 @@ def http(cwd):
         cases.append((["--http", port, "--host", bind], {"FSQL_MCP_AUTH_TOKEN": "t" * 32}))
     cases.append((["--http"], {"FSQL_MCP_AUTH_TOKEN": "t" * 32}))
     cases.append((["--http", "--host", "127.0.0.1"], {"FSQL_MCP_AUTH_TOKEN": "t" * 32}))
-    cases.append((["--http", port, "--tool", "fractalsql_get_version"], {"FSQL_MCP_AUTH_TOKEN": "t" * 32}))
+    cases.append((["--http", port, "--tool", "fractal_version"], {"FSQL_MCP_AUTH_TOKEN": "t" * 32}))
     n0 = len(_OFFENDERS)
     for args, env in cases:
         rc, _ = _http_run(args, env, cwd)
@@ -414,7 +414,7 @@ def killed_connection(cwd):
         send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
         ok &= wait_id(1) is not None
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-              "params": {"name": "fractalsql_get_version", "arguments": {}}})
+              "params": {"name": "fractal_version", "arguments": {}}})
         ok &= wait_id(2) is not None
         for rnd in range(4):
             # Terminate every other backend of this database: the server's own connection among them.
@@ -426,7 +426,7 @@ def killed_connection(cwd):
             for k in range(3):
                 rid = 100 + rnd * 10 + k
                 send({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
-                      "params": {"name": ("fractalsql_get_version", "fractal_embed", "fractal_schema_context")[k],
+                      "params": {"name": ("fractal_version", "fractal_embed", "fractal_schema_context")[k],
                                  "arguments": {} if k != 1 else {"text": "x"}}})
                 if wait_id(rid, 30) is not None:
                     answers += 1

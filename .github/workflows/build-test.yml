@@ -159,6 +159,53 @@ jobs:
             exit 1
           }
 
+      - name: Cache vcpkg binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: C:\vcpkg_cache
+          key: windows-vcpkg-openssl-static-v1
+
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        shell: cmd
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,C:\vcpkg_cache,readwrite
+        run: |
+          # Gates 33/38 (mcp_smoke/mcp_https) build the MCP server on
+          # Windows, which links the vcpkg static OpenSSL. Same step the
+          # release and install-test workflows already use.
+          echo VCPKG_ROOT=C:\vcpkg>>%GITHUB_ENV%
+          C:\vcpkg\vcpkg.exe install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
+      - name: Expose vcpkg at the ..\vcpkg path the gate runner expects
+        shell: pwsh
+        run: |
+          # build_test.ps1 resolves the vcpkg tree as $RepoRoot\..\vcpkg
+          # (the sibling-of-the-repo layout a developer has locally) and
+          # ignores %VCPKG_ROOT% for that build; the ASan/UBSan leg
+          # rewrites %VCPKG_ROOT% to that same path. A junction at that
+          # sibling path makes the runner's C:\vcpkg visible there --
+          # junctions need no admin rights, and the runner's own work
+          # directory is writable.
+          $repoRoot = (Resolve-Path .).Path
+          $link = Join-Path (Split-Path -Parent $repoRoot) 'vcpkg'
+          if (-not (Test-Path $link)) {
+            New-Item -ItemType Junction -Path $link -Target 'C:\vcpkg' | Out-Null
+          }
+          $probe = Join-Path $link 'installed\x64-windows-static\include\openssl\evp.h'
+          if (-not (Test-Path $probe)) {
+            Write-Host "FATAL: vcpkg OpenSSL headers not reachable at $probe"
+            exit 1
+          }
+          # Gate 38 (mcp_https) needs the openssl CLI for its throwaway
+          # self-signed pair; the runner image ships one.
+          if (-not (Get-Command openssl.exe -ErrorAction SilentlyContinue)) {
+            $osslBin = Join-Path $env:ProgramFiles 'OpenSSL\bin'
+            if (Test-Path (Join-Path $osslBin 'openssl.exe')) {
+              Add-Content -Path $env:GITHUB_PATH -Value $osslBin
+            }
+          }
+
       - name: build_test.ps1 --pg ${{ matrix.pg }}
         shell: pwsh
         run: |
@@ -202,7 +249,23 @@ jobs:
       - name: Install PostgreSQL ${{ matrix.pg }} (Homebrew)
         run: |
           set -euo pipefail
-          brew install postgresql@${{ matrix.pg }}
+          # openssl@3 + pkg-config: gate 33 (mcp_smoke) and the other MCP
+          # gates build the server via mcp/Makefile, which resolves libpq
+          # and openssl through pkg-config. Without them those gates
+          # self-skip, so a green CI would say nothing about the MCP
+          # surface.
+          brew install postgresql@${{ matrix.pg }} openssl@3 pkg-config
+          # Homebrew's postgresql@<major> and openssl@3 are keg-only, so
+          # their .pc files sit outside pkg-config's default search path.
+          # Point PKG_CONFIG_PATH at them, the same pair
+          # scripts/package-darwin.sh exports for the release build.
+          pg_prefix="$(brew --prefix postgresql@${{ matrix.pg }})"
+          pg_pc="$(find "$pg_prefix/lib" -name libpq.pc -print -quit 2>/dev/null || true)"
+          pc_path="$(brew --prefix openssl@3)/lib/pkgconfig"
+          if [ -n "$pg_pc" ]; then
+            pc_path="$(dirname "$pg_pc"):$pc_path"
+          fi
+          echo "PKG_CONFIG_PATH=$pc_path" >> "$GITHUB_ENV"
 
       - name: build_test.sh --pg ${{ matrix.pg }}
         run: |
@@ -247,6 +310,52 @@ jobs:
           } else {
             Write-Host "FATAL: expected deps\pg\pgsql\ inside the zip"
             exit 1
+          }
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: C:\vcpkg_cache
+          key: windows-vcpkg-openssl-static-v1
+
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        shell: cmd
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,C:\vcpkg_cache,readwrite
+        run: |
+          # Gates 33/38 (mcp_smoke/mcp_https) build the MCP server on
+          # Windows, which links the vcpkg static OpenSSL. Same step the
+          # release and install-test workflows already use.
+          echo VCPKG_ROOT=C:\vcpkg>>%GITHUB_ENV%
+          C:\vcpkg\vcpkg.exe install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
+      - name: Expose vcpkg at the ..\vcpkg path the gate runner expects
+        shell: pwsh
+        run: |
+          # The sanitizer legs of the gate runner (build-asan.bat /
+          # build-ubsan.bat) resolve the vcpkg tree as
+          # %REPO_DIR%\..\vcpkg, and build_test.ps1 rewrites
+          # %VCPKG_ROOT% to that same path before calling them -- so a
+          # junction there is what makes the MCP gates actually build
+          # instead of skipping.
+          $repoRoot = (Resolve-Path .).Path
+          $link = Join-Path (Split-Path -Parent $repoRoot) 'vcpkg'
+          if (-not (Test-Path $link)) {
+            New-Item -ItemType Junction -Path $link -Target 'C:\vcpkg' | Out-Null
+          }
+          $probe = Join-Path $link 'installed\x64-windows-static\include\openssl\evp.h'
+          if (-not (Test-Path $probe)) {
+            Write-Host "FATAL: vcpkg OpenSSL headers not reachable at $probe"
+            exit 1
+          }
+          # Gate 38 (mcp_https) needs the openssl CLI for its throwaway
+          # self-signed pair; the runner image ships one.
+          if (-not (Get-Command openssl.exe -ErrorAction SilentlyContinue)) {
+            $osslBin = Join-Path $env:ProgramFiles 'OpenSSL\bin'
+            if (Test-Path (Join-Path $osslBin 'openssl.exe')) {
+              Add-Content -Path $env:GITHUB_PATH -Value $osslBin
+            }
           }
 
       - name: build_test.ps1 -Asan --pg 16
@@ -301,6 +410,52 @@ jobs:
             exit 1
           }
 
+      - name: Cache vcpkg binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: C:\vcpkg_cache
+          key: windows-vcpkg-openssl-static-v1
+
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        shell: cmd
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,C:\vcpkg_cache,readwrite
+        run: |
+          # Gates 33/38 (mcp_smoke/mcp_https) build the MCP server on
+          # Windows, which links the vcpkg static OpenSSL. Same step the
+          # release and install-test workflows already use.
+          echo VCPKG_ROOT=C:\vcpkg>>%GITHUB_ENV%
+          C:\vcpkg\vcpkg.exe install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
+      - name: Expose vcpkg at the ..\vcpkg path the gate runner expects
+        shell: pwsh
+        run: |
+          # The sanitizer legs of the gate runner (build-asan.bat /
+          # build-ubsan.bat) resolve the vcpkg tree as
+          # %REPO_DIR%\..\vcpkg, and build_test.ps1 rewrites
+          # %VCPKG_ROOT% to that same path before calling them -- so a
+          # junction there is what makes the MCP gates actually build
+          # instead of skipping.
+          $repoRoot = (Resolve-Path .).Path
+          $link = Join-Path (Split-Path -Parent $repoRoot) 'vcpkg'
+          if (-not (Test-Path $link)) {
+            New-Item -ItemType Junction -Path $link -Target 'C:\vcpkg' | Out-Null
+          }
+          $probe = Join-Path $link 'installed\x64-windows-static\include\openssl\evp.h'
+          if (-not (Test-Path $probe)) {
+            Write-Host "FATAL: vcpkg OpenSSL headers not reachable at $probe"
+            exit 1
+          }
+          # Gate 38 (mcp_https) needs the openssl CLI for its throwaway
+          # self-signed pair; the runner image ships one.
+          if (-not (Get-Command openssl.exe -ErrorAction SilentlyContinue)) {
+            $osslBin = Join-Path $env:ProgramFiles 'OpenSSL\bin'
+            if (Test-Path (Join-Path $osslBin 'openssl.exe')) {
+              Add-Content -Path $env:GITHUB_PATH -Value $osslBin
+            }
+          }
+
       - name: build_test.ps1 -Ubsan --pg 16
         shell: pwsh
         run: |
@@ -336,6 +491,17 @@ jobs:
           # links -lssl -lcrypto) when pkg-config can resolve its deps;
           # the gate self-skips otherwise.
           brew install postgresql@16 openssl@3 pkg-config
+          # Homebrew's postgresql@16 and openssl@3 are keg-only, so
+          # their .pc files sit outside pkg-config's default search path.
+          # Point PKG_CONFIG_PATH at them, the same pair
+          # scripts/package-darwin.sh exports for the release build.
+          pg_prefix="$(brew --prefix postgresql@16)"
+          pg_pc="$(find "$pg_prefix/lib" -name libpq.pc -print -quit 2>/dev/null || true)"
+          pc_path="$(brew --prefix openssl@3)/lib/pkgconfig"
+          if [ -n "$pg_pc" ]; then
+            pc_path="$(dirname "$pg_pc"):$pc_path"
+          fi
+          echo "PKG_CONFIG_PATH=$pc_path" >> "$GITHUB_ENV"
 
       - name: build_test.sh --asan --pg 16
         env:
@@ -369,6 +535,17 @@ jobs:
           # links -lssl -lcrypto) when pkg-config can resolve its deps;
           # the gate self-skips otherwise.
           brew install postgresql@16 openssl@3 pkg-config
+          # Homebrew's postgresql@16 and openssl@3 are keg-only, so
+          # their .pc files sit outside pkg-config's default search path.
+          # Point PKG_CONFIG_PATH at them, the same pair
+          # scripts/package-darwin.sh exports for the release build.
+          pg_prefix="$(brew --prefix postgresql@16)"
+          pg_pc="$(find "$pg_prefix/lib" -name libpq.pc -print -quit 2>/dev/null || true)"
+          pc_path="$(brew --prefix openssl@3)/lib/pkgconfig"
+          if [ -n "$pg_pc" ]; then
+            pc_path="$(dirname "$pg_pc"):$pc_path"
+          fi
+          echo "PKG_CONFIG_PATH=$pc_path" >> "$GITHUB_ENV"
 
       - name: build_test.sh --ubsan --pg 16
         env:
@@ -634,7 +811,7 @@ jobs:
           set -euo pipefail
           V="$(./mcp/fractalsql-postgresql-mcp --version)"
           echo "version: ${V}"
-          test "${V}" = "2.0.21"
+          test "${V}" = "2.0.22"
           LINES="$(./mcp/fractalsql-postgresql-mcp --list-tools | wc -l)"
           echo "tool-catalog lines: ${LINES}"
           test "${LINES}" = "82"

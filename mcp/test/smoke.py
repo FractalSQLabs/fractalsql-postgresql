@@ -58,8 +58,8 @@ EXPECTED_TOOLS = {
     "fractal_vectorizer_create", "fractal_vectorizer_pause", "fractal_vectorizer_resume",
     "fractal_vectorizer_drop", "fractal_vectorizer_process_queue",
     # admin (4)
-    "fractalsql_get_version", "fractalsql_configure_reasoning",
-    "fractalsql_set_config", "fractalsql_get_config",
+    "fractal_version", "fractal_configure_reasoning",
+    "fractal_config_set", "fractal_config_get",
 }
 
 # Hand-maintained safety classification, deliberately NOT generated from the server
@@ -91,7 +91,7 @@ EXPECTED_SAFETY = {
     "fractal_agent_route_task": ("write", True),
     "fractal_agent_schedule_workload": ("write", True),
     "fractal_agent_track_anomaly": ("write", True),
-    "fractal_agent_trajectory_predict": ("write", False),
+    "fractal_agent_trajectory_predict": ("read", False),
     "fractal_audit_log": ("destructive", False),
     "fractal_audit_unpack": ("read", False),
     "fractal_change_point_detect": ("read", False),
@@ -151,10 +151,10 @@ EXPECTED_SAFETY = {
     "fractal_vectorizer_pause": ("destructive", False),
     "fractal_vectorizer_process_queue": ("destructive", False),
     "fractal_vectorizer_resume": ("destructive", False),
-    "fractalsql_configure_reasoning": ("destructive", False),
-    "fractalsql_get_config": ("read", False),
-    "fractalsql_get_version": ("read", False),
-    "fractalsql_set_config": ("destructive", False),
+    "fractal_configure_reasoning": ("destructive", False),
+    "fractal_config_get": ("read", False),
+    "fractal_version": ("read", False),
+    "fractal_config_set": ("destructive", False),
 }
 
 
@@ -660,7 +660,7 @@ def run_cli_phase(exe):
     tools = data.get("tools", [])
     fails += ok(r.returncode == 0 and isinstance(data.get("version"), str)
                 and len(tools) == 82
-                and any(t.get("name") == "fractalsql_set_config" for t in tools),
+                and any(t.get("name") == "fractal_config_set" for t in tools),
                 "--write-manifest -> FSQL_MCP_LOCK_DIR scratch manifest (82 tools)",
                 [r.returncode, data.get("version"), len(tools)])
     try:
@@ -762,17 +762,17 @@ def run_cli_edge_phase(exe):
                     "cli: %s with no value exits 2 (missing value)" % flag, [r.returncode, r.stderr[-80:]])
 
     # ---- --tool / --category whitelist filters (CSV: spaces and empty items tolerated) ----
-    r, names = served_tools(["--tool", " fractalsql_get_version , fractal_dimension_dfa ,,"])
-    fails += ok(names is not None and sorted(names) == ["fractal_dimension_dfa", "fractalsql_get_version"],
+    r, names = served_tools(["--tool", " fractal_version , fractal_dimension_dfa ,,"])
+    fails += ok(names is not None and sorted(names) == ["fractal_dimension_dfa", "fractal_version"],
                 "cli: --tool whitelists exactly the named tools (blanks and empty CSV items ignored)", names)
     r, names = served_tools(["--category", "ADMIN"])
-    fails += ok(names is not None and "fractalsql_get_version" in names and "fractal_dimension_dfa" not in names
+    fails += ok(names is not None and "fractal_version" in names and "fractal_dimension_dfa" not in names
                 and 0 < len(names) < 82,
                 "cli: --category is case-insensitive and serves only that category", names and len(names))
     r, names = served_tools(["--category", "nosuchcategory"])
     fails += ok(names == [], "cli: an unknown --category serves zero tools", names)
-    r, names = served_tools(["--category", "admin", "--tool", "fractalsql_get_version,fractal_dimension_dfa"])
-    fails += ok(names == ["fractalsql_get_version"],
+    r, names = served_tools(["--category", "admin", "--tool", "fractal_version,fractal_dimension_dfa"])
+    fails += ok(names == ["fractal_version"],
                 "cli: --category and --tool intersect (a tool must pass both)", names)
 
     # ---- schema lock: write, verify, mismatch (warn) and strict (fatal) ----
@@ -1494,8 +1494,8 @@ def run_protocol_phase(exe):
             '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": null}',
             '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": []}',
             '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": 5}}',
-            '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "fractalsql_get_version", "arguments": []}}',
-            '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "fractalsql_get_version", "arguments": "x"}}',
+            '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "fractal_version", "arguments": []}}',
+            '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "fractal_version", "arguments": "x"}}',
             '{"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": []}',
             '{"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": 5}}',
             '{"jsonrpc": "2.0", "id": 1, "method": "prompts/get", "params": {"name": 5}}',
@@ -1533,11 +1533,11 @@ def run_protocol_phase(exe):
     ro = Client(exe, env=dict(os.environ, FSQL_MCP_READ_ONLY="true"))
     try:
         ro.call("initialize", {"protocolVersion": "2025-06-18"})
-        r = ro.call("tools/call", {"name": "fractalsql_configure_reasoning", "arguments": {"http_url": "http://127.0.0.1:1"}})
+        r = ro.call("tools/call", {"name": "fractal_configure_reasoning", "arguments": {"http_url": "http://127.0.0.1:1"}})
         res = r.get("result") or {}
         fails += ok(res.get("isError") is True and "read-only" in json.dumps(res),
                     "protocol: read-only mode refuses a destructive tool", r)
-        r = ro.call("tools/call", {"name": "fractalsql_get_version", "arguments": {}})
+        r = ro.call("tools/call", {"name": "fractal_version", "arguments": {}})
         fails += ok("result" in r, "protocol: read-only mode still serves a non-destructive tool", r)
     finally:
         ro.close()
@@ -1597,7 +1597,7 @@ def run_db_asserts(exe, ok, _setfails):
         cli.call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "db", "version": "0"}})
         cli.send("notifications/initialized", {}, notify=True)
 
-        r = cli.call("tools/call", {"name": "fractalsql_get_version", "arguments": {}})
+        r = cli.call("tools/call", {"name": "fractal_version", "arguments": {}})
         sc = r.get("result", {}).get("structuredContent", {})
         fails += ok(bool(sc.get("version")), "get_version reports engine version", sc)
 
@@ -1753,53 +1753,53 @@ def run_db_asserts(exe, ok, _setfails):
 
         # ---- admin config tools (v2.0.9 sibling port: GUC-backed get/set;
         # the fractalsql.-prefixed and bare engine key spelling both work) ----
-        r = cli.call("tools/call", {"name": "fractalsql_get_config",
+        r = cli.call("tools/call", {"name": "fractal_config_get",
                                     "arguments": {"key": "agent_partial_reasoning_fail"}})
         sc = (r.get("result", {}).get("structuredContent") or {})
         fails += ok(not (r.get("result", {}) or {}).get("isError", False)
                     and str(sc.get("value")).lower() in ("on", "true", "1"),
-                    "fractalsql_get_config reads back the session-set agent_partial key", sc)
-        r = cli.call("tools/call", {"name": "fractalsql_get_config",
+                    "fractal_config_get reads back the session-set agent_partial key", sc)
+        r = cli.call("tools/call", {"name": "fractal_config_get",
                                     "arguments": {"key": "http_token"}})
         sc = (r.get("result", {}).get("structuredContent") or {})
         fails += ok(r.get("result", {}).get("isError") is True and "never" in str(sc.get("message", "")).lower(),
-                    "fractalsql_get_config refuses the secret key", sc)
+                    "fractal_config_get refuses the secret key", sc)
         # A reload-scoped (PGC_SIGHUP) key cannot be changed for the session:
         # postgres refuses a session-level set of it, so the server writes it
         # the way postgres changes it -- ALTER SYSTEM SET + pg_reload_conf() --
         # and reports it as queued rather than claiming it is live.
-        r = cli.call("tools/call", {"name": "fractalsql_set_config",
+        r = cli.call("tools/call", {"name": "fractal_config_set",
                                     "arguments": {"key": "http_model", "value": "smoke-set-model"}})
         sc = (r.get("result", {}).get("structuredContent") or {})
         fails += ok((r.get("result", {}) or {}).get("isError") is not True
                     and sc.get("effective") is False
                     and "server-wide" in str(sc.get("scope", ""))
                     and str(sc.get("status", "")).startswith("queued"),
-                    "fractalsql_set_config on a reload-scoped (PGC_SIGHUP) key -> written server-side and reported as queued",
+                    "fractal_config_set on a reload-scoped (PGC_SIGHUP) key -> written server-side and reported as queued",
                     sc)
-        r = cli.call("tools/call", {"name": "fractalsql_set_config",
+        r = cli.call("tools/call", {"name": "fractal_config_set",
                                     "arguments": {"key": "agent_partial_reasoning_fail", "value": "off"}})
         sc = (r.get("result", {}).get("structuredContent") or {})
         fails += ok(not (r.get("result", {}) or {}).get("isError", False) and sc.get("new") == "off",
-                    "fractalsql_set_config sets the PGC_USERSET key session-scoped", sc)
-        r = cli.call("tools/call", {"name": "fractalsql_set_config",
+                    "fractal_config_set sets the PGC_USERSET key session-scoped", sc)
+        r = cli.call("tools/call", {"name": "fractal_config_set",
                                     "arguments": {"key": "agent_partial_reasoning_fail", "value": "on"}})
-        r = cli.call("tools/call", {"name": "fractalsql_get_config",
+        r = cli.call("tools/call", {"name": "fractal_config_get",
                                     "arguments": {"key": "agent_partial_reasoning_fail"}})
         sc = (r.get("result", {}).get("structuredContent") or {})
         fails += ok(str(sc.get("value")).lower() in ("on", "true", "1"),
-                    "fractalsql_get_config sees the set_config change after the reset", sc)
-        r = cli.call("tools/call", {"name": "fractalsql_set_config",
+                    "fractal_config_get sees the set_config change after the reset", sc)
+        r = cli.call("tools/call", {"name": "fractal_config_set",
                                     "arguments": {"key": "enterprise_lib", "value": "/tmp"}})
         sc = (r.get("result", {}).get("structuredContent") or {})
         fails += ok(r.get("result", {}).get("isError") is True
                     and "allow_secrets" in str(sc.get("message", "")),
-                    "fractalsql_set_config refuses enterprise keys without allow_secrets=true", sc)
-        r = cli.call("tools/call", {"name": "fractalsql_set_config",
+                    "fractal_config_set refuses enterprise keys without allow_secrets=true", sc)
+        r = cli.call("tools/call", {"name": "fractal_config_set",
                                     "arguments": {"key": "definitely_not_a_key", "value": "x"}})
         sc = (r.get("result", {}).get("structuredContent") or {})
         fails += ok(r.get("result", {}).get("isError") is True and "unknown config key" in str(sc.get("message", "")),
-                    "fractalsql_set_config rejects an unknown key", sc)
+                    "fractal_config_set rejects an unknown key", sc)
 
         r = cli.call("resources/read", {"uri": "fractalsql://vectorizer/status"})
         body = r.get("result", {}).get("contents", [{}])[0].get("text", "")
@@ -1853,7 +1853,7 @@ def run_db_asserts(exe, ok, _setfails):
 # the whole sweep.
 # ---------------------------------------------------------------------------
 _SWEEP_SKIP = {
-    "fractalsql_configure_reasoning",   # ALTER SYSTEM: would rewrite the test cluster's config
+    "fractal_configure_reasoning",   # ALTER SYSTEM: would rewrite the test cluster's config
 }
 _ARRAYS = {
     "mu": [0.1, 0.2, 0.15], "cov": [1, 0, 0, 0, 1, 0, 0, 0, 1],
@@ -2060,7 +2060,7 @@ def sweep_all_tools(cli, ok):
         if bad and bad[-1][1].startswith("BACKEND DIED"):
             break
     fails += ok(not bad, "sweep: %d tool calls over %d tools all returned well-formed responses" % (n_calls, len(tools)), bad[:5])
-    r = cli.call("tools/call", {"name": "fractalsql_get_version", "arguments": {}})
+    r = cli.call("tools/call", {"name": "fractal_version", "arguments": {}})
     sc = (r.get("result") or {}).get("structuredContent") or {}
     fails += ok(bool(sc.get("version")), "sweep: server still answering after the full sweep", sc)
     return fails
@@ -2180,7 +2180,7 @@ def sweep_negative(cli, ok):
     fails += ok(not bad, "negative sweep: %d mutated calls (%d rejected) over %d tools -- no hang, no "
                          "adapter-layer error, required arguments enforced" % (n_calls, n_err, len(tools)),
                 bad[:6])
-    r = cli.call("tools/call", {"name": "fractalsql_get_version", "arguments": {}})
+    r = cli.call("tools/call", {"name": "fractal_version", "arguments": {}})
     sc = (r.get("result") or {}).get("structuredContent") or {}
     fails += ok(bool(sc.get("version")), "negative sweep: server still answering afterwards", sc)
     return fails
@@ -2194,26 +2194,26 @@ def _tool(cli, name, args):
 
 def sweep_admin(cli, ok):
     """The config tools, positive and negative, WITHOUT leaving the cluster in a
-    changed state: fractalsql_set_config is pointed at the one session-settable
+    changed state: fractal_config_set is pointed at the one session-settable
     key plus refusal cases, and at one reload-scoped key, whose value is put
-    back the way it was found; the ALTER SYSTEM tool (fractalsql_configure_reasoning)
+    back the way it was found; the ALTER SYSTEM tool (fractal_configure_reasoning)
     is exercised only on its no-op refusal, because a real call would rewrite
     postgresql.auto.conf for every later gate on the same cluster."""
     fails = 0
     G = "agent_partial_reasoning_fail"
 
-    err, sc = _tool(cli, "fractalsql_set_config", {"key": G, "value": "on"})
+    err, sc = _tool(cli, "fractal_config_set", {"key": G, "value": "on"})
     fails += ok(not err and sc.get("effective") is True and sc.get("key") == "fractalsql." + G,
                 "admin: set_config sets the session-settable key and verifies it by read-back", sc)
     for spelling in ("true", "1", "yes", "t"):
-        err, sc = _tool(cli, "fractalsql_set_config", {"key": "fractalsql." + G, "value": spelling})
+        err, sc = _tool(cli, "fractal_config_set", {"key": "fractalsql." + G, "value": spelling})
         fails += ok(not err and sc.get("effective") is True,
                     "admin: boolean spelling %r reads back as the same setting (prefixed key accepted)" % spelling, sc)
     for spelling in ("off", "false", "0", "no"):
-        err, sc = _tool(cli, "fractalsql_set_config", {"key": G, "value": spelling})
+        err, sc = _tool(cli, "fractal_config_set", {"key": G, "value": spelling})
         fails += ok(not err and sc.get("effective") is True,
                     "admin: boolean spelling %r reads back as the same setting" % spelling, sc)
-    err, sc = _tool(cli, "fractalsql_set_config", {"key": G, "value": "banana"})
+    err, sc = _tool(cli, "fractal_config_set", {"key": G, "value": "banana"})
     fails += ok(err and sc.get("error_class") == "engine",
                 "admin: an invalid value surfaces the server's own error (engine class)", sc)
     # A reload-scoped (PGC_SIGHUP) key cannot be changed for the session:
@@ -2222,42 +2222,42 @@ def sweep_admin(cli, ok):
     # says "queued" rather than claiming it is live. The previous value is
     # restored afterwards so the cluster this gate shares with the later ones
     # keeps the setting they expect.
-    err, sc = _tool(cli, "fractalsql_get_config", {"key": "http_model"})
+    err, sc = _tool(cli, "fractal_config_get", {"key": "http_model"})
     previous_model = sc.get("value") if not err else ""
-    err, sc = _tool(cli, "fractalsql_set_config", {"key": "http_model", "value": "x"})
+    err, sc = _tool(cli, "fractal_config_set", {"key": "http_model", "value": "x"})
     fails += ok(not err and sc.get("effective") is False
                 and "server-wide" in sc.get("scope", "")
                 and sc.get("status", "").startswith("queued"),
                 "admin: a reload-scoped key is written server-side and reported as queued", sc)
-    _tool(cli, "fractalsql_set_config", {"key": "http_model", "value": previous_model or ""})
-    err, sc = _tool(cli, "fractalsql_set_config", {"key": "no_such_key", "value": "x"})
+    _tool(cli, "fractal_config_set", {"key": "http_model", "value": previous_model or ""})
+    err, sc = _tool(cli, "fractal_config_set", {"key": "no_such_key", "value": "x"})
     fails += ok(err and sc.get("error_class") == "schema" and "unknown config key" in sc.get("message", ""),
                 "admin: set_config rejects an unknown key", sc)
-    err, sc = _tool(cli, "fractalsql_set_config", {"key": "enterprise_ledger_key", "value": "k"})
+    err, sc = _tool(cli, "fractal_config_set", {"key": "enterprise_ledger_key", "value": "k"})
     fails += ok(err and sc.get("error_class") == "schema" and "allow_secrets" in sc.get("message", ""),
                 "admin: an enterprise-posture key needs allow_secrets=true", sc)
-    err, sc = _tool(cli, "fractalsql_set_config",
+    err, sc = _tool(cli, "fractal_config_set",
                     {"key": "enterprise_ledger_key", "value": "smoke-ledger-key", "allow_secrets": True})
     fails += ok(not err and sc.get("new") == "***" and sc.get("old") == "***",
                 "admin: a secret key's old/new values are redacted in the result", sc)
-    _tool(cli, "fractalsql_set_config", {"key": "enterprise_ledger_key", "value": "", "allow_secrets": True})
+    _tool(cli, "fractal_config_set", {"key": "enterprise_ledger_key", "value": "", "allow_secrets": True})
 
-    err, sc = _tool(cli, "fractalsql_get_config", {"key": G})
+    err, sc = _tool(cli, "fractal_config_get", {"key": G})
     fails += ok(not err and sc.get("value") in ("on", "off") and sc.get("key") == "fractalsql." + G,
                 "admin: get_config reads the session's value back", sc)
     for k in ("http_token", "fractalsql.http_token", "enterprise_ledger_key"):
-        err, sc = _tool(cli, "fractalsql_get_config", {"key": k})
+        err, sc = _tool(cli, "fractal_config_get", {"key": k})
         fails += ok(err and sc.get("error_class") == "schema" and "secret" in sc.get("message", ""),
                     "admin: get_config never reads back the secret key %s" % k, sc)
-    err, sc = _tool(cli, "fractalsql_get_config", {"key": "fractalsql.no_such_key"})
+    err, sc = _tool(cli, "fractal_config_get", {"key": "fractalsql.no_such_key"})
     fails += ok(err and sc.get("error_class") == "schema" and "unknown config key" in sc.get("message", ""),
                 "admin: get_config rejects an unknown fractalsql.* key", sc)
-    err, sc = _tool(cli, "fractalsql_get_config", {"key": "work_mem"})
+    err, sc = _tool(cli, "fractal_config_get", {"key": "work_mem"})
     fails += ok(err and sc.get("error_class") == "schema" and "unknown config key" in sc.get("message", ""),
                 "admin: get_config is not a general GUC reader -- an arbitrary server setting is refused", sc)
 
     for args in ({}, {"provider_url": None, "model": None, "allow_plaintext": None}):
-        err, sc = _tool(cli, "fractalsql_configure_reasoning", args)
+        err, sc = _tool(cli, "fractal_configure_reasoning", args)
         fails += ok(err and sc.get("error_class") == "schema" and "nothing to set" in sc.get("message", ""),
                     "admin: configure_reasoning with no usable field is refused before any ALTER SYSTEM",
                     sc)
@@ -2273,11 +2273,11 @@ def sweep_admin(cli, ok):
         safe.call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
                                   "clientInfo": {"name": "safe", "version": "0"}})
         safe.send("notifications/initialized", {}, notify=True)
-        err, sc = _tool(safe, "fractalsql_set_config", {"key": G, "value": "on"})
+        err, sc = _tool(safe, "fractal_config_set", {"key": G, "value": "on"})
         fails += ok(err and sc.get("error_class") == "schema"
                     and "config write refused" in sc.get("message", ""),
                     "admin: the default config-writes mode refuses a key outside the safe set", sc)
-        err, sc = _tool(safe, "fractalsql_set_config", {"key": "http_model", "value": "safe-set-model"})
+        err, sc = _tool(safe, "fractal_config_set", {"key": "http_model", "value": "safe-set-model"})
         fails += ok(not err and "config write refused" not in sc.get("message", "")
                     and sc.get("effective") is False
                     and str(sc.get("status", "")).startswith("queued"),

@@ -1274,8 +1274,8 @@ COMMENT ON FUNCTION fractal_cycle_detect(bytea[], int4) IS
 CREATE FUNCTION fractal_tda_persistence_diagram(
     points       float8[],
     dim          int4,
-    max_dim      int4   DEFAULT 1,
-    max_thresh   float8 DEFAULT 1.0,
+    max_dim      int4,
+    max_thresh   float8,
     max_h0_bars  int4   DEFAULT 64,
     OUT h0_bars  jsonb,
     OUT betti1   int8
@@ -1292,7 +1292,10 @@ COMMENT ON FUNCTION fractal_tda_persistence_diagram(float8[], int4, int4, float8
   'exists in the data; a full simplicial computation (what Ripser/'
   'GUDHI compute via boundary-matrix reduction) is out of scope. '
   'Citation: Edelsbrunner, Letscher & Zomorodian (2002), "Topological '
-  'persistence and simplification," Discrete & Computational Geometry.';
+  'persistence and simplification," Discrete & Computational Geometry. '
+  'max_dim and max_thresh are required: max_dim is 0 (the exact 0-dim '
+  'bars only) or 1 (the bars plus the graph cycle-rank estimate) and '
+  'max_thresh is the filtration threshold (> 0).';
 
 CREATE FUNCTION fractal_dimension_drift(series float8[], win int4) RETURNS jsonb
 AS 'MODULE_PATHNAME', 'fractal_dimension_drift'
@@ -1959,7 +1962,7 @@ COMMENT ON FUNCTION fractal_cross_modal_search(text, text, fractal_vector, fract
   'same semantics, direct varlena reads instead of array unpacking.';
 
 -- ==================================================================
--- Typed configuration surface: fractalsql_set_config / get_config
+-- Typed configuration surface: fractal_config_set / get_config
 -- ==================================================================
 -- The FractalSQL configuration lives in PostgreSQL's GUC machinery (the
 -- DefineCustom*Variable calls in _PG_init()). SET and ALTER SYSTEM are
@@ -2014,20 +2017,20 @@ COMMENT ON FUNCTION fractal_cross_modal_search(text, text, fractal_vector, fract
 -- Both spellings of a key are accepted: the bare name ("http_url") and
 -- the GUC's own name ("fractalsql.http_url"), case-insensitively.
 -- An unknown key is an error, never a silent no-op.
-CREATE FUNCTION fractalsql_set_config(key text, value text) RETURNS text
-  AS 'MODULE_PATHNAME', 'fractalsql_set_config' LANGUAGE C VOLATILE;
+CREATE FUNCTION fractal_config_set(key text, value text) RETURNS text
+  AS 'MODULE_PATHNAME', 'fractal_config_set' LANGUAGE C VOLATILE;
 
-COMMENT ON FUNCTION fractalsql_set_config(text, text) IS
+COMMENT ON FUNCTION fractal_config_set(text, text) IS
   'Sets one FractalSQL configuration key, typed and validated per key, and returns the canonical value that was applied. This is the SQL-callable wrapper over the extension''s fractalsql.* GUCs -- it does NOT introduce a second configuration store: the value written IS the GUC''s own value, so current_setting(), SHOW and pg_settings agree with it. The GUCs keep working exactly as before via SET and ALTER SYSTEM. '
   'KEYS: reasoning_plugin (string), http_url (string), http_token (string), http_model (string), http_allow_plaintext (bool), http_embed_url (string), http_embed_model (string), http_think (string), http_think_provider (string), http_native_url (string), http_num_ctx (int 0..1048576), text_to_sql_max_attempts (int 1..10), text_to_sql_allowed_statements (enum: select | select_insert_update), text_to_sql_use_review (bool), agent_partial_reasoning_fail (bool), enterprise_lib (string), enterprise_ledger_key (string), enterprise_require_signature (bool). Both the bare key ("http_url") and the GUC spelling ("fractalsql.http_url") are accepted, case-insensitively; an unknown key raises an error listing the known ones. '
   'VALUE FORMS: an int key rejects anything that is not an integer and anything outside its range; a bool key accepts on/off/true/false/yes/no/1/0/t/f/y/n (case-insensitive) and is stored as on/off; an enum key accepts only its listed members; a string key accepts any text up to 8192 bytes. The value is validated BEFORE it is applied, so a rejected value is never partially written. '
   'PRIVILEGE: a key whose GUC carries GUC_SUPERUSER_ONLY (reasoning_plugin, http_url, http_token, http_model, http_allow_plaintext, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, enterprise_lib, enterprise_ledger_key, enterprise_require_signature) can only be changed by a superuser -- the same rule PostgreSQL applies to that flag elsewhere. '
   'SCOPE: most keys are PGC_SIGHUP (reload-scoped), so a session cannot change them -- exactly as a bare SET cannot. Such a key raises an error naming the ALTER SYSTEM + pg_reload_conf() path instead of silently doing nothing. agent_partial_reasoning_fail (PGC_USERSET) and enterprise_ledger_key (PGC_SUSET) are session-settable.';
 
-CREATE FUNCTION fractalsql_get_config(key text) RETURNS text
-  AS 'MODULE_PATHNAME', 'fractalsql_get_config' LANGUAGE C STABLE;
+CREATE FUNCTION fractal_config_get(key text) RETURNS text
+  AS 'MODULE_PATHNAME', 'fractal_config_get' LANGUAGE C STABLE;
 
-COMMENT ON FUNCTION fractalsql_get_config(text) IS
+COMMENT ON FUNCTION fractal_config_get(text) IS
   'Returns the current value of one FractalSQL configuration key as text, or NULL when the key is unset. Both the bare key ("http_url") and the GUC spelling ("fractalsql.http_url") are accepted, case-insensitively; an unknown key raises an error listing the known ones. The value is the GUC''s own current value, so it always agrees with current_setting(), SHOW and pg_settings. A bool key is returned as "on" or "off" (the same spelling current_setting() uses); an int key as its decimal digits; everything else as the stored text. A key whose GUC carries GUC_SUPERUSER_ONLY (reasoning_plugin, http_url, http_token, http_model, http_allow_plaintext, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, enterprise_lib, enterprise_ledger_key, enterprise_require_signature) is not readable by a non-superuser -- the same rule PostgreSQL applies to that flag in pg_settings, so this is not a way around it.';
 
 -- ==================================================================
