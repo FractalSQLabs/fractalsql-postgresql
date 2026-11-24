@@ -254,7 +254,7 @@ SELECT fractal_reason(
 \echo '=== 5. Sniper Search: converge toward an ideal-customer profile ==='
 \echo 'Query: recent + frequent + high-value (a "Champions"-shaped target)'
 
-SELECT fractal_search(ARRAY[-0.7, 0.7, 0.7]::float8[], iterations => 50) AS ideal_profile;
+SELECT fractal_sfs_converge(ARRAY[-0.7, 0.7, 0.7]::float8[], iterations => 50) AS ideal_profile;
 
 \echo ''
 \echo 'Notice the ratio between components matches the query direction,'

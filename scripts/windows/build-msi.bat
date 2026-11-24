@@ -115,6 +115,7 @@ if "%SHIP_MCP%"=="1" (
     mkdir "%STAGE%\mcp"
     copy /Y "mcp\fractalsql-postgresql-mcp.exe"                "%STAGE%\mcp\fractalsql-postgresql-mcp.exe"        > nul
     copy /Y "mcp\README.md"                                    "%STAGE%\mcp\README.md"                            > nul
+    copy /Y "mcp\RUN.txt"                                      "%STAGE%\mcp\RUN.txt"                              > nul
     copy /Y "mcp\.mcp-schema-lock"                             "%STAGE%\mcp\.mcp-schema-lock"                     > nul
     copy /Y "mcp\.mcp-safety-annotations-lock"                 "%STAGE%\mcp\.mcp-safety-annotations-lock"         > nul
     copy /Y "mcp\manifest.json"                                "%STAGE%\mcp\manifest.json"                        > nul

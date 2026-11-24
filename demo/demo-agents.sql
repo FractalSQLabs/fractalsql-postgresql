@@ -19,7 +19,7 @@
 --   * fractal_agent_data_analyst              -- fractal_sql_agent + fractal_reason
 --   * fractal_agent_patient_deterioration_triage -- hybrid_clinical_search + search_trajectory + reason
 --   * fractal_agent_feedback_audit            -- diversify + isolate_background + detect_collapse (no LLM)
---   * fractal_agent_schedule_workload         -- fractal_search + telemetry + reason
+--   * fractal_agent_schedule_workload         -- fractal_sfs_converge + telemetry + reason
 --   * fractal_agent_rebalance_sibling         -- optimize_portfolio + search_trajectory + reason
 --   * fractal_agent_detour_classify           -- search_trajectory + dimension_boxcount + reason
 --   * fractal_agent_track_anomaly             -- search_trajectory + dimension_dfa + reason
@@ -313,12 +313,12 @@ FROM fractal_agent_feedback_audit(
     'agents_demo_fwarmup', 'center', 8, 3);
 
 -- 12. fractal_agent_schedule_workload (sovereign-edge).
--- Refines the task vector with fractal_search (the "sniper search" in the
+-- Refines the task vector with fractal_sfs_converge (the "sniper search" in the
 -- abstract [-1,1]^dim space), finds the nearest node via
 -- fractal_search_telemetry, resolves the scan position to the named node id
 -- via ctid, and reasons. assigned_node is the real node id; confidence is
 -- 1/(1+distance) (real); rationale is the real fractal_reason output. Like
--- route_task but with the fractal_search refinement step route_task lacks.
+-- route_task but with the fractal_sfs_converge refinement step route_task lacks.
 DROP TABLE IF EXISTS agents_demo_nodes;
 CREATE TABLE agents_demo_nodes (id int PRIMARY KEY, capability float8[]);
 INSERT INTO agents_demo_nodes VALUES

@@ -95,5 +95,14 @@ if defined RESDIR (
   )
 )
 echo asan mcp build OK: %OUTDIR%\fractalsql-postgresql-mcp.exe
+REM The server looks for its two drift locks beside the executable when no path is configured, so
+REM a server started from this directory is checked against the locks this build was made with.
+REM The Windows build puts the executable in a separate output directory, so the locks are copied
+REM there: a stale copy left in the tree from an earlier build would make the server refuse to
+REM start (a schema-hash mismatch is a hard failure).
+for %%L in (.mcp-schema-lock .mcp-safety-annotations-lock) do (
+  if exist "%MCP_DIR%\%%L" copy /y "%MCP_DIR%\%%L" "%OUTDIR%\%%L" >nul
+)
+
 endlocal
 exit /b 0

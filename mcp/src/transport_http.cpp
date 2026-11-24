@@ -31,12 +31,33 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
-#ifndef _WIN32
+#ifdef _WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  // Winsock2 has no inet_pton(); the WinSock spelling of the same call is
+  // InetPtonA (Vista+). Same signature, same return convention.
+  #define inet_pton InetPtonA
+#else
   #include <sys/resource.h>
+  #include <arpa/inet.h>   // inet_pton for the loopback checks
 #endif
 
 namespace fsqlmcp
 {
+    // A header the server acts on that arrives twice is refused: two values for the host, the credential, the origin or the
+    // framing are an ambiguity a proxy in front and this parser could resolve differently.
+    static bool isSingleValuedHeader( const std::string& name )
+    {
+        static const char* const kNames[] = { "host", "authorization", "origin", "content-type", "transfer-encoding",
+                                              "mcp-session-id", "mcp-protocol-version", "mcp-method", "mcp-name" };
+        for( const char* n : kNames )
+            if( name == n ) return true;
+        return false;
+    }
+
     namespace fs = std::filesystem;
 
     // ---------- TokenStore: constant-time compare + mtime hot-reload.
@@ -582,6 +603,14 @@ namespace fsqlmcp
         return Json{ { "jsonrpc", "2.0" }, { "error", err } }.dump();
     }
 
+    // True for an IPv4 address in 127.0.0.0/8, parsed as an address: a name that merely starts with "127." (127.evil.example,
+    // 127.0.0.1.nip.io) is not one.
+    static bool isLoopbackV4( const std::string& host )
+    {
+        in_addr addr{};
+        return inet_pton( AF_INET, host.c_str(), &addr ) == 1 && ( ntohl( addr.s_addr ) >> 24 ) == 127;
+    }
+
     // True when the origin names a loopback host. The host part is what
     // matters: a page served from http://127.0.0.1:3000 is a loopback
     // origin whatever its port.
@@ -602,7 +631,7 @@ namespace fsqlmcp
         const std::size_t colon = host.rfind( ':' );
         if( colon != std::string::npos ) host = host.substr( 0, colon );
         if( host == "localhost" ) return true;
-        if( host.rfind( "127.", 0 ) == 0 ) return true;
+        if( isLoopbackV4( host ) ) return true;
         return false;
     }
 
@@ -946,6 +975,7 @@ namespace fsqlmcp
                 const std::string key = lowerCopy( trimCopy( line.substr( 0, colon ) ) );
                 // A repeated Content-Length is ambiguous framing, not "the first one wins".
                 if( key == "content-length" && req.headers.count( key ) ) dupLength = true;
+                if( req.headers.count( key ) && isSingleValuedHeader( key ) ) dupLength = true;   // refused as ambiguous framing
                 // A repeated header name keeps the LAST value: the earlier
                 // occurrences are dropped, so the request is served with the
                 // value it named last rather than silently with the first
@@ -1289,7 +1319,23 @@ namespace fsqlmcp
             { respond( c, 200, "application/json", Json{ { "ok", true } }.dump() ); return; }
         if( req.method == "GET" && req.target == "/readyz" )
         {
-            const bool ready = readinessProbe();
+            // This route is unauthenticated and the probe is a live query: the result is kept for 5 s so a burst of requests
+            // costs the engine one probe, not one each.
+            static std::mutex probeMu;
+            static std::chrono::steady_clock::time_point probedAt{};
+            static bool probed = false, lastReady = false;
+            bool ready;
+            {
+                std::lock_guard<std::mutex> lk( probeMu );
+                const auto now = std::chrono::steady_clock::now();
+                if( !probed || now - probedAt >= std::chrono::seconds( 5 ) )
+                {
+                    lastReady = readinessProbe();
+                    probedAt = now;
+                    probed = true;
+                }
+                ready = lastReady;
+            }
             // {"ok": <ready>} plus "probe" naming what was checked.
             respond( c, ready ? 200 : 503, "application/json",
                      Json{ { "ok", ready }, { "probe", "engine version query" } }.dump() );
@@ -1635,7 +1681,7 @@ namespace fsqlmcp
         // docker port assumes). A set host that does not parse is a config
         // error, never a silent fallback.
         const std::string bindHost = cfg.host.empty() ? std::string( "127.0.0.1" ) : cfg.host;
-        if( !cfg.tlsEnabled && !( bindHost.empty() || bindHost == "localhost" || bindHost == "::1" || bindHost.rfind( "127.", 0 ) == 0 ) )
+        if( !cfg.tlsEnabled && !( bindHost.empty() || bindHost == "localhost" || bindHost == "::1" || isLoopbackV4( bindHost ) ) )
         {
             std::cerr << "WARNING: the HTTP transport is bound to non-loopback address '" << bindHost
                       << "' WITHOUT TLS; the bearer token and all results travel in clear text (set FSQL_MCP_HTTPS=true)\n";

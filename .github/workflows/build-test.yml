@@ -26,7 +26,8 @@ name: build-test
 #              right. PG14/15/17/18 share the exact same code path but
 #              have not each been individually confirmed on CI yet.
 #   darwin-gate-matrix — build_test.sh (the same script, unmodified) on
-#              macos-15 via Homebrew's postgresql@$MAJOR, PG 14-18.
+#              macos-15 (Apple Silicon) via Homebrew's postgresql@$MAJOR, PG 14-18,
+#              plus PG 17 on macos-15-intel.
 #              Verified end-to-end (all 26 gates) against real Darwin/
 #              x86_64 hardware during development -- see the job's own
 #              comment for the three Darwin-specific bugs that surfaced
@@ -177,14 +178,23 @@ jobs:
           C:\vcpkg\vcpkg.exe install openssl:x64-windows-static
           if errorlevel 1 exit /b 1
 
+      - name: Install psycopg (the libpq-driven gates)
+        shell: pwsh
+        run: |
+          # The gates that drive the extension through libpq rather than psql -- the scripted-reply,
+          # ledger-payload, id-emission, fault-sweep and kit-mutation gates -- need psycopg 3. Without
+          # it they skip, which silently costs this job's coverage of those paths.
+          python -m pip install --disable-pip-version-check --quiet "psycopg[binary]"
+          python -c "import psycopg; print('psycopg', psycopg.__version__)"
+
       - name: Expose vcpkg at the ..\vcpkg path the gate runner expects
         shell: pwsh
         run: |
           # build_test.ps1 resolves the vcpkg tree as $RepoRoot\..\vcpkg
-          # (the sibling-of-the-repo layout a developer has locally) and
+          # (the ../vcpkg layout a developer has locally) and
           # ignores %VCPKG_ROOT% for that build; the ASan/UBSan leg
           # rewrites %VCPKG_ROOT% to that same path. A junction at that
-          # sibling path makes the runner's C:\vcpkg visible there --
+          # path makes the runner's C:\vcpkg visible there --
           # junctions need no admin rights, and the runner's own work
           # directory is writable.
           $repoRoot = (Resolve-Path .).Path
@@ -213,9 +223,9 @@ jobs:
           exit $LASTEXITCODE
 
   darwin-gate-matrix:
-    name: build_test.sh pg${{ matrix.pg }} (macOS)
+    name: build_test.sh pg${{ matrix.pg }} (macOS${{ matrix.runner == 'macos-15-intel' && ' Intel' || '' }})
     if: github.event_name != 'schedule'
-    runs-on: macos-15
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -223,6 +233,14 @@ jobs:
       fail-fast: false
       matrix:
         pg: [14, 15, 16, 17, 18]
+        # Apple Silicon for every major; Intel (macos-15-intel, GitHub's last Intel image, available until August
+        # 2027) for PG 17 only, to bound the cost -- release.yml builds every major on both architectures.
+        runner: [macos-15, macos-15-intel]
+        exclude:
+          - { pg: 14, runner: macos-15-intel }
+          - { pg: 15, runner: macos-15-intel }
+          - { pg: 16, runner: macos-15-intel }
+          - { pg: 18, runner: macos-15-intel }
     # build_test.sh's own pg_bindir() already tries `brew --prefix
     # postgresql@$MAJOR` first on Darwin (see build_test.sh's pg_bindir
     # comment) -- same Homebrew-install pattern install-test.yml's
@@ -267,6 +285,15 @@ jobs:
           fi
           echo "PKG_CONFIG_PATH=$pc_path" >> "$GITHUB_ENV"
 
+      - name: Install psycopg (the libpq-driven gates)
+        run: |
+          set -euo pipefail
+          # psycopg 3: the gates that drive the extension through libpq rather than psql (the
+          # scripted-reply, ledger-payload, id-emission, fault-sweep and kit-mutation gates) need it.
+          # Without it they skip, which silently costs this job's coverage of those paths.
+          python3 -m pip install --user --break-system-packages --quiet 'psycopg[binary]'
+          python3 -c "import psycopg; print('psycopg', psycopg.__version__)"
+
       - name: build_test.sh --pg ${{ matrix.pg }}
         run: |
           set -euo pipefail
@@ -277,7 +304,7 @@ jobs:
     name: build_test.ps1 -Asan pg16 (Windows)
     # Promoted from schedule/dispatch-only to also fire on every push to
     # refs/heads/2.x (the active development branch), mirroring the
-    # sibling's promotion of its weekly sanitizer legs.
+    # weekly sanitizer legs.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: windows-latest
     timeout-minutes: 30
@@ -739,9 +766,13 @@ jobs:
           }
           apt_retry 180 update -qq
           apt_retry 600 install -qq -y wget gnupg lsb-release ca-certificates lcov gawk
+          # python3-psycopg (psycopg 3): the gates that drive the extension through libpq rather
+          # than psql -- the edge-input sweep, the index-tamper driver, the Unicode matrix and
+          # the scripted-reply / ledger-payload / id-emission / kit-mutation / fault-sweep gates --
+          # all need it, and without it they skip, which silently costs this job's branch coverage.
+          apt_retry 600 install -qq -y python3-psycopg
           # libpq-dev + libssl-dev: gate 33 (mcp_smoke) builds the MCP
           # server via mcp/Makefile (pkg-config libpq + -lssl -lcrypto) --
-          # the same pin the sibling's coverage job carries for its MCP
           # gate; without them gate 33 self-skips here.
           apt_retry 600 install -qq -y libpq-dev libssl-dev
           sudo install -d /etc/apt/keyrings
@@ -799,7 +830,11 @@ jobs:
       - name: Install toolchain (g++/make, pkg-config libpq + libssl, python3)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -qq -y build-essential pkg-config libpq-dev libssl-dev python3
+          sudo apt-get install -qq -y build-essential pkg-config libpq-dev libssl-dev python3 python3-pip
+          # psycopg 3: the gates that drive the extension through libpq rather than psql (the
+          # scripted-reply, ledger-payload, id-emission, fault-sweep and kit-mutation gates) need it.
+          # Without it they skip, which silently costs this job's coverage of those paths.
+          pip install --break-system-packages --quiet 'psycopg[binary]'
 
       - name: Build mcp (mcp/Makefile)
         run: |
@@ -811,10 +846,16 @@ jobs:
           set -euo pipefail
           V="$(./mcp/fractalsql-postgresql-mcp --version)"
           echo "version: ${V}"
-          test "${V}" = "2.0.22"
+          test "${V}" = "2.0.23"
           LINES="$(./mcp/fractalsql-postgresql-mcp --list-tools | wc -l)"
-          echo "tool-catalog lines: ${LINES}"
-          test "${LINES}" = "82"
+          # The expected count is READ from the manifest and the safety lock
+          # rather than written down here: a hardcoded number goes stale the
+          # moment a tool is added, and the CI then fails on a catalog that
+          # is exactly as it should be.
+          WANT="$(python3 -c "import json; print(len(json.load(open('mcp/manifest.json'))['tools']))")"
+          LOCK="$(wc -l < mcp/.mcp-safety-annotations-lock)"
+          echo "tool-catalog lines: ${LINES} (manifest: ${WANT}, safety lock: ${LOCK})"
+          test "${LINES}" = "${WANT}" && test "${LINES}" = "${LOCK}"
 
       - name: DB-less smoke (mcp/test/smoke.py, wire-level asserts only)
         run: |

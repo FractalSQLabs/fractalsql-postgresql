@@ -20,7 +20,7 @@ set -euo pipefail
 # nothing (there is no --profile-style option in this build; docker build
 # inputs flow through env vars: DIST_DIR / DOCKERFILE). Silently ignoring
 # trailing junk would accept e.g. `./build.sh amd64 --profile=modern` and
-# surprise the user -- reject it (the sibling column's same-cause fix).
+# surprise the user -- reject it.
 if [[ $# -gt 1 ]]; then
     echo "unexpected arguments after arch: $*" >&2
     echo "usage: ./build.sh [amd64|arm64]" >&2

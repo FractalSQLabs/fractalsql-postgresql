@@ -1,0 +1,34 @@
+fractalsql-postgresql-mcp: how to start the MCP server
+
+Where it is  (<N> is the PostgreSQL major version)
+  .deb package    /usr/lib/postgresql/<N>/lib/fractalsql-postgresql-mcp
+  .rpm package    /usr/pgsql-<N>/lib/fractalsql-postgresql-mcp
+  macOS archive   mcp/fractalsql-postgresql-mcp, in the unpacked archive
+  Windows MSI     C:\Program Files\PostgreSQL\<N>\bin\fractalsql-postgresql-mcp.exe (this file and README.md are in ..\mcp)
+  The two .mcp-*-lock files must stay beside the executable: the server refuses to start without them.
+
+Settings (environment)
+  FSQL_MCP_PG_CONN_URI   a connection URI, for example postgresql://user@host:5432/dbname
+                         or set the standard libpq variables: PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE
+  The database needs the fractalsql extension installed (CREATE EXTENSION fractalsql;).
+
+stdio (the default: a client such as Claude Desktop or Cursor launches the server)
+  FSQL_MCP_PG_CONN_URI=postgresql://user@localhost/dbname \
+  fractalsql-postgresql-mcp
+
+HTTP or HTTPS (a bearer token is required)
+  FSQL_MCP_AUTH_TOKEN=<secret> fractalsql-postgresql-mcp --http 8765
+  FSQL_MCP_AUTH_TOKEN=<secret> fractalsql-postgresql-mcp --https 8765 --tls-cert cert.pem --tls-key key.pem
+
+Check it
+  fractalsql-postgresql-mcp --version
+  fractalsql-postgresql-mcp --list-tools
+
+What it needs
+  Linux    libpq and OpenSSL's runtime library (libssl.so.3), which the package depends on.
+  macOS    Homebrew's openssl@3 and libpq (brew install openssl@3 postgresql@<N>). The files are unsigned:
+           clear quarantine once
+               xattr -d com.apple.quarantine mcp/fractalsql-postgresql-mcp
+  Windows  the libpq.dll of your PostgreSQL install (it sits in the same bin folder); OpenSSL and the C runtime are built in.
+
+All settings are in README.md next to this file.

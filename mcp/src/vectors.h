@@ -33,7 +33,7 @@ namespace fsqlmcp::vectors
     std::string blobToHex( const std::uint8_t* data, std::size_t len );
 
     // {"value": ...} envelope for primitives with no natural JSON shape
-    // (fractal_search, fractal_dimension_dfa, L_p distance, Hamming distance).
+    // (fractal_sfs_converge, fractal_dimension_dfa, L_p distance, Hamming distance).
     Json wrapScalar( const Json& value );
 
     // ---------- Postgres-specific (fractalsql-postgresql-mcp) ----------
@@ -45,8 +45,8 @@ namespace fsqlmcp::vectors
 
     // Strict numeric variant: every element must parse as a number or the
     // literal stays a string. Used for float8[]/int4[]/int8[] returns
-    // (fractal_search, fractal_embed, fractal_change_point_detect,
-    // fractal_agent_plan_explore's plan_trajectory, source_doc_ids, ...).
+    // (fractal_sfs_converge, fractal_embed, fractal_change_point_detect,
+    // fractal_agent_plan_explore's plan_trajectory, ...).
     // A NULL-typed element ("NULL" bare word in the literal) -> JSON null,
     // matching the SQL type's own nullability.
     Json pgArrayToNumbers( const std::string& text );

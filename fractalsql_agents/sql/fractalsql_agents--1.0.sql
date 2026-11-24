@@ -20,7 +20,7 @@
 --   G. fractal_agent_data_analyst    — fractal_sql_agent + fractal_reason (horizontal catch-all)
 --   H. fractal_agent_patient_deterioration_triage — hybrid_clinical_search + search_trajectory + reason
 --   I. fractal_agent_feedback_audit  — diversify loop + detect_collapse + explain_result (pure analytics, no LLM)
---   J. fractal_agent_schedule_workload — fractal_search + search_telemetry + reason
+--   J. fractal_agent_schedule_workload — fractal_sfs_converge + search_telemetry + reason
 --   K. fractal_agent_rebalance_sibling — optimize_portfolio + search_trajectory + reason
 --   L. fractal_agent_detour_classify — search_trajectory + dimension_boxcount + reason
 --   M. fractal_agent_track_anomaly   — search_trajectory + dimension_dfa + reason
@@ -150,6 +150,70 @@ COMMENT ON FUNCTION _fractalsql_agents_reason(text, text) IS
   'fractalsql.agent_partial_reasoning_fail is on (default off = raise, '
   'identical to bare fractal_reason). Only softens the reasoning step; '
   'embed/search-tier failures and fractal_reason itself still raise.';
+
+-- ---------------------------------------------------------------------------------------------
+-- Nearest-row search for the agents that need exactly one neighbour (route_task, outlier_intercept, schedule_workload).
+-- _fractalsql_agents_nearest1(table, vector_col, query) -> (doc_id, distance), where doc_id is the row's ctid as text, the same
+-- locator fractal_search_telemetry returns, so the agents resolve it unchanged.
+--
+-- By default this is the exact scan (fractal_search_telemetry). With fractalsql.agent_use_index = on (or auto, when the index is ready),
+-- and a fractal_index on the table and column, it searches through the index and maps the index's integer key back to the ctid. Every distance is still exact;
+-- an index can rarely pick a different nearest row than the exact scan, which is why it is opt-in.
+-- ---------------------------------------------------------------------------------------------
+-- _fractalsql_agents_index_idcol(table, vector_col) -> the index's integer key column when the agents should search through the index
+-- on this table and column, NULL when they should scan. fractalsql.agent_use_index is off (never), on (when an index exists) or auto
+-- (when the index is ready, calibrated to its target recall, and the table has at least fractalsql.agent_index_min_rows rows).
+CREATE FUNCTION _fractalsql_agents_index_idcol(p_table text, p_emb_col text)
+RETURNS text
+AS $fn$
+DECLARE
+    v_mode   text;
+    v_schema text;
+    v_name   text;
+    v_idcol  text;
+    v_info   jsonb;
+    v_min    bigint;
+BEGIN
+    v_mode := lower(COALESCE(current_setting('fractalsql.agent_use_index', true), 'off'));
+    IF v_mode IN ('off', 'false', 'no', '0', 'f', 'n', '') THEN RETURN NULL; END IF;
+    SELECT n.nspname INTO v_schema
+      FROM pg_catalog.pg_proc pr JOIN pg_catalog.pg_namespace n ON n.oid = pr.pronamespace
+     WHERE pr.oid = to_regprocedure('fractal_index_info(text)');
+    IF v_schema IS NULL OR to_regclass(format('%I.fractal_index_meta', v_schema)) IS NULL THEN RETURN NULL; END IF;
+    EXECUTE format('SELECT name, id_col FROM %I.fractal_index_meta WHERE tbl = $1 AND col = $2 ORDER BY name LIMIT 1', v_schema)
+       INTO v_name, v_idcol USING p_table, p_emb_col;
+    IF v_idcol IS NULL THEN RETURN NULL; END IF;
+    IF v_mode = 'auto' THEN
+        v_info := fractal_index_info(v_name);
+        BEGIN
+            v_min := COALESCE(NULLIF(current_setting('fractalsql.agent_index_min_rows', true), ''), '10000')::bigint;
+        EXCEPTION WHEN OTHERS THEN
+            v_min := 10000;
+        END;
+        IF (v_info->>'status') IS DISTINCT FROM 'ready' OR COALESCE((v_info->>'rows_now')::bigint, 0) < v_min THEN
+            RETURN NULL;
+        END IF;
+    END IF;
+    RETURN v_idcol;
+END;
+$fn$ LANGUAGE plpgsql;
+
+CREATE FUNCTION _fractalsql_agents_nearest1(p_table text, p_emb_col text, p_query float8[])
+RETURNS TABLE(doc_id text, distance float8)
+AS $fn$
+DECLARE
+    v_idcol  text;
+BEGIN
+    v_idcol := _fractalsql_agents_index_idcol(p_table, p_emb_col);
+    IF v_idcol IS NOT NULL THEN
+        RETURN QUERY EXECUTE format(
+            'SELECT t.ctid::text, s.distance FROM fractal_search(%L, %L, $1, 1) s JOIN %I t ON t.%I = s.doc_id::bigint ORDER BY s.distance LIMIT 1',
+            p_table, p_emb_col, p_table, v_idcol) USING p_query;
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT t.doc_id, t.distance FROM fractal_search_telemetry(p_table, p_emb_col, p_query, 1) t;
+END;
+$fn$ LANGUAGE plpgsql;
 
 -- =====================================================================
 -- Engine A: fractal_agent_anomaly_triage
@@ -506,7 +570,7 @@ BEGIN
 
     -- 1. Real Analytics: nearest capability embedding to the task embedding.
     SELECT doc_id, distance INTO nearest_doc, nearest_dist
-      FROM fractal_search_telemetry(cap_table, cap_emb_col, task_emb, 1);
+      FROM _fractalsql_agents_nearest1(cap_table, cap_emb_col, task_emb);
     IF nearest_doc IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_route_task: no capability rows in %',
             cap_table;
@@ -681,7 +745,7 @@ BEGIN
     -- parameter, so no caller data is interpolated.
     IF distance_metric = 'cosine' THEN
         SELECT doc_id, distance INTO nearest_doc, nearest_dist
-          FROM fractal_search_telemetry(history_table, emb_col, state_vec, 1);
+          FROM _fractalsql_agents_nearest1(history_table, emb_col, state_vec);
         IF nearest_doc IS NULL THEN
             RAISE EXCEPTION 'fractal_agent_outlier_intercept: no bad-state rows in %',
                 history_table;
@@ -820,6 +884,7 @@ DECLARE
     cohort       text[];
     where_clause text;
     content_sel  text;
+    v_idcol      text;
 BEGIN
     -- Pin the base fractalsql extension's schema ahead of the caller's
     -- search_path so the unqualified fractal_* calls below resolve to the
@@ -870,6 +935,17 @@ BEGIN
     -- Put the caller's search_path back before handing the row over: the
     -- pin above is transaction-scoped and must not outlive this call.
     PERFORM pg_catalog.set_config('search_path', v_caller_search_path, true);
+    -- Through the index (fractalsql.agent_use_index): the cohort becomes the ids option of fractal_search; the answer is the same rows.
+    v_idcol := _fractalsql_agents_index_idcol(mem_table, vec_col);
+    IF v_idcol IS NOT NULL AND cardinality(cohort) <= 100000 THEN
+        RETURN QUERY EXECUTE format(
+            'SELECT x.idv::bigint, x.cnt '
+            'FROM fractal_search(%L, %L, $1, %s, jsonb_build_object(''ids'', (SELECT jsonb_agg(%I) FROM %I WHERE ctid::text = ANY($2)))) r '
+            'JOIN (SELECT %I AS idv, %s AS cnt, %I AS ikey FROM %I) x ON x.ikey = r.doc_id::bigint ORDER BY r.distance',
+            mem_table, vec_col, k, v_idcol, mem_table, id_col, content_sel, v_idcol, mem_table)
+            USING query_vec, cohort;
+        RETURN;
+    END IF;
     RETURN QUERY EXECUTE format(
         'SELECT x.idv::bigint, x.cnt '
         'FROM fractal_hybrid_clinical_search(%L, %L, $1, $2, %L) r '
@@ -1499,10 +1575,10 @@ COMMENT ON FUNCTION fractal_agent_feedback_audit(text, text, float8[], text, tex
 -- Engine J: fractal_agent_schedule_workload
 -- =====================================================================
 -- Sovereign-Edge: schedule a workload onto the best node by first refining the
--- task vector with fractal_search (the "sniper search" in the abstract search
+-- task vector with fractal_sfs_converge (the "sniper search" in the abstract search
 -- space), then finding the nearest node via fractal_search_telemetry, then
 -- reasoning the placement. Like fractal_agent_route_task but with the
--- fractal_search refinement step route_task lacks. Generalizes the
+-- fractal_sfs_converge refinement step route_task lacks. Generalizes the
 -- sovereign-edge demo's section-3 sniper search.
 
 CREATE FUNCTION fractal_agent_schedule_workload(
@@ -1570,11 +1646,11 @@ BEGIN
     END IF;
 
     -- 1. Real Analytics: refine the task vector (the "sniper search").
-    refined := fractal_search(task_vec, iterations, population, 2);
+    refined := fractal_sfs_converge(task_vec, iterations, population, 2);
 
     -- 2. Nearest node to the refined task vector.
     SELECT doc_id, distance INTO nearest_doc, nearest_dist
-      FROM fractal_search_telemetry(node_table, node_emb_col, refined, 1);
+      FROM _fractalsql_agents_nearest1(node_table, node_emb_col, refined);
     IF nearest_doc IS NULL THEN
         RAISE EXCEPTION 'fractal_agent_schedule_workload: no node rows in %', node_table;
     END IF;
@@ -1590,7 +1666,7 @@ BEGIN
       INTO rationale, reasoning_failed, reasoning_err
       FROM _fractalsql_agents_reason_ex(
         'Schedule this workload onto node ' || COALESCE(assigned, '?') ||
-        ' (cosine distance ' || nearest_dist || ' after fractal_search refinement). ' ||
+        ' (cosine distance ' || nearest_dist || ' after fractal_sfs_converge refinement). ' ||
         'Justify the placement in one sentence.',
         context) AS r;
 
@@ -1632,7 +1708,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION fractal_agent_schedule_workload(float8[], text, text, text, int, int, int, text) IS
-  'Workload-scheduling engine. Refines the task vector with fractal_search '
+  'Workload-scheduling engine. Refines the task vector with fractal_sfs_converge '
   '(iterations, population, diffusion_factor=2), then runs '
   'fractal_search_telemetry(node_table, node_emb_col, refined, 1) to find the '
   'nearest node, resolves its ctid doc_id to the named node id '
@@ -1640,7 +1716,7 @@ COMMENT ON FUNCTION fractal_agent_schedule_workload(float8[], text, text, text, 
   '1/(1+distance) from the real distance, and calls fractal_reason for a '
   'one-line placement rationale. Returns (assigned_node, confidence, '
   'rationale, reasoning_step_failed). Like fractal_agent_route_task but with '
-  'the fractal_search '
+  'the fractal_sfs_converge '
   'refinement step route_task lacks. Raises a clean ERROR if the node table '
   'is empty. Generalizes the sovereign-edge demo''s section-3 sniper search. '
   'On a reasoning-step failure (fractalsql.agent_partial_reasoning_fail on) '

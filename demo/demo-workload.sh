@@ -243,7 +243,7 @@ worker() {
         case "$op" in
             sniper)
                 out=$("${PSQL[@]}" -c "\timing on" -c "
-                    SELECT fractal_search(
+                    SELECT fractal_sfs_converge(
                         ARRAY(SELECT random()*2-1 FROM generate_series(1,128))::float8[],
                         30, 30, 2);" 2>&1) ;;
             scout)

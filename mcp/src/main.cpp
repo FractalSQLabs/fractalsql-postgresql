@@ -4,6 +4,7 @@
 #include <string>
 #include <cstring>
 #include <cctype>
+#include <exception>
 #include <iostream>
 #include <fstream>
 #include <memory>
@@ -33,7 +34,7 @@
 using namespace fsqlmcp;
 
 #ifndef FSQL_MCP_VERSION
-#define FSQL_MCP_VERSION "2.0.22"
+#define FSQL_MCP_VERSION "2.0.23"
 #endif
 
 static std::string envOr( const char* name, const std::string& def )
@@ -429,7 +430,7 @@ static int runHttpMode( const CliArgs& args, Db& db, RowLimitConfig& rowLimits,
     return runHttpTransport( httpCfg, [ &db ] { return db.probeAlive(); }, sessionFactory );
 }
 
-int main( int argc, char** argv )
+static int runMain( int argc, char** argv )
 {
     CliArgs args;
     args.httpPort = envIntOr( "FSQL_MCP_HTTP_PORT", 8765 );
@@ -560,4 +561,24 @@ int main( int argc, char** argv )
     StdioConfig stdioCfg;
     stdioCfg.shutdownDrainMs = envIntOr( "FSQL_MCP_SHUTDOWN_DRAIN_MS", 5000 );
     return runStdioTransport( server, stdioCfg );
+}
+
+// Nothing may escape main: an uncaught exception ends the process with std::terminate, which prints no line of ours and
+// leaves the supervisor an abort with no reason. Say what happened and exit with the error status instead.
+int main( int argc, char** argv )
+{
+    try
+    {
+        return runMain( argc, argv );
+    }
+    catch( const std::exception& e )
+    {
+        std::cerr << "fatal: unhandled exception: " << e.what() << "\n";
+        return 1;
+    }
+    catch( ... )
+    {
+        std::cerr << "fatal: unhandled exception of an unknown type\n";
+        return 1;
+    }
 }

@@ -541,7 +541,7 @@ function Invoke-Wizard {
             }
         }
         'skip' {
-            Write-Step "Skipping reasoning config. Search functions like fractal_search and fractal_search_explore work with no model."
+            Write-Step "Skipping reasoning config. Search functions like fractal_sfs_converge and fractal_search_explore work with no model."
         }
     }
 

@@ -484,10 +484,13 @@ class Client(object):
         self.session_id = None
 
     def headers(self, extra=None):
+        # A header in `extra` replaces the client's own of the same name: sending both would be a repeated header, which
+        # the server refuses as ambiguous, and is not what a test passing it means.
+        named = {k.lower() for k, _ in (extra or [])}
         headers = []
-        if self.token:
+        if self.token and "authorization" not in named:
             headers.append(("Authorization", "Bearer %s" % self.token))
-        if self.session_id and self.profile["echo_session"]:
+        if self.session_id and self.profile["echo_session"] and "mcp-session-id" not in named:
             headers.append(("Mcp-Session-Id", self.session_id))
         headers.extend(extra or [])
         return headers
@@ -652,9 +655,20 @@ def sweep(profiles, probe, workers=8):
     """
     if not profiles:
         return {}
+    results = {}
     with ThreadPoolExecutor(max_workers=min(workers, len(profiles))) as pool:
         futures = [(p, pool.submit(probe, p)) for p in profiles]
-        return dict((p, f.result()) for (p, f) in futures)
+        for (p, f) in futures:
+            try:
+                results[p] = f.result()
+            except Exception as exc:
+                # A probe that could not reach the server at all (the server
+                # died, or the connection was refused) is a FAILURE of that
+                # profile, not a crash of the whole driver: the driver then
+                # goes on to the other groups and reports the servers' own
+                # state, which is where the reason a server died lives.
+                results[p] = {"__unreachable__": (False, "%s: %s" % (type(exc).__name__, exc))}
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -687,8 +701,17 @@ def legacy_probe(port, pname):
     resp = anon.legacy("tools/list")
     out["T03"] = (resp.status == 400, "status=%s" % resp.status)
 
-    resp = client.legacy("tools/list",
-                         extra_headers=[("Mcp-Session-Id", "no-such-session")])
+    # The bogus session id REPLACES the client's own rather than joining it:
+    # a request that carries the same single-valued header twice is
+    # ambiguous framing, and the server refuses it with a 400 before it
+    # ever looks at the session -- which is a different rule from the one
+    # this check is about (an unknown session id is 404). A client that
+    # never had a session (the dual profiles' fallback path) sent the
+    # header once, and passed for the wrong reason.
+    saved_session = client.session_id
+    client.session_id = "no-such-session"
+    resp = client.legacy("tools/list")
+    client.session_id = saved_session
     out["T04"] = (resp.status == 404, "status=%s" % resp.status)
 
     first = request(port, "DELETE", "/mcp",
@@ -748,6 +771,12 @@ def check_t_group(dual):
     results = sweep(LEGACY_PROFILES, lambda p: legacy_probe(dual.port, p))
     for pname, outcome in results.items():
         for cid, (ok, detail) in outcome.items():
+            if cid not in sweeps:
+                # the profile could not reach the server at all: the checks
+                # were not run, and that is not a pass.
+                for s in sweeps.values():
+                    s.add(pname, False, detail)
+                continue
             sweeps[cid].add(pname, ok, detail)
     # The echoed revision: initialize answers with the revision it was asked
     # for when that revision is one the server speaks.
@@ -913,6 +942,12 @@ def check_m_group(dual):
     results = sweep(MODERN_PROFILES, lambda p: modern_probe(dual.port, p))
     for pname, outcome in results.items():
         for cid, (ok, detail) in outcome.items():
+            if cid not in sweeps:
+                # the profile could not reach the server at all: the checks
+                # were not run, and that is not a pass.
+                for s in sweeps.values():
+                    s.add(pname, False, detail)
+                continue
             sweeps[cid].add(pname, ok, detail)
     for cid in sorted(sweeps):
         sweeps[cid].report()
@@ -1064,6 +1099,12 @@ def check_a_group(dual, tokens):
     results = sweep(LENGTH_PROFILES, lambda p: auth_probe(dual.port, p, tokens))
     for pname, outcome in results.items():
         for cid, (ok, detail) in outcome.items():
+            if cid not in sweeps:
+                # the profile could not reach the server at all: the checks
+                # were not run, and that is not a pass.
+                for s in sweeps.values():
+                    s.add(pname, False, detail)
+                continue
             sweeps[cid].add(pname, ok, detail)
     for cid in sorted(sweeps):
         sweeps[cid].report()
@@ -1179,6 +1220,12 @@ def check_s_group(dual, origins):
                      lambda p: security_probe(dual.port, origins.port, p))
     for pname, outcome in results.items():
         for cid, (ok, detail) in outcome.items():
+            if cid not in sweeps:
+                # the profile could not reach the server at all: the checks
+                # were not run, and that is not a pass.
+                for s in sweeps.values():
+                    s.add(pname, False, detail)
+                continue
             sweeps[cid].add(pname, ok, detail)
     for cid in sorted(sweeps):
         sweeps[cid].report()
@@ -1564,6 +1611,12 @@ def check_k_group(dual, readonly, autoexec, cfg_off, cfg_all):
                                        p, with_config))
     for pname, outcome in results.items():
         for cid, (ok, detail) in outcome.items():
+            if cid not in sweeps:
+                # the profile could not reach the server at all: the checks
+                # were not run, and that is not a pass.
+                for s in sweeps.values():
+                    s.add(pname, False, detail)
+                continue
             sweeps[cid].add(pname, ok, detail)
     for cid in sorted(sweeps):
         sweeps[cid].report()
@@ -1746,9 +1799,28 @@ def main():
     try:
         dual = start_http("dual")
         servers.append(dual)
+
+        check_t_group(dual)
+        check_m_group(dual)
+        check_c_group(dual)
+        # Each server is started when the group that needs it runs, and
+        # stopped when that group is done with it: under a sanitizer every
+        # server carries its own runtime and its own shadow memory, and
+        # holding all seven at once is what a small CI runner runs out of.
+        # The peak is now the K group (five servers), and the rest of the
+        # run holds two at a time.
         modern_only = start_http("modern-only",
                                  env_extra={"FSQL_MCP_PROTOCOL_ERA": "modern"})
         servers.append(modern_only)
+        check_e_group(modern_only, dual)
+        modern_only.stop()
+        check_a_group(dual, tokens)
+        origins = start_http("origins",
+                             env_extra={"FSQL_MCP_ALLOWED_ORIGINS":
+                                        "http://allowed.example.com"})
+        servers.append(origins)
+        check_s_group(dual, origins)
+        origins.stop()
         readonly = start_http("read-only",
                               env_extra={"FSQL_MCP_READ_ONLY": "true"})
         servers.append(readonly)
@@ -1761,19 +1833,12 @@ def main():
         cfg_all = start_http("config-all",
                              env_extra={"FSQL_MCP_CONFIG_WRITES": "all"})
         servers.append(cfg_all)
-        origins = start_http("origins",
-                             env_extra={"FSQL_MCP_ALLOWED_ORIGINS":
-                                        "http://allowed.example.com"})
-        servers.append(origins)
-
-        check_t_group(dual)
-        check_m_group(dual)
-        check_c_group(dual)
-        check_e_group(modern_only, dual)
-        check_a_group(dual, tokens)
-        check_s_group(dual, origins)
         check_k_group(dual, readonly, autoexec, cfg_off, cfg_all)
+        autoexec.stop()
+        cfg_off.stop()
+        cfg_all.stop()
         check_h_group(dual, readonly, tokens)
+        readonly.stop()
         check_stdio_profile()
     finally:
         for srv in servers:

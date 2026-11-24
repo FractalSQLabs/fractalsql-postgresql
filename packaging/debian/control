@@ -24,7 +24,7 @@ Depends:
  postgresql-14
 Description: Stochastic Fractal Search extension for PostgreSQL 14
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
- (fractal_search()/fractal_search_explore()) plus the full Discovery/
+ (fractal_sfs_converge()/fractal_search_explore()) plus the full Discovery/
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin
@@ -47,7 +47,7 @@ Depends:
  postgresql-15
 Description: Stochastic Fractal Search extension for PostgreSQL 15
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
- (fractal_search()/fractal_search_explore()) plus the full Discovery/
+ (fractal_sfs_converge()/fractal_search_explore()) plus the full Discovery/
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin
@@ -70,7 +70,7 @@ Depends:
  postgresql-16
 Description: Stochastic Fractal Search extension for PostgreSQL 16
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
- (fractal_search()/fractal_search_explore()) plus the full Discovery/
+ (fractal_sfs_converge()/fractal_search_explore()) plus the full Discovery/
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin
@@ -93,7 +93,7 @@ Depends:
  postgresql-17
 Description: Stochastic Fractal Search extension for PostgreSQL 17
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
- (fractal_search()/fractal_search_explore()) plus the full Discovery/
+ (fractal_sfs_converge()/fractal_search_explore()) plus the full Discovery/
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin
@@ -116,7 +116,7 @@ Depends:
  postgresql-18
 Description: Stochastic Fractal Search extension for PostgreSQL 18
  FractalSQL registers a pure-C Stochastic Fractal Search optimizer
- (fractal_search()/fractal_search_explore()) plus the full Discovery/
+ (fractal_sfs_converge()/fractal_search_explore()) plus the full Discovery/
  Cognition/Text-to-SQL/Agency/Analytics/Enterprise tier surface (see
  docs/features.md), including the dependent fractalsql_agents
  extension's sixteen installable agents. Optional LLM reasoning plugin

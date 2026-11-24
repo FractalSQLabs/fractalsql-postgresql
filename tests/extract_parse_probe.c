@@ -17,9 +17,8 @@
  * 39 links this TU against src/fractalsql_parse.c itself using
  * separately-named _extract_parse_* objects so any --coverage run
  * MERGES this probe's parse.c hits with the main build's, not
- * overwriting them). Ported from the SQLite column's extract_parse_
- * probe (v2.0.9) -- this column's src/fractalsql_parse.c declares the
- * same three fsql_* APIs.
+ * overwriting them). This column's src/fractalsql_parse.c declares the
+ * three fsql_* APIs the probe drives.
  */
 #include "../src/fractalsql_parse.h"
 

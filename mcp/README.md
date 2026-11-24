@@ -21,8 +21,8 @@ worked examples, troubleshooting) see [`docs/mcp-plugin.md`](../docs/mcp-plugin.
   JSON-RPC over **stdio** (the desktop-client shape) by default, or
   **streamable HTTP** (`--http PORT` / `FSQL_MCP_TRANSPORT=http`) with
   Bearer-token auth and direct TLS (`--https` / `--tls-cert` / `--tls-key`).
-- **82 tools** across seven categories (discovery 14, cognition 4,
-  agency 22, analytics 23, enterprise 10, vectorizer 5, admin 4), each named
+- **108 tools** across seven categories (discovery 23, cognition 4,
+  agency 22, analytics 38, enterprise 10, vectorizer 6, admin 5), each named
   after the SQL function it calls and whose `inputSchema` mirrors the
   function's documented signature 1:1.
 - 5 resources (`fractalsql://schema|config|ledger/{kind}|vectorizer/status|agents`)

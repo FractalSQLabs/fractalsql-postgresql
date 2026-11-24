@@ -29,7 +29,7 @@ EXTENSION  = fractalsql
 DATA       = sql/fractalsql--1.0.sql
 PGFILEDESC = "fractalsql - Stochastic Fractal Search (pure-C core)"
 
-OBJS = src/fractalsql.o src/fractalsql_parse.o src/fractalsql_vector.o
+OBJS = src/fractalsql.o src/fractalsql_parse.o src/fractalsql_vector.o src/fractalsql_index.o
 
 CORE_VARIANT ?= community-sovereign-c
 # v1.2 platform layout: link the per-platform subdir
@@ -113,6 +113,9 @@ else
   FSQL_FI_FLAGS :=
 endif
 
+# -ffp-contract=off -fno-tree-vectorize: the precision contract. Distances accumulate in double in a fixed sequential order; a fused
+# multiply-add (aarch64, ppc64le) or a vectorised reduction would change the last bits (precision plan R3).
+PG_CFLAGS = -ffp-contract=off -fno-tree-vectorize
 PG_CPPFLAGS = -Iinclude $(FSQL_COV_FLAGS) $(FSQL_SAN_FLAGS) $(FSQL_FI_FLAGS) $(FSQL_OPENSSL_CPPFLAGS)
 # Static-link the core archive into the extension .so.
 # -lm: math symbols (sqrt, etc.) the core depends on.

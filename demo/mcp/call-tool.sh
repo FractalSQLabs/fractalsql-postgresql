@@ -4,7 +4,7 @@
 # NOT a second server: it is the mcp/ C++ implementation's own binary,
 # restricted to the demo's four pinned tools via --tool (category/white-list
 # filtering, spec 15.1's FSQL_MCP_TOOL_WHITELIST as a CLI arg):
-#   Discovery:  fractal_search
+#   Discovery:  fractal_sfs_converge
 #   Cognition:  fractal_reason
 #   Community:  fractal_agent_data_analyst
 #   Enterprise: fractal_agent_diverse_portfolios  (proves the clean
@@ -40,7 +40,7 @@ if [ -z "$BIN" ]; then
   exit 2
 fi
 
-PINS=fractal_search,fractal_reason,fractal_agent_data_analyst,fractal_agent_diverse_portfolios
+PINS=fractal_sfs_converge,fractal_reason,fractal_agent_data_analyst,fractal_agent_diverse_portfolios
 
 # serve: the compose service's long-running streamable-HTTP form (1.1/10.3).
 # stdio stays the default so a `docker compose exec` one-liner always works.

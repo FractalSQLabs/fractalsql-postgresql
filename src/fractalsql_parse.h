@@ -17,6 +17,8 @@
 #ifndef FRACTALSQL_PARSE_H
 #define FRACTALSQL_PARSE_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,6 +46,14 @@ int fsql_extract_population(const char *json, int dim, int max_rows, double *out
  * skipped, not emitted. Returns the count parsed (never more than
  * max_k), or -1 on malformed input. */
 int fsql_extract_topk(const char *json, int max_k, int *out_idx, double *out_dist);
+
+/* Split text into chunks of at most `size` characters (code points) and write a malloc'd JSON array of {"no","start","end","text"} to *out
+ * (free() it). mode: 0 fixed, 1 paragraph, 2 sentence. The same algorithm, with the same output, runs in every FractalSQL host; see
+ * docs/api-analytics.md. Returns 0, or 1 when more than 100000 chunks would be produced, or -1 on out of memory. size must be 1..100000 and
+ * overlap 0..size-1 (the caller checks). */
+#define FSQL_CHUNK_MAX_SIZE   100000
+#define FSQL_CHUNK_MAX_CHUNKS 100000
+int fsql_chunk_text(const unsigned char *t, size_t blen, long size, long overlap, int mode, char **out);
 
 #ifdef __cplusplus
 }

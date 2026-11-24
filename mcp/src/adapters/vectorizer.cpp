@@ -23,7 +23,7 @@ namespace fsqlmcp
         t.push_back( ToolSpec{ "fractal_vectorizer_create", "vectorizer", ToolClass::Cheap,
             { Str("source_table", true, "Table to sync (needs a single-column primary key)."),
               Str("text_col", true, "Source text column."), Str("embedding_col", true, "Destination embedding column."),
-              Obj("options", false, "{max_embeds_per_window:int, rate_window_secs:int=3600}") },
+              Obj("options", false, "{max_embeds_per_window:int, rate_window_secs:int=3600, chunk_size:int (1..100000; turns chunking on), chunk_overlap:int=0, chunk_mode:paragraph|sentence|fixed, chunk_table:string}") },
             std::nullopt, false, false,
             [&db]( const Json& a, CallCtx& ) {
                 const std::string opts = a.contains( "options" ) && !a.at( "options" ).is_null() ? a.at( "options" ).dump() : "{}";
@@ -81,6 +81,15 @@ namespace fsqlmcp
             "background worker in any engine, by design. Runs in a single transaction; failed rows are NOT "
             "retried automatically. Returns {processed:N}. stale_after is a postgres INTERVAL under the hood; "
             "give it seconds.";
+
+        t.push_back( ToolSpec{ "fractal_vectorizer_status", "vectorizer", ToolClass::Cheap,
+            {}, std::nullopt, false, true,
+            [&db]( const Json&, CallCtx& ) {
+                return Json{ { "vectorizers", db.callRows( "SELECT * FROM fractal_vectorizer_status", {} ) } };
+            } } );
+        t.back().idempotentHint = true;
+        t.back().description = "One row per vectorizer: its id, source table, text and embedding columns, state (enabled or paused), the queue counts "
+            "(pending, done, failed) and the last error. The same data as the fractalsql://vectorizer/status resource.";
 
         return t;
     }

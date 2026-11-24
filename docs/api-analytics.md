@@ -50,6 +50,30 @@ Detects changes in the DFA exponent between a recent window and the baseline.
 
 ## Time-Series and Topology
 
+### `fractal_chunk_text`
+**Split long text into chunks (pure, no model)**
+
+**Signature**: `fractal_chunk_text(input text, chunk_size int4, chunk_overlap int4, chunk_mode text DEFAULT 'paragraph') RETURNS jsonb`
+
+Splits `input` into chunks of at most `chunk_size` characters and returns a jsonb array of `{"no", "start", "end", "text"}`. `start` and `end` are character offsets into the original text (`end` is exclusive), and `text` is that slice. Characters are UTF-8 code points, not bytes. `chunk_size` is 1 to 100000, `chunk_overlap` is 0 to `chunk_size - 1`, and at most 100000 chunks are produced. A NULL text gives NULL; an empty or blank text gives `[]`.
+
+| `chunk_mode` | How the text is cut |
+| --- | --- |
+| `paragraph` (the default) | At paragraph breaks (a run of blanks that contains at least two line feeds). Whole paragraphs are packed into a chunk while it stays within `chunk_size`. |
+| `sentence` | After a run of `.`, `!` or `?` that is followed by whitespace or the end. Whole sentences are packed the same way; a paragraph break also ends a sentence. |
+| `fixed` | Every `chunk_size - chunk_overlap` characters, ignoring the text's structure. |
+
+A paragraph or sentence longer than `chunk_size` is cut like a fixed span, and neighbouring pieces share `chunk_overlap` characters. `chunk_overlap` applies only to such cuts and to `fixed`. The chunk keeps the separators between the units it packs. The size is in characters, not tokens: pick it a little under your embedding model's limit.
+
+```sql
+SELECT e->>'no' AS no, e->>'text' AS chunk
+FROM jsonb_array_elements(fractal_chunk_text('One. Two sentences! Is this three? Yes.', 20, 0, 'sentence')) e;
+```
+
+The same function, with the same output, is available on every FractalSQL host. The vectorizer uses it when you give it a `chunk_size` (see [vectorizer-setup.md](vectorizer-setup.md)).
+
+---
+
 ### `fractal_change_point_detect`
 **Change-Point Localization**
 DFA's complement: localizes *where* a series' mean and/or variance shifted, instead of only characterizing its overall scaling behavior.
@@ -129,6 +153,8 @@ These two pair into tolerant "have I basically been in this state before" loop d
 ## Vector Math and Quantization
 
 Utilities over the `fractal_vector` type (see [vectorizer-setup.md](vectorizer-setup.md)).
+
+Every distance in this section is computed by the one shared double-precision implementation, so the values agree to the last bit with the other SQL-visible distances and with every other FractalSQL host -- see the precision contract in [api-discovery.md](api-discovery.md).
 
 ### `fractal_vector_lp_distance`
 **Generalized $L_p$ Distance**

@@ -63,7 +63,7 @@ SELECT fractal_edition(), fractal_version();
 -- 1. Search (3 functions)
 -- ------------------------------------------------------------------
 \echo ''
-\echo '=== Search: fractal_search, fractal_search_debug ==='
+\echo '=== Search: fractal_sfs_converge, fractal_sfs_converge_debug ==='
 
 DROP TABLE IF EXISTS bmk_corpus;
 CREATE TABLE bmk_corpus (id serial PRIMARY KEY, emb_arr float8[]);
@@ -72,8 +72,8 @@ SELECT ARRAY[random()*2-1, random()*2-1, random()*2-1, random()*2-1,
              random()*2-1, random()*2-1, random()*2-1, random()*2-1]::float8[]
 FROM generate_series(1, 100);
 
-SELECT fractal_search(ARRAY[0.6,0.8,0,0,0,0,0,0]::float8[], iterations => 30);
-SELECT fractal_search_debug(ARRAY[0.6,0.8,0,0,0,0,0,0]::float8[], iterations => 10) -> 'best_fit';
+SELECT fractal_sfs_converge(ARRAY[0.6,0.8,0,0,0,0,0,0]::float8[], iterations => 30);
+SELECT fractal_sfs_converge_debug(ARRAY[0.6,0.8,0,0,0,0,0,0]::float8[], iterations => 10) -> 'best_fit';
 
 \echo ''
 \echo '=== Search: fractal_search_explore ==='

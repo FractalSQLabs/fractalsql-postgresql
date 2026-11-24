@@ -114,7 +114,7 @@ if [[ ! -x "${MCP_BIN}" ]]; then
 fi
 [[ -x "${MCP_BIN}" ]] \
     || { echo "MCP server binary missing after build: ${MCP_BIN}" >&2; exit 1; }
-for f in mcp/README.md mcp/manifest.json mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock; do
+for f in mcp/README.md mcp/RUN.txt mcp/manifest.json mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock; do
     [[ -f "${f}" ]] \
         || { echo "missing ${f} — required to stage the shipped MCP server's client guide + locks" >&2; exit 1; }
 done
@@ -170,6 +170,7 @@ for PG_VER in 14 15 16 17 18; do
     stage_mcp_docs() {
         local stage="$1"
         install -Dm0644 mcp/README.md      "${stage}/usr/share/doc/${PKG_NAME}/mcp/README.md"
+        install -Dm0644 mcp/RUN.txt        "${stage}/usr/share/doc/${PKG_NAME}/mcp/RUN.txt"
         install -Dm0644 mcp/manifest.json "${stage}/usr/share/doc/${PKG_NAME}/mcp/manifest.json"
     }
 

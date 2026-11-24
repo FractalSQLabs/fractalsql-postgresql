@@ -156,6 +156,15 @@ $SrcParse = Join-Path $RepoRoot 'src\fractalsql_parse.c'
 # use ("could not find function fractal_vector_in"). Compile it on Windows
 # too, matching the Makefile.
 $SrcVector = Join-Path $RepoRoot 'src\fractalsql_vector.c'
+# The IVF index surface (fractal_index_create / _rebuild / _drop / _info /
+# _list / _refresh / _search / _candidates and the indexed fractal_search) is
+# the fourth translation unit the Linux Makefile's OBJS lists
+# (src/fractalsql_index.o). Its PG_FUNCTION_INFO_V1 symbols are resolved at
+# CALL time via MODULE_PATHNAME, so omitting it never broke the link -- but
+# without it the index functions are absent from the DLL and fail at first
+# use ("could not find function fractal_index_create in file ...fractalsql.dll").
+# Compile it on Windows too, matching the Makefile.
+$SrcIndex = Join-Path $RepoRoot 'src\fractalsql_index.c'
 $Inc = Join-Path $RepoRoot 'include'
 
 if (-not $OutputDir) { $OutputDir = Join-Path $RepoRoot "dist\windows\pg$PgMajor" }
@@ -163,6 +172,7 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $FractalsqlObj = Join-Path $OutputDir 'fractalsql.obj'
 $FractalsqlParseObj = Join-Path $OutputDir 'fractalsql_parse.obj'
 $FractalsqlVectorObj = Join-Path $OutputDir 'fractalsql_vector.obj'
+$FractalsqlIndexObj = Join-Path $OutputDir 'fractalsql_index.obj'
 $Dll = Join-Path $OutputDir 'fractalsql.dll'
 
 Write-Host "[build-windows] PG major   = $PgMajor"
@@ -228,6 +238,15 @@ $out = & cl.exe @commonCompileArgs "/Fo$FractalsqlVectorObj" $SrcVector 2>&1
 $out | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { throw "cl.exe failed compiling fractalsql_vector.c (exit $LASTEXITCODE)" }
 
+# fractalsql_index.c -- fourth TU (the IVF index surface), same as the
+# Makefile's OBJS. It #includes "postgres.h" and calls the core's fsql_ivf_*
+# entry points from the vendored header, so it needs the PG include paths +
+# /DFSQL_STATIC, exactly as fractalsql.c does.
+Write-Host "[build-windows] cl.exe (compile fractalsql_index.c) $($commonCompileArgs -join ' ') /Fo$FractalsqlIndexObj $SrcIndex"
+$out = & cl.exe @commonCompileArgs "/Fo$FractalsqlIndexObj" $SrcIndex 2>&1
+$out | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0) { throw "cl.exe failed compiling fractalsql_index.c (exit $LASTEXITCODE)" }
+
 # bcrypt.lib: the vendored community-sovereign-c.lib includes
 # src/diversify/entropy.c, which calls BCryptGenRandom (the OS entropy
 # source) on Windows, so bcrypt.lib must be linked.
@@ -240,6 +259,7 @@ $linkArgs = @(
     $FractalsqlObj,
     $FractalsqlParseObj,
     $FractalsqlVectorObj,
+    $FractalsqlIndexObj,
     "/Fe$Dll",
     '/link',
     $CoreLib,
@@ -275,7 +295,18 @@ if (-not (Test-Path $Dll)) { throw "build did not produce $Dll" }
 if (-not $SkipAudit) {
     Write-Host "[build-windows] export audit (dumpbin /exports)"
     $exports = & dumpbin /nologo /exports $Dll | Out-String
-    foreach ($sym in @('_PG_init', 'Pg_magic_func')) {
+    # The index entry points are audited too: they live in their own
+    # translation unit, so a source list that leaves it out still LINKS
+    # (the symbols are resolved at call time) -- the DLL is simply missing
+    # the whole surface, and the first use says "could not find function
+    # fractal_index_create in file ...fractalsql.dll". Catching that here
+    # names the missing export instead of the first SQL statement that
+    # trips over it.
+    $required = @('_PG_init', 'Pg_magic_func',
+                  'fractal_index_create', 'fractal_index_rebuild', 'fractal_index_drop',
+                  'fractal_index_info', 'fractal_index_list', 'fractal_index_refresh',
+                  'fractal_index_search', 'fractal_index_candidates')
+    foreach ($sym in $required) {
         if ($exports -notmatch [regex]::Escape($sym)) {
             # Surfaced missing on a PG-major we'd never actually run this
             # against before (only PG16 had been hardware-verified) --
@@ -286,7 +317,7 @@ if (-not $SkipAudit) {
             throw "export audit FAILED: '$sym' not exported by $Dll"
         }
     }
-    Write-Host "[build-windows]   _PG_init + Pg_magic_func exported OK"
+    Write-Host "[build-windows]   _PG_init, Pg_magic_func and the ten index entry points exported OK"
 
     Write-Host "[build-windows] dependency audit (dumpbin /dependents)"
     $deps = & dumpbin /nologo /dependents $Dll | Out-String

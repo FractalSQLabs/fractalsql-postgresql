@@ -42,6 +42,32 @@ namespace fsqlmcp
         return fv( a, key );
     }
 
+    // The vector family: a vector argument travels as a float8[] literal and
+    // the engine's own constructor turns it into a fractal_vector, so the call
+    // stays overload-safe. A vector comes back as a JSON array of numbers, a
+    // scalar as the number itself.
+    static std::string vecBind( const Json& a, const char* key )
+    { return pgFloat8ArrayLiteral( vectors::vectorParamToText( a.at( key ), key ) ); }
+
+    static Json vectorJson( Db& db, const std::string& sql, const std::vector<std::string>& binds )
+    {
+        const auto r = db.callScalar( sql, binds );
+        if( !r ) return Json( nullptr );
+        try { return Json::parse( *r ); }
+        catch( ... )
+        { throw ToolError( ErrorClass::Engine, "the vector function returned a result that is not JSON" ); }
+    }
+
+    static Json vectorScalar( Db& db, const std::string& sql, const std::vector<std::string>& binds )
+    {
+        const auto r = db.callScalar( sql, binds );
+        if( !r ) return vectors::wrapScalar( Json( nullptr ) );
+        char* end = nullptr;
+        const double v = std::strtod( r->c_str(), &end );
+        if( end == r->c_str() ) return vectors::wrapScalar( Json( nullptr ) );
+        return vectors::wrapScalar( Json( v ) );
+    }
+
     std::vector<ToolSpec> buildAnalyticsTools( Db& db, const RowLimitConfig& rowCfg )
     {
         std::vector<ToolSpec> t;
@@ -118,6 +144,24 @@ namespace fsqlmcp
         t.back().description = "DFA's complement: localizes WHERE a series' mean and/or variance shifted, via a "
             "sliding two-sample test over adjacent windows. Returns a plain array of boundary indices, ascending, "
             "up to max_points.";
+
+        t.push_back( ToolSpec{ "fractal_chunk_text", "analytics", ToolClass::Cheap,
+            { Str("text", true, "Text to split."), Int("chunk_size", true, "Largest chunk in characters, 1..100000.", 800),
+              Int("chunk_overlap", false, "Characters shared by neighbouring pieces when a paragraph or sentence has to be cut, 0..chunk_size-1.", 0),
+              StrEnum("chunk_mode", false, "How the text is cut: paragraph, sentence or fixed.", "paragraph") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                auto call = pgSelectCall( "fractal_chunk_text", {
+                    PgBind::s( "text", a.at( "text" ).get<std::string>() ),
+                    PgBind::s( "int4", std::to_string( a.value( "chunk_size", 800 ) ) ),
+                    PgBind::s( "int4", std::to_string( a.value( "chunk_overlap", 0 ) ) ),
+                    PgBind::s( "text", a.value( "chunk_mode", std::string( "paragraph" ) ) ) }, false );
+                return Json{ { "chunks", Json::parse( db.callScalar( call.first, call.second ).value_or( "[]" ) ) } };
+            } } );
+        t.back().idempotentHint = true;
+        t.back().description = "Splits text into chunks of at most chunk_size characters (code points) and returns [{no, start, end, text}]; start and end are character offsets, end exclusive. "
+            "chunk_mode paragraph (default) packs whole paragraphs, sentence packs whole sentences, fixed cuts every chunk_size - chunk_overlap characters; a paragraph or "
+            "sentence longer than chunk_size is cut with chunk_overlap shared. Pure: no model, the same output on every FractalSQL host.";
 
         t.push_back( ToolSpec{ "fractal_periodogram", "analytics", ToolClass::Cheap,
             { Vec("series", true, "Time-ordered series (>= 4 points)."), Int("max_peaks", false, "Top peaks to return.", 8) },
@@ -285,6 +329,161 @@ namespace fsqlmcp
             } } );
         t.back().description = "Hamming distance between two binary-quantized vectors (hex strings). A cheap "
             "pre-filter ahead of a full-precision re-rank, not a distance substitute. Returns an integer.";
+
+        // The canonical vector type and the vector algebra. Every vector
+        // argument is bound as a float8[] literal and converted by the
+        // engine's own constructor, so the call stays overload-safe; a vector
+        // comes back as a JSON array of numbers, a scalar as the number.
+        t.push_back( ToolSpec{ "fractal_vector", "analytics", ToolClass::Cheap,
+            { Int("dim", true, "The vector's dimension (1-32767).") }, std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql =
+                    "SELECT fractal_vector_to_json(fractal_vector_from_float8_array("
+                    "ARRAY(SELECT 0::float8 FROM generate_series(1, $1::int))))";
+                return vectorJson( db, sql, { std::to_string( a.at( "dim" ).get<std::int64_t>() ) } );
+            } } );
+        t.back().description = "Builds the zero vector of the given dimension, in the canonical vector form, "
+            "handed back as a JSON array of numbers.";
+
+        t.push_back( ToolSpec{ "fractal_vector_from_text", "analytics", ToolClass::Cheap,
+            { Str("vector", true, "The vector as text: a JSON array, or a comma-separated list of numbers.") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql = "SELECT fractal_vector_to_json(fractal_vector_from_text($1::text))";
+                return vectorJson( db, sql, { a.at( "vector" ).get<std::string>() } );
+            } } );
+        t.back().description = "Parses a vector from text -- a JSON array, or a comma-separated list of numbers -- into "
+            "the canonical vector, handed back as a JSON array of numbers. Refuses text that is not a finite vector.";
+
+        t.push_back( ToolSpec{ "fractal_vector_to_json", "analytics", ToolClass::Cheap,
+            { Vec("vector", true, "The vector.") }, std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql =
+                    "SELECT fractal_vector_to_json(fractal_vector_from_float8_array($1::float8[]))";
+                return vectorJson( db, sql, { vecBind( a, "vector" ) } );
+            } } );
+        t.back().description = "Renders a vector as JSON: the array of numbers, so a client can see exactly what the "
+            "engine holds.";
+
+        t.push_back( ToolSpec{ "fractal_vector_dims", "analytics", ToolClass::Cheap,
+            { Vec("v", true, "The vector.") }, std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql =
+                    "SELECT fractal_vector_dims(fractal_vector_from_float8_array($1::float8[]))";
+                const auto r = db.callScalar( sql, { vecBind( a, "v" ) } );
+                if( !r ) return vectors::wrapScalar( Json( nullptr ) );
+                return vectors::wrapScalar( Json( static_cast<std::int64_t>( std::strtoll( r->c_str(), nullptr, 10 ) ) ) );
+            } } );
+        t.back().description = "The vector's dimension: how many components it has. Check it before handing a vector "
+            "to the vectorizer.";
+
+        t.push_back( ToolSpec{ "fractal_vector_norm", "analytics", ToolClass::Cheap,
+            { Vec("v", true, "The vector.") }, std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql =
+                    "SELECT fractal_vector_norm(fractal_vector_from_float8_array($1::float8[]))";
+                return vectorScalar( db, sql, { vecBind( a, "v" ) } );
+            } } );
+        t.back().description = "The vector's L2 norm (its magnitude).";
+
+        t.push_back( ToolSpec{ "fractal_vector_normalize", "analytics", ToolClass::Cheap,
+            { Vec("v", true, "The vector.") }, std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql = "SELECT fractal_vector_to_json("
+                    "fractal_vector_normalize(fractal_vector_from_float8_array($1::float8[])))";
+                return vectorJson( db, sql, { vecBind( a, "v" ) } );
+            } } );
+        t.back().description = "The vector scaled to unit length, so a distance between two vectors reflects "
+            "direction only.";
+
+        t.push_back( ToolSpec{ "fractal_vector_add", "analytics", ToolClass::Cheap,
+            { Vec("a", true, "The first vector."), Vec("b", true, "The second vector.") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql = "SELECT fractal_vector_to_json("
+                    "fractal_vector_add(fractal_vector_from_float8_array($1::float8[]),"
+                    " fractal_vector_from_float8_array($2::float8[])))";
+                return vectorJson( db, sql, { vecBind( a, "a" ), vecBind( a, "b" ) } );
+            } } );
+        t.back().description = "The element-wise sum of two vectors.";
+
+        t.push_back( ToolSpec{ "fractal_vector_sub", "analytics", ToolClass::Cheap,
+            { Vec("a", true, "The first vector."), Vec("b", true, "The second vector.") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql = "SELECT fractal_vector_to_json("
+                    "fractal_vector_sub(fractal_vector_from_float8_array($1::float8[]),"
+                    " fractal_vector_from_float8_array($2::float8[])))";
+                return vectorJson( db, sql, { vecBind( a, "a" ), vecBind( a, "b" ) } );
+            } } );
+        t.back().description = "The element-wise difference of two vectors.";
+
+        t.push_back( ToolSpec{ "fractal_vector_l2_distance", "analytics", ToolClass::Cheap,
+            { Vec("a", true, "The first vector."), Vec("b", true, "The second vector.") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql =
+                    "SELECT fractal_vector_l2_distance(fractal_vector_from_float8_array($1::float8[]),"
+                    " fractal_vector_from_float8_array($2::float8[]))";
+                return vectorScalar( db, sql, { vecBind( a, "a" ), vecBind( a, "b" ) } );
+            } } );
+        t.back().description = "The L2 (Euclidean) distance between two vectors.";
+
+        t.push_back( ToolSpec{ "fractal_vector_l2_squared", "analytics", ToolClass::Cheap,
+            { Vec("a", true, "The first vector."), Vec("b", true, "The second vector.") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql =
+                    "SELECT fractal_vector_l2_squared(fractal_vector_from_float8_array($1::float8[]),"
+                    " fractal_vector_from_float8_array($2::float8[]))";
+                return vectorScalar( db, sql, { vecBind( a, "a" ), vecBind( a, "b" ) } );
+            } } );
+        t.back().description = "The squared L2 distance: the same measure without the square root.";
+
+        t.push_back( ToolSpec{ "fractal_vector_cosine_distance", "analytics", ToolClass::Cheap,
+            { Vec("a", true, "The first vector."), Vec("b", true, "The second vector.") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql =
+                    "SELECT fractal_vector_cosine_distance(fractal_vector_from_float8_array($1::float8[]),"
+                    " fractal_vector_from_float8_array($2::float8[]))";
+                return vectorScalar( db, sql, { vecBind( a, "a" ), vecBind( a, "b" ) } );
+            } } );
+        t.back().description = "The cosine distance between two vectors: 0 when they point the same way, 1 when "
+            "they are orthogonal.";
+
+        t.push_back( ToolSpec{ "fractal_vector_cosine_similarity", "analytics", ToolClass::Cheap,
+            { Vec("a", true, "The first vector."), Vec("b", true, "The second vector.") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql =
+                    "SELECT fractal_vector_cosine_similarity(fractal_vector_from_float8_array($1::float8[]),"
+                    " fractal_vector_from_float8_array($2::float8[]))";
+                return vectorScalar( db, sql, { vecBind( a, "a" ), vecBind( a, "b" ) } );
+            } } );
+        t.back().description = "The cosine similarity between two vectors: 1 when they point the same way, 0 when "
+            "they are orthogonal.";
+
+        t.push_back( ToolSpec{ "fractal_vector_negative_inner_product", "analytics", ToolClass::Cheap,
+            { Vec("a", true, "The first vector."), Vec("b", true, "The second vector.") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql =
+                    "SELECT fractal_vector_negative_inner_product(fractal_vector_from_float8_array($1::float8[]),"
+                    " fractal_vector_from_float8_array($2::float8[]))";
+                return vectorScalar( db, sql, { vecBind( a, "a" ), vecBind( a, "b" ) } );
+            } } );
+        t.back().description = "The negative inner product of two vectors.";
+
+        t.push_back( ToolSpec{ "fractal_vector_scale", "analytics", ToolClass::Cheap,
+            { Vec("v", true, "The vector."), Num("s", true, "The factor to scale by.") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string sql = "SELECT fractal_vector_to_json("
+                    "fractal_vector_scale(fractal_vector_from_float8_array($1::float8[]), $2::float8))";
+                return vectorJson( db, sql, { vecBind( a, "v" ), a.at( "s" ).dump() } );
+            } } );
+        t.back().description = "The vector multiplied by a scalar factor.";
 
         // int4[] edges/faces — geometry-index arrays, flat pairs (verified v1.0.sql:1178-1214).
         t.push_back( ToolSpec{ "fractal_vascular_network", "analytics", ToolClass::Cheap,

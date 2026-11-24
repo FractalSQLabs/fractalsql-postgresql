@@ -44,6 +44,7 @@ extern int no_such_variable
 
 #include "fractalsql_vector.h"
 #include "fractalsql_sql.h"   /* fsql_vector_* (vendored core API) */
+#include "fsql_precision.h"  /* the one double-accumulating implementation of dot / L2 / norm / cosine (precision contract) */
 
 PG_FUNCTION_INFO_V1(fractal_vector_in);
 PG_FUNCTION_INFO_V1(fractal_vector_out);
@@ -357,9 +358,7 @@ fractal_vector_l2_distance(PG_FUNCTION_ARGS)
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
     FractalVector *b = PG_GETARG_FRACTALVEC_P(1);
     check_same_dim(a->dim, b->dim);
-    float4 dist;
-    fsql_vector_l2(a->x, b->x, (size_t) a->dim, &dist);
-    PG_RETURN_FLOAT8((double) dist);
+    PG_RETURN_FLOAT8(fsqlp_l2_f(a->x, b->x, (size_t) a->dim));
 }
 
 Datum
@@ -368,9 +367,7 @@ fractal_vector_cosine_distance(PG_FUNCTION_ARGS)
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
     FractalVector *b = PG_GETARG_FRACTALVEC_P(1);
     check_same_dim(a->dim, b->dim);
-    float4 dist;
-    fsql_vector_cosine_distance(a->x, b->x, (size_t) a->dim, &dist);
-    PG_RETURN_FLOAT8((double) dist);
+    PG_RETURN_FLOAT8(fsqlp_cosine_distance_f(a->x, b->x, (size_t) a->dim));
 }
 
 Datum
@@ -379,9 +376,7 @@ fractal_vector_negative_inner_product(PG_FUNCTION_ARGS)
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
     FractalVector *b = PG_GETARG_FRACTALVEC_P(1);
     check_same_dim(a->dim, b->dim);
-    float4 dot;
-    fsql_vector_dot(a->x, b->x, (size_t) a->dim, &dot);
-    PG_RETURN_FLOAT8((double) -dot);
+    PG_RETURN_FLOAT8(-fsqlp_dot_f(a->x, b->x, (size_t) a->dim));
 }
 
 /* ------------------------------------------------------------------ */
@@ -396,9 +391,7 @@ fractal_vector_l2_squared(PG_FUNCTION_ARGS)
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
     FractalVector *b = PG_GETARG_FRACTALVEC_P(1);
     check_same_dim(a->dim, b->dim);
-    float4 sq;
-    fsql_vector_l2_sq(a->x, b->x, (size_t) a->dim, &sq);
-    PG_RETURN_FLOAT8((double) sq);
+    PG_RETURN_FLOAT8(fsqlp_l2_sq_f(a->x, b->x, (size_t) a->dim));
 }
 
 Datum
@@ -407,18 +400,14 @@ fractal_vector_cosine_similarity(PG_FUNCTION_ARGS)
     FractalVector *a = PG_GETARG_FRACTALVEC_P(0);
     FractalVector *b = PG_GETARG_FRACTALVEC_P(1);
     check_same_dim(a->dim, b->dim);
-    float4 sim;
-    fsql_vector_cosine_similarity(a->x, b->x, (size_t) a->dim, &sim);
-    PG_RETURN_FLOAT8((double) sim);
+    PG_RETURN_FLOAT8(fsqlp_cosine_similarity_f(a->x, b->x, (size_t) a->dim));
 }
 
 Datum
 fractal_vector_norm(PG_FUNCTION_ARGS)
 {
     FractalVector *v = PG_GETARG_FRACTALVEC_P(0);
-    float4 n;
-    fsql_vector_norm(v->x, (size_t) v->dim, &n);
-    PG_RETURN_FLOAT8((double) n);
+    PG_RETURN_FLOAT8(fsqlp_norm_f(v->x, (size_t) v->dim));
 }
 
 Datum
@@ -426,7 +415,10 @@ fractal_vector_normalize(PG_FUNCTION_ARGS)
 {
     FractalVector *v   = PG_GETARG_FRACTALVEC_P(0);
     FractalVector *out = fractalvec_new(v->dim);
-    fsql_vector_normalize(v->x, (size_t) v->dim, out->x);
+    {   /* double norm, one rounding to float4 per component (same contract as the core's fsql_vector_normalize) */
+        double nn = fsqlp_norm_f(v->x, (size_t) v->dim);
+        for (int i = 0; i < (int) v->dim; i++) out->x[i] = (nn == 0.0) ? 0.0f : (float4) ((double) v->x[i] / nn);
+    }
     PG_RETURN_FRACTALVEC_P(out);
 }
 

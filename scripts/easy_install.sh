@@ -632,7 +632,7 @@ phase_c_wizard() {
             fi
             ;;
         skip)
-            log "Skipping reasoning config. Search functions like fractal_search and fractal_search_explore work with no model."
+            log "Skipping reasoning config. Search functions like fractal_sfs_converge and fractal_search_explore work with no model."
             ;;
         *) die "unknown --provider '${PROVIDER}' (expected ollama, openai-compatible, or skip)" ;;
     esac

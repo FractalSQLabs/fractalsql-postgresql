@@ -120,6 +120,11 @@ jobs:
 
           apt-get install -qq -y ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.deb
 
+          # The MCP quick-start ships in the package. Query the package itself:
+          # container images install without /usr/share/doc.
+          dpkg-deb -c ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.deb | grep "mcp/RUN.txt" >/dev/null \
+              || { echo "FAIL: mcp/RUN.txt missing from the deb"; exit 1; }
+
           # Verify files landed at the PG-declared extension dir.
           EXT_DIR=\$(su postgres -c "pg_config --sharedir")/extension
           test -f "\${EXT_DIR}/fractalsql.control" \
@@ -131,7 +136,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.22"
+          test "\$VERSION" = "2.0.23"
           echo "ok: Debian install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Shipped MCP server verification ---------------------------
@@ -142,8 +147,8 @@ jobs:
               || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
           MCP_V=\$("\${MCP}" --version)
           echo "mcp=\${MCP} version=\${MCP_V}"
-          test "\${MCP_V}" = "2.0.22" \
-              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.22"; exit 1; }
+          test "\${MCP_V}" = "2.0.23" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.23"; exit 1; }
           # The lock files install beside the binary, which is where the server looks for them; run it from
           # another directory so that lookup is what has to find them.
           test -f "\$(dirname "\${MCP}")/.mcp-schema-lock" && test -f "\$(dirname "\${MCP}")/.mcp-safety-annotations-lock" \
@@ -305,8 +310,8 @@ jobs:
               || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
           MCP_V=\$("\${MCP}" --version)
           echo "mcp version=\${MCP_V}"
-          test "\${MCP_V}" = "2.0.22" \
-              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.22"; exit 1; }
+          test "\${MCP_V}" = "2.0.23" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.23"; exit 1; }
           # The lock files install beside the binary, which is where the server looks for them; run it from
           # another directory so that lookup is what has to find them.
           test -f "\$(dirname "\${MCP}")/.mcp-schema-lock" && test -f "\$(dirname "\${MCP}")/.mcp-safety-annotations-lock" \
@@ -416,6 +421,11 @@ jobs:
 
           dnf install -qy "\${DNF_PG_REPO_FLAGS[@]}" ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.rpm
 
+          # The MCP quick-start ships in the package. Query the package itself:
+          # container images install without /usr/share/doc.
+          rpm -qlp ./dist/packages/postgresql-\${PG_VER}-fractalsql-amd64.rpm | grep "mcp/RUN.txt" >/dev/null \
+              || { echo "FAIL: mcp/RUN.txt missing from the rpm"; exit 1; }
+
           # Verify files landed in the PGDG tree.
           EXT_DIR=/usr/pgsql-\${PG_VER}/share/extension
           test -f "\${EXT_DIR}/fractalsql.control" \
@@ -427,7 +437,7 @@ jobs:
           VERSION=\$(su postgres -c "psql -At -c 'SELECT fractal_version();'")
           echo "edition=\$EDITION version=\$VERSION"
           test "\$EDITION" = "Community"
-          test "\$VERSION" = "2.0.22"
+          test "\$VERSION" = "2.0.23"
           echo "ok: RPM install + CREATE EXTENSION + UDF exec (pg\${PG_VER})"
 
           # --- Shipped MCP server verification ---------------------------
@@ -436,8 +446,8 @@ jobs:
               || { echo "FAIL: shipped MCP server binary missing at \${MCP}"; exit 1; }
           MCP_V=\$("\${MCP}" --version)
           echo "mcp=\${MCP} version=\${MCP_V}"
-          test "\${MCP_V}" = "2.0.22" \
-              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.22"; exit 1; }
+          test "\${MCP_V}" = "2.0.23" \
+              || { echo "FAIL: MCP server reports \${MCP_V}, expected 2.0.23"; exit 1; }
           # The lock files install beside the binary, which is where the server looks for them; run it from
           # another directory so that lookup is what has to find them.
           test -f "\$(dirname "\${MCP}")/.mcp-schema-lock" && test -f "\$(dirname "\${MCP}")/.mcp-safety-annotations-lock" \
@@ -507,8 +517,15 @@ jobs:
               rockylinux:9 bash /work/test-rpm.sh
 
   macos-install:
-    name: macOS — build + install + CREATE EXTENSION + reason (pg17, arm64)
-    runs-on: macos-15
+    name: macOS — build + install + CREATE EXTENSION + reason (pg17, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64,  runner: macos-15 }
+          # GitHub's last Intel image, available until August 2027.
+          - { arch: x86_64, runner: macos-15-intel }
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
@@ -523,7 +540,7 @@ jobs:
           brew install postgresql@17 openssl@3
           echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
 
-      - name: Build + package the darwin tarball (arm64 native)
+      - name: Build + package the darwin tarball (${{ matrix.arch }}, native)
         run: |
           set -euo pipefail
           chmod +x scripts/package-darwin.sh scripts/macos/install.sh
@@ -534,7 +551,7 @@ jobs:
       - name: Extract + install into the Homebrew PostgreSQL
         run: |
           set -euo pipefail
-          TARBALL=$(ls dist/packages/*-pg17-darwin-arm64.tar.gz)
+          TARBALL=$(ls dist/packages/*-pg17-darwin-${{ matrix.arch }}.tar.gz)
           tar xzf "${TARBALL}" -C /tmp
           DIR=$(basename "${TARBALL}" .tar.gz)
           PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config" /tmp/"${DIR}"/install.sh
@@ -545,8 +562,8 @@ jobs:
           # (binary + README + locks + manifest) next to install.sh.
           MCP_V=$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --version)
           echo "mcp version=${MCP_V}"
-          test "${MCP_V}" = "2.0.22" \
-              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.22"; exit 1; }
+          test "${MCP_V}" = "2.0.23" \
+              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.23"; exit 1; }
           echo "ok: shipped MCP server --version (macOS)"
           # Run from another directory: the lock files beside the binary must be found, and the tool table loads.
           for f in .mcp-schema-lock .mcp-safety-annotations-lock manifest.json; do
@@ -571,11 +588,11 @@ jobs:
           VERSION=$(psql -d postgres -Atc 'SELECT fractal_version();')
           echo "edition=${EDITION} version=${VERSION}"
           test "${EDITION}" = "Community"
-          test "${VERSION}" = "2.0.22"
+          test "${VERSION}" = "2.0.23"
 
           # Search works with no further config.
           psql -d postgres -Atc \
-              "SELECT fractal_search(ARRAY[0.6,0.8,0.0]::float8[], iterations => 20);"
+              "SELECT fractal_sfs_converge(ARRAY[0.6,0.8,0.0]::float8[], iterations => 20);"
 
           # Reasoning round-trip against a mock OpenAI-compatible endpoint.
           python3 scripts/ci/mock_llm.py 18080 &
@@ -642,8 +659,8 @@ jobs:
           test -f "$(pg_config --sharedir)/extension/fractalsql.control"
           # Shipped MCP server verification (same check macos-install runs).
           MCP_V=$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --version)
-          test "${MCP_V}" = "2.0.22" \
-              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.22"; exit 1; }
+          test "${MCP_V}" = "2.0.23" \
+              || { echo "FAIL: MCP server reports ${MCP_V}, expected 2.0.23"; exit 1; }
           ( cd "${RUNNER_TEMP}" && test "$(/tmp/"${DIR}"/mcp/fractalsql-postgresql-mcp --list-tools | wc -l)" -ge 60 )
           test -e /tmp/"${DIR}"/mcp/.mcp-schema-lock && test -e /tmp/"${DIR}"/mcp/.mcp-safety-annotations-lock
 
@@ -793,6 +810,24 @@ jobs:
         run: |
           call scripts\windows\build-msi.bat
           if errorlevel 1 exit /b 1
+
+      # The reasoning plugin DLL imports the VC++ runtime (VCRUNTIME140.dll), so the installer must carry the launch
+      # condition that checks for the Redistributable. If the plugin depends on a runtime DLL and the condition is
+      # gone, a clean Windows machine installs fine and the plugin then fails to load with no explanation.
+      - name: The installer guards the plugin's VC++ runtime dependency
+        shell: pwsh
+        run: |
+          $dll = 'include\windows-x86_64\fractalsql-reasoning-http.dll'
+          $txt = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dll))
+          $imports = @([regex]::Matches($txt, '(?i)(vcruntime|msvcp|vcomp|concrt)[0-9_]*\.dll') | ForEach-Object { $_.Value.ToUpper() } | Sort-Object -Unique)
+          Write-Host "VC++ runtime imports of the plugin: $($imports -join ', ')"
+          if ($imports.Count -gt 0) {
+              $wxs = Get-Content scripts\windows\fractalsql.wxs -Raw
+              if ($wxs -notmatch 'VCRUNTIME140PRESENT' -or $wxs -notmatch 'vc_redist\.x64\.exe') {
+                  Write-Host 'FATAL: the plugin needs the VC++ runtime but fractalsql.wxs has no launch condition for it'; exit 1
+              }
+          }
+          Write-Host 'ok: the installer guards the plugin runtime dependency'
 
       - name: Install our MSI into the running EDB server
         shell: pwsh

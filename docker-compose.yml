@@ -7,6 +7,7 @@ services:
     environment:
       POSTGRES_PASSWORD: ${FSQL_DEMO_PASSWORD:?set FSQL_DEMO_PASSWORD in .env (see .env.example)}
       POSTGRES_DB: fractalsql_demo
+      FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE: "1"   # demo only: the ledger demos reset and compact the ledger; off by default
       FSQL_REASONING_HTTP_TIMEOUT_MS: "120000"
       FSQL_REASONING_HTTP_LOW_SPEED_SECS: "60"
     ports:

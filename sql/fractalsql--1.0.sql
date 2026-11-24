@@ -1,30 +1,34 @@
 -- sql/fractalsql--1.0.sql
 \echo Use "CREATE EXTENSION fractalsql" to load this file. \quit
 
-CREATE FUNCTION fractal_search(
+CREATE FUNCTION fractal_sfs_converge(
     query            float8[],
     iterations       int4 DEFAULT 30,
     population_size  int4 DEFAULT 50,
     diffusion_factor int4 DEFAULT 2
 ) RETURNS float8[]
-AS 'MODULE_PATHNAME', 'fractal_search'
+AS 'MODULE_PATHNAME', 'fractal_sfs_converge'
 LANGUAGE C VOLATILE STRICT;
 
-COMMENT ON FUNCTION fractal_search(float8[], int4, int4, int4) IS
+COMMENT ON FUNCTION fractal_sfs_converge(float8[], int4, int4, int4) IS
   'Stochastic Fractal Search (minimizing cosine distance to query). '
-  'Returns the best point found in the unit box [-1, 1]^dim.';
+  'Returns the best point found in the unit box [-1, 1]^dim. '
+  'This is a DIRECTION, not a stored row: it converges toward the query '
+  'vector and says nothing about the table. For nearest neighbours of a '
+  'stored vector use fractal_search(table, column, query, k) or '
+  'fractal_search_telemetry.';
 
-CREATE FUNCTION fractal_search_debug(
+CREATE FUNCTION fractal_sfs_converge_debug(
     query            float8[],
     iterations       int4 DEFAULT 30,
     population_size  int4 DEFAULT 50,
     diffusion_factor int4 DEFAULT 2
 ) RETURNS jsonb
-AS 'MODULE_PATHNAME', 'fractal_search_debug'
+AS 'MODULE_PATHNAME', 'fractal_sfs_converge_debug'
 LANGUAGE C VOLATILE STRICT;
 
-COMMENT ON FUNCTION fractal_search_debug(float8[], int4, int4, int4) IS
-  'Like fractal_search, but returns a JSONB document with per-generation '
+COMMENT ON FUNCTION fractal_sfs_converge_debug(float8[], int4, int4, int4) IS
+  'Like fractal_sfs_converge, but returns a JSONB document with per-generation '
   'particle positions for visualization. Keys: dim, generations, '
   'population_size, best_point, best_fit, best_fit_per_gen, paths.';
 
@@ -63,7 +67,7 @@ COMMENT ON FUNCTION fractal_reason(text, text) IS
   'to be set in postgresql.conf (absolute path to a compiled '
   'fractalsql-reasoning-*.so) and a server restart. The function errors '
   'with a clear hint if called without the plugin configured. All search '
-  'functions (fractal_search, fractal_search_explore) continue to work '
+  'functions (fractal_search, fractal_sfs_converge, fractal_search_explore) continue to work '
   'regardless of whether the reasoning plugin is loaded.';
 
 CREATE FUNCTION fractal_schema_context(
@@ -134,8 +138,10 @@ COMMENT ON FUNCTION fractal_version() IS
 -- Agent-tier results types
 CREATE TYPE fractal_search_agent_result AS (
     answer text,
-    source_doc_ids int8[],
-    execution_time_ms int4
+    execution_time_ms int4,
+    source_row_ids text[],
+    used_index boolean,
+    context_cut jsonb
 );
 
 CREATE TYPE fractal_sql_agent_result AS (
@@ -182,13 +188,14 @@ CREATE FUNCTION fractal_search_agent(
     table_name  text,
     vector_col  text,
     pop_size    int4 DEFAULT 50,
-    iterations  int4 DEFAULT 15
+    iterations  int4 DEFAULT 15,
+    meta_filter text DEFAULT '{}'
 ) RETURNS fractal_search_agent_result
 AS 'MODULE_PATHNAME', 'fractal_search_agent'
 LANGUAGE C VOLATILE;
 
-COMMENT ON FUNCTION fractal_search_agent(query text, table_name text, vector_col text, pop_size int4, iterations int4) IS
-'End-to-end Search->Synthesize agent: embeds the query, runs a diverse Scout search over table_name.vector_col, then reasons over the retrieved context.';
+COMMENT ON FUNCTION fractal_search_agent(query text, table_name text, vector_col text, pop_size int4, iterations int4, meta_filter text) IS
+'End-to-end Search->Synthesize agent: embeds the query, finds the nearest rows of table_name.vector_col (a diverse Scout search, or fractal_search through an index when fractalsql.agent_use_index allows it; meta_filter, a flat JSON object of column: value pairs, limits the rows searched), then reasons over the retrieved rows. Returns the answer, execution_time_ms (measured), source_row_ids (the rows'' primary keys, or ctids when the table has no single-column primary key), used_index and context_cut ({cells, rows}: text cells cut to fractalsql.agent_context_row_bytes, rows left out by the row cap).';
 
 -- fractal_sql_agent: self-correcting Text-to-SQL. Generates SQL, validates
 -- it via EXPLAIN, and retries with the planner feedback up to max_retries.
@@ -277,7 +284,10 @@ COMMENT ON FUNCTION fractal_agent_detect_loop(agent_id text, state_log float8[],
 -- metadata WHERE filter), then reasons over the retrieved context. No
 -- result type was predeclared, so add one here (single text answer).
 CREATE TYPE fractal_rag_agent_result AS (
-    answer text
+    answer text,
+    source_row_ids text[],
+    used_index boolean,
+    context_cut jsonb
 );
 
 CREATE FUNCTION fractal_rag_agent(
@@ -290,9 +300,94 @@ AS 'MODULE_PATHNAME', 'fractal_rag_agent'
 LANGUAGE C VOLATILE;
 
 COMMENT ON FUNCTION fractal_rag_agent(query text, table_name text, vector_col text, meta_filter text) IS
-'Hybrid RAG agent: embeds the query, Scout-searches table_name.vector_col (meta_filter reserved for a future WHERE filter), then reasons over the retrieved context. Returns a single answer.';
+'Hybrid RAG agent: embeds the query, finds the nearest rows of table_name.vector_col (a Scout search, or fractal_search through an index when fractalsql.agent_use_index allows it), then reasons over the retrieved rows. meta_filter is a flat JSON object of column: value pairs; only rows where every column equals its value are searched. Returns answer, source_row_ids (the rows'' primary keys, or ctids when the table has no single-column primary key), used_index and context_cut ({cells, rows}).';
 
 -- ------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------------------------
+-- The fractal index: nearest neighbours of a stored vector.
+--
+-- fractal_search(table, column, query, k [, options]) : the k rows of the table whose vector
+-- column is closest to the query, by cosine distance. When a fractal_index exists on that table
+-- and column the search is indexed (IVF probing, with the shortlist verified against the base
+-- table, so every distance it returns is EXACT); with no index it is an exact scan. The exact,
+-- brute-force ground truth stays available as fractal_search_telemetry, whose contract does not
+-- change.
+--
+-- The Stochastic Fractal Search convergence functions above take their own names
+-- (fractal_sfs_converge) so that fractal_search can mean "nearest neighbours of a vector in a
+-- table". The C entry points are unchanged in behaviour; only the SQL names moved.
+-- ---------------------------------------------------------------------------------------------
+
+-- fractal_search(table_name text, vector_col text, query float8[], k int4, options jsonb DEFAULT '{}')
+--   : nearest neighbours of a vector in a table, through a fractal_index when one exists
+--     on that table and column, otherwise by an exact scan. Rows are named by an integer key
+--     column (option id_col, default "id").
+CREATE FUNCTION fractal_search(
+    table_name text,
+    vector_col text,
+    query      float8[],
+    k          int4,
+    options    jsonb DEFAULT '{}'
+) RETURNS TABLE(doc_id text, distance float8, scan_pos int8)
+AS 'MODULE_PATHNAME', 'fractal_index_search'
+LANGUAGE C VOLATILE;
+
+COMMENT ON FUNCTION fractal_search(text, text, float8[], int4, jsonb) IS
+  'k nearest rows by cosine distance. Uses the fractal_index on (table, column) when there is one, otherwise scans exactly. '
+  'Distances are always exact. options: index, nprobe, rerank, use_index, verify, id_col, model, ids (a jsonb array of integer keys: restrict the search to those rows).';
+
+CREATE FUNCTION fractal_index_create(table_name text, vector_col text, options jsonb DEFAULT '{}') RETURNS jsonb
+AS 'MODULE_PATHNAME', 'fractal_index_create' LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION fractal_index_create(text, text, jsonb) IS
+  'Build a fractal_index over table.vector_col. options: name, id_col (integer key, default id), vector_format (INT8 default, INT4, FP16, FP32), '
+  'nlist, pca_dim, iters, sample, seed, model, target_recall, calibration_samples.';
+
+CREATE FUNCTION fractal_index_rebuild(name text) RETURNS jsonb
+AS 'MODULE_PATHNAME', 'fractal_index_rebuild' LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION fractal_index_rebuild(text) IS
+  'Rebuild the named index from the current rows (a full re-cluster), keeping its options.';
+
+CREATE FUNCTION fractal_index_drop(name text) RETURNS boolean
+AS 'MODULE_PATHNAME', 'fractal_index_drop' LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION fractal_index_drop(text) IS
+  'Remove the named index and its stored cells. The table itself is untouched.';
+
+CREATE FUNCTION fractal_index_info(name text) RETURNS jsonb
+AS 'MODULE_PATHNAME', 'fractal_index_info' LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION fractal_index_info(text) IS
+  'The state of the named index: format, dimension, cells, rows indexed, the delta and staleness flags, the calibrated nprobe and the last search statistics (rows scanned, cells probed), '
+  'plus a status (ready, stale, degraded, empty or orphaned) and an advice list (for example refresh: 60 rows were added since the build).';
+
+CREATE FUNCTION fractal_index_list() RETURNS TABLE(name text, table_name text, vector_col text, format text, dim int4, rows int8, rows_now int8, stale boolean, status text, generation int4)
+AS 'MODULE_PATHNAME', 'fractal_index_list' LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION fractal_index_list() IS
+  'The catalog: one row per index with its table, column, format, dimension, rows indexed, rows now, the stale flag, the status (ready, stale, degraded, empty or orphaned) and the generation.';
+
+CREATE FUNCTION fractal_chunk_text(input text, chunk_size int4, chunk_overlap int4, chunk_mode text DEFAULT 'paragraph') RETURNS jsonb
+AS 'MODULE_PATHNAME', 'fractal_chunk_text' LANGUAGE C IMMUTABLE PARALLEL SAFE;
+COMMENT ON FUNCTION fractal_chunk_text(text, int4, int4, text) IS
+  'Split text into chunks of at most chunk_size characters. Returns a jsonb array of {no, start, end, text}; start and end are character offsets (end exclusive). '
+  'chunk_mode is paragraph (default), sentence or fixed; chunk_overlap applies to fixed cuts and to a paragraph or sentence longer than chunk_size. Pure: no model, the same output on every FractalSQL host.';
+
+CREATE FUNCTION fractal_index_ensure(table_name text, vector_col text, options jsonb DEFAULT '{}') RETURNS jsonb
+AS 'MODULE_PATHNAME', 'fractal_index_ensure' LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION fractal_index_ensure(text, text, jsonb) IS
+  'Leave the index on table.vector_col fit to use: build it when missing (created), fold in the added rows when that is all that is needed (refreshed), rebuild after a large change (rebuilt), otherwise change nothing (unchanged). '
+  'Returns name, action, status, generation and rows. options are used only when it builds or rebuilds.';
+
+CREATE FUNCTION fractal_index_refresh(name text) RETURNS jsonb
+AS 'MODULE_PATHNAME', 'fractal_index_refresh' LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION fractal_index_refresh(text) IS
+  'Fold the rows added since the build into the index cells as a new generation, without retraining. Returns name, added, rows, generation and refreshed. '
+  'Deleted rows and changed vectors are not touched: rebuild when fractal_index_info advises it.';
+
+CREATE FUNCTION fractal_index_candidates(table_name text, vector_col text, query float8[], options jsonb DEFAULT '{}') RETURNS int8[]
+AS 'MODULE_PATHNAME', 'fractal_index_candidates' LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION fractal_index_candidates(text, text, float8[], jsonb) IS
+  'Keys of the rows in the cells nearest the query (option near, default 6) plus per_cell rows from every other cell (default 1) and every row newer than the index.';
+
+
 -- Vectorizer -- trigger + queue table + one callable function, no
 
 -- background worker, no hard scheduler dependency.
@@ -558,6 +653,35 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Keeps a chunk table in step with a long-text source table (fractal_vectorizer_create with chunk_size). Trigger arguments:
+-- source key column, text column, chunk table, chunk_size, chunk_overlap, chunk_mode.
+CREATE FUNCTION fractal_vectorizer_chunk_sync() RETURNS trigger AS $$
+DECLARE
+    v_pk    text := TG_ARGV[0];
+    v_txt   text := TG_ARGV[1];
+    v_tbl   text := TG_ARGV[2];
+    v_key   text;
+    v_text  text;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        v_key := to_jsonb(OLD) ->> v_pk;
+        EXECUTE format('DELETE FROM %s WHERE parent_id::text = $1', v_tbl) USING v_key;
+        RETURN OLD;
+    END IF;
+    v_key  := to_jsonb(NEW) ->> v_pk;
+    v_text := to_jsonb(NEW) ->> v_txt;
+    EXECUTE format('DELETE FROM %s WHERE parent_id::text = $1', v_tbl) USING v_key;
+    IF v_text IS NOT NULL THEN
+        EXECUTE format(
+            'INSERT INTO %s (parent_id, chunk_no, chunk_text) '
+            'SELECT $1::%s, (e->>''no'')::int, e->>''text'' FROM jsonb_array_elements(fractal_chunk_text($2, $3, $4, $5)) e',
+            v_tbl, TG_ARGV[6])
+          USING v_key, v_text, TG_ARGV[3]::int, TG_ARGV[4]::int, TG_ARGV[5];
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE FUNCTION fractal_vectorizer_create(
     source_table  text,
     text_col      text,
@@ -588,6 +712,59 @@ BEGIN
     -- old raw-%I-on-the-dotted-string code would have wrongly quoted as
     -- one single (and therefore nonexistent) identifier.
     v_tbl_ident := source_table::regclass::text;
+
+    -- Chunking: with options.chunk_size the long text is split into passages, the passages go into a chunk table
+    -- (id, parent_id, chunk_no, chunk_text, <embedding_col>) and the vectorizer is registered on THAT table: the chunks are what is embedded.
+    IF options ? 'chunk_size' THEN
+        DECLARE
+            c_size   int  := (options->>'chunk_size')::int;
+            c_over   int  := COALESCE((options->>'chunk_overlap')::int, 0);
+            c_mode   text := COALESCE(options->>'chunk_mode', 'paragraph');
+            c_tbl    text;
+            c_pk     text;
+            c_pktype text;
+            c_embtyp text;
+            c_rel    regclass := source_table::regclass;
+            c_inner  jsonb := options - 'chunk_size' - 'chunk_overlap' - 'chunk_mode' - 'chunk_table';
+            c_id     bigint;
+            c_trg    text;
+        BEGIN
+            IF c_size < 1 OR c_size > 100000 THEN RAISE EXCEPTION 'fractal_vectorizer_create: chunk_size must be 1..100000'; END IF;
+            IF c_over < 0 OR c_over >= c_size THEN RAISE EXCEPTION 'fractal_vectorizer_create: chunk_overlap must be 0..chunk_size-1'; END IF;
+            IF c_mode NOT IN ('fixed', 'paragraph', 'sentence') THEN RAISE EXCEPTION 'fractal_vectorizer_create: chunk_mode must be one of: fixed, paragraph, sentence'; END IF;
+            SELECT a.attname, format_type(a.atttypid, a.atttypmod) INTO c_pk, c_pktype
+              FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+             WHERE i.indrelid = c_rel AND i.indisprimary AND cardinality(i.indkey) = 1;
+            IF c_pk IS NULL THEN
+                RAISE EXCEPTION 'fractal_vectorizer_create: % has no single-column primary key (composite and missing-PK tables are not supported in v1)', v_tbl_ident;
+            END IF;
+            c_tbl := COALESCE(options->>'chunk_table',
+                              format('%I.%I', (SELECT nspname FROM pg_namespace WHERE oid = (SELECT relnamespace FROM pg_class WHERE oid = c_rel)),
+                                              (SELECT relname FROM pg_class WHERE oid = c_rel) || '_chunks'));
+            SELECT format_type(a.atttypid, a.atttypmod) INTO c_embtyp FROM pg_attribute a
+             WHERE a.attrelid = c_rel AND a.attname = embedding_col AND a.attnum > 0 AND NOT a.attisdropped;
+            c_embtyp := COALESCE(c_embtyp, 'float8[]');
+            IF to_regclass(c_tbl) IS NULL THEN
+                EXECUTE format('CREATE TABLE %s (id bigserial PRIMARY KEY, parent_id %s NOT NULL, chunk_no int NOT NULL, chunk_text text NOT NULL, %I %s)',
+                               c_tbl, c_pktype, embedding_col, c_embtyp);
+                EXECUTE format('CREATE INDEX ON %s (parent_id)', c_tbl);
+            END IF;
+            c_tbl := c_tbl::regclass::text;
+            -- existing rows are chunked now; afterwards the chunks follow the source row (insert, update of the text column, delete)
+            EXECUTE format(
+                'INSERT INTO %s (parent_id, chunk_no, chunk_text) SELECT s.%I, (e->>''no'')::int, e->>''text'' '
+                'FROM %s s, jsonb_array_elements(fractal_chunk_text(s.%I, $1, $2, $3)) e WHERE s.%I IS NOT NULL ORDER BY s.%I, (e->>''no'')::int',
+                c_tbl, c_pk, v_tbl_ident, text_col, text_col, c_pk) USING c_size, c_over, c_mode;
+            c_id := fractal_vectorizer_create(c_tbl, 'chunk_text', embedding_col,
+                        c_inner || jsonb_build_object('chunk_source', v_tbl_ident, 'chunked_by_size', c_size));
+            c_trg := format('fractal_chunker_%s', c_rel::oid);
+            EXECUTE format(
+                'CREATE TRIGGER %I AFTER INSERT OR UPDATE OF %I OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION fractal_vectorizer_chunk_sync(%L, %L, %L, %L, %L, %L, %L)',
+                c_trg, text_col, v_tbl_ident, c_pk, text_col, c_tbl, c_size::text, c_over::text, c_mode, c_pktype);
+            UPDATE fractal_vectorizers fv SET options = fv.options || jsonb_build_object('chunk_trigger', c_trg) WHERE fv.id = c_id;
+            RETURN c_id;
+        END;
+    END IF;
 
     -- Single-column primary key only, in v1 -- a composite or missing
     -- PK has no single generic value to key the queue on. Introspected
@@ -705,6 +882,8 @@ CREATE FUNCTION fractal_vectorizer_drop(vectorizer_id bigint) RETURNS void AS $$
 DECLARE
     v_tbl text;
     v_trg text;
+    v_csrc text;
+    v_ctrg text;
 BEGIN
     SELECT source_table INTO v_tbl FROM fractal_vectorizers WHERE id = vectorizer_id;
     IF NOT FOUND THEN
@@ -720,6 +899,11 @@ BEGIN
     IF to_regclass(v_tbl) IS NOT NULL THEN
         v_trg := format('fractal_vectorizer_trg_%s', vectorizer_id);
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', v_trg, v_tbl);
+    END IF;
+    -- a chunking vectorizer: stop chunking the source table too (the chunk table and its rows stay)
+    SELECT options->>'chunk_source', options->>'chunk_trigger' INTO v_csrc, v_ctrg FROM fractal_vectorizers WHERE id = vectorizer_id;
+    IF v_csrc IS NOT NULL AND v_ctrg IS NOT NULL AND to_regclass(v_csrc) IS NOT NULL THEN
+        EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', v_ctrg, v_csrc);
     END IF;
 
     -- fractal_vectorizer_queue rows cascade via its own
@@ -787,7 +971,22 @@ DECLARE
     v_window_secs  int;
     v_window_start timestamptz;
     v_window_calls int;
+    ens_t          text[] := '{}';   -- vectorizers with options.index_ensure that finished rows in this batch
+    ens_c          text[] := '{}';
+    ens_i          int;
 BEGIN
+    -- A NULL batch size is refused here, before anything runs. The default
+    -- (100) applies when the argument is left out, but an explicit NULL
+    -- arrives here as NULL, and LIMIT NULL means no limit at all: the one
+    -- call would process every pending row. That unbounded path took the
+    -- Windows backend down with an access violation (the Linux build
+    -- refused the same statement cleanly), and it is not a shape any
+    -- caller should be able to reach by accident. The other hosts refuse
+    -- a batch size outside their range the same way.
+    IF batch_size IS NULL THEN
+        RAISE EXCEPTION 'fractal_vectorizer_process_queue: batch_size must not be NULL (it bounds how many queued rows one call processes; leave the argument out for the default of 100)';
+    END IF;
+
     -- Reclaim rows stranded in 'processing' by a caller that crashed or
     -- was killed mid-batch -- SELECT ... FOR UPDATE SKIP LOCKED only
     -- protects against concurrent callers racing each other, not against
@@ -960,6 +1159,10 @@ BEGIN
                 UPDATE fractal_vectorizer_queue
                    SET status = 'done', updated_at = now(), error = NULL
                  WHERE id = r.id;
+                IF lower(COALESCE(r.options ->> 'index_ensure', 'false')) = 'true' THEN
+                    ens_t := ens_t || r.source_table::text;
+                    ens_c := ens_c || r.embedding_col::text;
+                END IF;
             END IF;
         EXCEPTION WHEN OTHERS THEN
             -- A bad row (rate limit, malformed input, deleted table)
@@ -985,6 +1188,19 @@ BEGIN
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
+
+    -- The vectorizer option index_ensure (true; off by default): an index that already exists on the embedding column of a vectorizer
+    -- that finished rows in this batch is brought up to date with fractal_index_ensure. It never creates an index, and a failure
+    -- never fails the batch.
+    FOR ens_i IN SELECT DISTINCT g FROM generate_subscripts(ens_t, 1) AS g LOOP
+        BEGIN
+            IF EXISTS (SELECT 1 FROM fractal_index_meta WHERE tbl = ens_t[ens_i] AND col = ens_c[ens_i]) THEN
+                PERFORM fractal_index_ensure(ens_t[ens_i], ens_c[ens_i]);
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
+    END LOOP;
 
     RETURN n_processed;
 END;
@@ -1050,7 +1266,7 @@ LANGUAGE C VOLATILE STRICT;
 
 COMMENT ON FUNCTION fractal_diversify_enable() IS
   'Enables the Diversify/Repulsion layer on this session''s search '
-  'context: fractal_search results start avoiding candidates near '
+  'context: the search results start avoiding candidates near '
   'shadows recorded via fractal_feedback_report/fractal_isolate_background. '
   'Disabled by default (bit-for-bit identical to v1.0 behavior).';
 
@@ -1075,7 +1291,7 @@ LANGUAGE C VOLATILE;
 COMMENT ON FUNCTION fractal_diversify_set_params(int4, float8, float8, float8, int4, int4) IS
   'Tunes Diversify/Repulsion parameters. Each argument left NULL keeps '
   'the core''s current value for that field; only supplied fields are '
-  'overridden. Takes effect on the next fractal_search call.';
+  'overridden. Takes effect on the next search call.';
 
 CREATE FUNCTION fractal_diversify_current_dq() RETURNS float8
 AS 'MODULE_PATHNAME', 'fractal_diversify_current_dq'
@@ -1571,7 +1787,7 @@ COMMENT ON FUNCTION fractal_mine_topology_negatives(float8[], int4) IS
 
 -- ----- Table-backed top-k telemetry search + thin compositions -------------
 -- fractal_search_explore returns Scout's raw population (diversity-shaped),
--- and fractal_search/fractal_search_debug use a single-row dummy corpus (the
+-- and fractal_sfs_converge/fractal_sfs_converge_debug use a single-row dummy corpus (the
 -- query itself) -- neither gives "k nearest ROWS from a real table, with
 -- their row indices and distances". fractal_search_telemetry is that
 -- primitive; the other three are thin compositions on top of it.
@@ -1998,6 +2214,7 @@ COMMENT ON FUNCTION fractal_cross_modal_search(text, text, fractal_vector, fract
 --   http_think                      string  reload        no
 --   http_think_provider             string  reload        no
 --   http_native_url                 string  reload        no
+--   http_response_mode              string  reload        no
 --   http_num_ctx                    int     reload        no
 --   text_to_sql_max_attempts        int     reload        no
 --   text_to_sql_allowed_statements  enum    reload        no
@@ -2022,16 +2239,22 @@ CREATE FUNCTION fractal_config_set(key text, value text) RETURNS text
 
 COMMENT ON FUNCTION fractal_config_set(text, text) IS
   'Sets one FractalSQL configuration key, typed and validated per key, and returns the canonical value that was applied. This is the SQL-callable wrapper over the extension''s fractalsql.* GUCs -- it does NOT introduce a second configuration store: the value written IS the GUC''s own value, so current_setting(), SHOW and pg_settings agree with it. The GUCs keep working exactly as before via SET and ALTER SYSTEM. '
-  'KEYS: reasoning_plugin (string), http_url (string), http_token (string), http_model (string), http_allow_plaintext (bool), http_embed_url (string), http_embed_model (string), http_think (string), http_think_provider (string), http_native_url (string), http_num_ctx (int 0..1048576), text_to_sql_max_attempts (int 1..10), text_to_sql_allowed_statements (enum: select | select_insert_update), text_to_sql_use_review (bool), agent_partial_reasoning_fail (bool), enterprise_lib (string), enterprise_ledger_key (string), enterprise_require_signature (bool). Both the bare key ("http_url") and the GUC spelling ("fractalsql.http_url") are accepted, case-insensitively; an unknown key raises an error listing the known ones. '
+  'KEYS: reasoning_plugin (string), http_url (string), http_token (string), http_model (string), http_allow_plaintext (bool), http_embed_url (string), http_embed_model (string), http_think (string), http_think_provider (string), http_native_url (string), http_response_mode (string), http_num_ctx (int 0..1048576), text_to_sql_max_attempts (int 1..10), text_to_sql_allowed_statements (enum: select | select_insert_update), text_to_sql_use_review (bool), agent_partial_reasoning_fail (bool), enterprise_lib (string), enterprise_ledger_key (string), enterprise_require_signature (bool). Both the bare key ("http_url") and the GUC spelling ("fractalsql.http_url") are accepted, case-insensitively; an unknown key raises an error listing the known ones. '
   'VALUE FORMS: an int key rejects anything that is not an integer and anything outside its range; a bool key accepts on/off/true/false/yes/no/1/0/t/f/y/n (case-insensitive) and is stored as on/off; an enum key accepts only its listed members; a string key accepts any text up to 8192 bytes. The value is validated BEFORE it is applied, so a rejected value is never partially written. '
-  'PRIVILEGE: a key whose GUC carries GUC_SUPERUSER_ONLY (reasoning_plugin, http_url, http_token, http_model, http_allow_plaintext, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, enterprise_lib, enterprise_ledger_key, enterprise_require_signature) can only be changed by a superuser -- the same rule PostgreSQL applies to that flag elsewhere. '
+  'PRIVILEGE: a key whose GUC carries GUC_SUPERUSER_ONLY (reasoning_plugin, http_url, http_token, http_model, http_allow_plaintext, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_response_mode, http_num_ctx, enterprise_lib, enterprise_ledger_key, enterprise_require_signature) can only be changed by a superuser -- the same rule PostgreSQL applies to that flag elsewhere. '
   'SCOPE: most keys are PGC_SIGHUP (reload-scoped), so a session cannot change them -- exactly as a bare SET cannot. Such a key raises an error naming the ALTER SYSTEM + pg_reload_conf() path instead of silently doing nothing. agent_partial_reasoning_fail (PGC_USERSET) and enterprise_ledger_key (PGC_SUSET) are session-settable.';
 
 CREATE FUNCTION fractal_config_get(key text) RETURNS text
   AS 'MODULE_PATHNAME', 'fractal_config_get' LANGUAGE C STABLE;
 
 COMMENT ON FUNCTION fractal_config_get(text) IS
-  'Returns the current value of one FractalSQL configuration key as text, or NULL when the key is unset. Both the bare key ("http_url") and the GUC spelling ("fractalsql.http_url") are accepted, case-insensitively; an unknown key raises an error listing the known ones. The value is the GUC''s own current value, so it always agrees with current_setting(), SHOW and pg_settings. A bool key is returned as "on" or "off" (the same spelling current_setting() uses); an int key as its decimal digits; everything else as the stored text. A key whose GUC carries GUC_SUPERUSER_ONLY (reasoning_plugin, http_url, http_token, http_model, http_allow_plaintext, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, enterprise_lib, enterprise_ledger_key, enterprise_require_signature) is not readable by a non-superuser -- the same rule PostgreSQL applies to that flag in pg_settings, so this is not a way around it.';
+  'Returns the current value of one FractalSQL configuration key as text, or NULL when the key is unset. Both the bare key ("http_url") and the GUC spelling ("fractalsql.http_url") are accepted, case-insensitively; an unknown key raises an error listing the known ones. The value is the GUC''s own current value, so it always agrees with current_setting(), SHOW and pg_settings. A bool key is returned as "on" or "off" (the same spelling current_setting() uses); an int key as its decimal digits; everything else as the stored text. A key whose GUC carries GUC_SUPERUSER_ONLY (reasoning_plugin, http_url, http_token, http_model, http_allow_plaintext, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_response_mode, http_num_ctx, enterprise_lib, enterprise_ledger_key, enterprise_require_signature) is not readable by a non-superuser -- the same rule PostgreSQL applies to that flag in pg_settings, so this is not a way around it.';
+
+CREATE FUNCTION fractal_config_keys() RETURNS jsonb
+  AS 'MODULE_PATHNAME', 'fractal_config_keys' LANGUAGE C STABLE;
+
+COMMENT ON FUNCTION fractal_config_keys() IS
+  'Every FractalSQL configuration key as a JSON array of {name, type, session_overridable}. type is string, int, bool or enum (agent_use_index is an enum: off, on, auto). session_overridable is true for a key a session can change with fractal_config_set, false for a reload-scoped key that needs ALTER SYSTEM + pg_reload_conf(). Lets a caller discover the knobs instead of hard-coding them.';
 
 -- ==================================================================
 -- Enterprise: QTL ledger + CISO audit (runtime-gated)

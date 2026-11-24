@@ -47,7 +47,7 @@ INSERT INTO demo_alerts (service, message, severity, created_at) VALUES
 
 \echo ''
 \echo '=== 2. Sniper Search: converge to a single best point ==='
-SELECT fractal_search(ARRAY[0.6, 0.8, 0.0]::float8[], iterations => 50);
+SELECT fractal_sfs_converge(ARRAY[0.6, 0.8, 0.0]::float8[], iterations => 50);
 
 \echo ''
 \echo '=== 3. Ask the LLM to analyze the alerts table (real context, not a bare ping) ==='

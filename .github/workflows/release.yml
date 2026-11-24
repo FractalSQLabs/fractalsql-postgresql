@@ -139,7 +139,7 @@ jobs:
           VERSION=$(docker exec pg psql -U postgres -tAc \
               "SELECT fractal_version();")
           echo "version: ${VERSION}"
-          test "${VERSION}" = "2.0.22"
+          test "${VERSION}" = "2.0.23"
 
           # Convergence sanity check: query = (0.6, 0.8), objective is
           # cosine distance. Cosine distance is magnitude-invariant,
@@ -152,7 +152,7 @@ jobs:
           # (v·query) / ||v||.
           RESULT=$(docker exec pg psql -U postgres -tAc "
               WITH r AS (
-                  SELECT fractal_search(
+                  SELECT fractal_sfs_converge(
                       ARRAY[0.6, 0.8]::float8[], 100, 50, 2
                   ) AS v
               )
@@ -331,6 +331,7 @@ jobs:
               echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql_agents\.control$'
               echo "${CONTENTS}" | grep -E 'usr/share/postgresql/[0-9]+/extension/fractalsql_agents--1\.0\.sql$'
               echo "${CONTENTS}" | grep -E 'usr/share/doc/postgresql-[0-9]+-fractalsql/mcp/README\.md$'
+              echo "${CONTENTS}" | grep -E 'usr/share/doc/postgresql-[0-9]+-fractalsql/mcp/RUN\.txt$'
               # The supply-chain pins must land NEXT TO THE MCP BINARY: the
               # server resolves its lock paths relative to the executable's own
               # directory and treats an absent lock as a pass, so a pin that
@@ -351,6 +352,7 @@ jobs:
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql_agents\.control$'
               echo "${CONTENTS}" | grep -E '/usr/pgsql-[0-9]+/share/extension/fractalsql_agents--1\.0\.sql$'
               echo "${CONTENTS}" | grep -E '/usr/share/doc/postgresql-[0-9]+-fractalsql/mcp/README\.md$'
+              echo "${CONTENTS}" | grep -E '/usr/share/doc/postgresql-[0-9]+-fractalsql/mcp/RUN\.txt$'
               # The supply-chain pins must land NEXT TO THE MCP BINARY: the
               # server resolves its lock paths relative to the executable's own
               # directory and treats an absent lock as a pass, so a pin that
@@ -392,8 +394,10 @@ jobs:
   # macOS: per-(major, arch) tarball. Pure-C — builds the extension with
   # PGXS against a Homebrew PostgreSQL, linking the vendored darwin core
   # archive (include/darwin-<arch>/), and bundles the reasoning plugin +
-  # install.sh. arm64 native; x86_64 cross-compiled via -arch on Apple
-  # Silicon (the free Intel macos-13 runner was retired Dec 2025).
+  # install.sh. Each architecture is built natively on its own runner: macos-15 (Apple Silicon) for arm64 and
+  # macos-15-intel for x86_64. macos-15-intel is GitHub's last Intel image, available until August 2027
+  # (actions/runner-images#13045); when it goes, so does the Intel macOS package. The bundled MCP server links
+  # Homebrew's libpq and openssl@3 dynamically on both.
   # ------------------------------------------------------------------
   build-darwin:
     name: darwin pg${{ matrix.pg }} / ${{ matrix.arch }}
@@ -402,7 +406,12 @@ jobs:
       matrix:
         pg: [14, 15, 16, 17, 18]
         arch: [arm64, x86_64]
-    runs-on: macos-15
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
     env:
@@ -427,7 +436,8 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x scripts/package-darwin.sh scripts/macos/install.sh
-          PG_CONFIG="$(brew --prefix postgresql@${{ matrix.pg }})/bin/pg_config" \
+          # FSQL_REQUIRE_MCP=1: a release tarball without the MCP server is a failure, not a warning.
+          FSQL_REQUIRE_MCP=1 PG_CONFIG="$(brew --prefix postgresql@${{ matrix.pg }})/bin/pg_config" \
             ./scripts/package-darwin.sh
           ls -l dist/packages
           # Verify the dependent agents extension (platform-independent
@@ -440,16 +450,31 @@ jobs:
           TARBALL="dist/packages/fractalsql-postgresql-${FSQL_VERSION}-pg${{ matrix.pg }}-darwin-${{ matrix.arch }}.tar.gz"
           tar -tzf "$TARBALL" | grep -E 'fractalsql_agents\.control$'
           tar -tzf "$TARBALL" | grep -E 'fractalsql_agents--1\.0\.sql$'
-          # The bundled MCP server (binary + mcp/README.md + locks) rides
-          # in the tarball's mcp/ folder -- mirrors the Linux packages'
-          # shipped-MCP post-install verification. Only the native arm64
-          # leg builds it: Homebrew's libpq and openssl@3 are arm64-only, so
-          # the x86_64 cross build ships without it (package-darwin.sh warns).
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            tar -tzf "$TARBALL" | grep -E 'mcp/fractalsql-postgresql-mcp$'
-            tar -tzf "$TARBALL" | grep -E 'mcp/\.mcp-schema-lock$'
-            tar -tzf "$TARBALL" | grep -E 'mcp/\.mcp-safety-annotations-lock$'
+          # The bundled MCP server (binary + mcp/README.md + locks) rides in the tarball's mcp/ folder -- mirrors the
+          # Linux packages' shipped-MCP post-install verification. Both legs build it natively.
+          tar -tzf "$TARBALL" | grep -E 'mcp/fractalsql-postgresql-mcp$'
+          tar -tzf "$TARBALL" | grep -E 'mcp/\.mcp-schema-lock$'
+          tar -tzf "$TARBALL" | grep -E 'mcp/\.mcp-safety-annotations-lock$'
+          tar -tzf "$TARBALL" | grep -E 'mcp/RUN\.txt$'
+
+      # The MCP server must link OpenSSL (and libpq) as shared libraries from Homebrew, not fold them in: Homebrew
+      # patches them, and none of either is shipped in the tarball. It must need nothing else outside the system.
+      - name: The MCP server links openssl@3 and libpq dynamically
+        run: |
+          set -euo pipefail
+          FSQL_VERSION="$(sed -n 's/^#define FSQL_VERSION "\(.*\)"$/\1/p' src/fractalsql.c)"
+          TARBALL="dist/packages/fractalsql-postgresql-${FSQL_VERSION}-pg${{ matrix.pg }}-darwin-${{ matrix.arch }}.tar.gz"
+          D="$(mktemp -d)"
+          tar -xzf "$TARBALL" -C "$D"
+          M="$(find "$D" -type f -name fractalsql-postgresql-mcp | head -1)"
+          lipo -info "$M" | tee /dev/stderr | grep -q "${{ matrix.arch }}" || { echo "FAIL: not a ${{ matrix.arch }} binary" >&2; exit 1; }
+          LIBS="$(otool -L "$M" | tail -n +2 | awk '{print $1}')"
+          echo "${LIBS}"
+          echo "${LIBS}" | grep -q 'openssl@3/lib/libssl' || { echo "FAIL: libssl is not linked dynamically" >&2; exit 1; }
+          if echo "${LIBS}" | grep -v -E '^(/usr/lib/|/System/Library/|.*/opt/openssl@3/lib/lib(ssl|crypto)|.*/opt/postgresql@[0-9]+/lib/)' | grep -q .; then
+              echo "FAIL: the MCP server depends on a library other than openssl@3, libpq and the system's own" >&2; exit 1
           fi
+          "$M" --version
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
