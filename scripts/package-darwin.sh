@@ -9,12 +9,13 @@
 #
 # Unlike the Linux build (docker/Dockerfile), the macOS extension builds
 # natively with PGXS against a real mac PostgreSQL, linking the vendored
-# darwin core archive (include/darwin-<arch>/). arm64 builds native;
-# x86_64 cross-compiles via `-arch x86_64` on an Apple Silicon runner.
+# darwin core archive (include/darwin-<arch>/). Each arch builds natively on its
+# own runner (arm64 on macos-15, x86_64 on macos-15-intel); the MCP server is
+# built there too and links Homebrew's libpq and openssl@3 dynamically.
 #
 # Usage:
 #   PG_CONFIG=/opt/homebrew/opt/postgresql@17/bin/pg_config ./scripts/package-darwin.sh
-#   FSQL_DARWIN_ARCH=x86_64 PG_CONFIG=... ./scripts/package-darwin.sh   # cross
+#   FSQL_DARWIN_ARCH=x86_64 PG_CONFIG=... ./scripts/package-darwin.sh   # x86_64 (native on an Intel host)
 #
 # The PG major is taken from `pg_config --version`; one run produces one
 # tarball bound to one server ABI (PG_MODULE_MAGIC), same as the Linux
@@ -94,8 +95,16 @@ if [[ "${ARCH}" != "$(uname -m)" ]]; then
     # Homebrew's libpq and openssl@3 are host-arch only; an x86_64 MCP
     # linked on an arm64 runner fails with undefined OpenSSL/libpq symbols.
     echo "warning: cross build (${ARCH} on $(uname -m)) — skipping the MCP server (no ${ARCH} libpq/openssl)" >&2
+    if [[ "${FSQL_REQUIRE_MCP:-0}" = "1" ]]; then
+        echo "error: FSQL_REQUIRE_MCP=1 and the MCP server cannot be built when cross-compiling" >&2
+        exit 1
+    fi
 elif [[ -z "${OPENSSL_PREFIX}" || ! -f "${OPENSSL_PREFIX}/include/openssl/evp.h" ]]; then
     echo "warning: Homebrew openssl@3 not found — skipping the MCP server (brew install openssl@3 to include it)" >&2
+    if [[ "${FSQL_REQUIRE_MCP:-0}" = "1" ]]; then
+        echo "error: FSQL_REQUIRE_MCP=1 and the MCP server could not be built" >&2
+        exit 1
+    fi
 else
     # pkg-config must also see libpq.pc: a full-path PG_CONFIG means a
     # Homebrew/opt keg whose pkgconfig dir is likewise off the default
@@ -193,10 +202,11 @@ printf '%s\n' "${PG_MAJOR}" > "${STAGE}/PG_MAJOR"
 if [[ "${HAVE_MCP}" = "1" ]]; then
     # BSD install (macOS) has no -D to create leading directories, unlike
     # the GNU install the Linux packaging script relies on — mirror the
-    # sibling's mcp/ bundle shape (binary + client guide + locks).
+    # Linux packaging script's mcp/ bundle shape (binary + client guide + locks).
     mkdir -p "${STAGE}/mcp"
     install -m 0755 mcp/fractalsql-postgresql-mcp    "${STAGE}/mcp/fractalsql-postgresql-mcp"
     install -m 0644 mcp/README.md                    "${STAGE}/mcp/README.md"
+    install -m 0644 mcp/RUN.txt                      "${STAGE}/mcp/RUN.txt"
     install -m 0644 mcp/.mcp-schema-lock             "${STAGE}/mcp/.mcp-schema-lock"
     install -m 0644 mcp/.mcp-safety-annotations-lock "${STAGE}/mcp/.mcp-safety-annotations-lock"
     install -m 0644 mcp/manifest.json                "${STAGE}/mcp/manifest.json"
@@ -231,7 +241,8 @@ MCP server (mcp/fractalsql-postgresql-mcp):
   cd "${PKG}"
   xattr -d com.apple.quarantine mcp/fractalsql-postgresql-mcp   # unsigned release
   ./mcp/fractalsql-postgresql-mcp --list-tools                  # 82-tool catalog
-  See mcp/README.md for usage.
+  It uses Homebrew's openssl@3 and libpq (brew install openssl@3 postgresql@<major>); the extension does not need openssl.
+  How to start it: mcp/RUN.txt. All settings: mcp/README.md.
 EOF
 fi
 

@@ -181,3 +181,19 @@ measured on a real multi-core host.
 --search-queries   queries to average for the latency sub-benchmark
                    (default 10)
 ```
+
+## The index, precision and scale scripts
+
+| Script | What it does |
+| --- | --- |
+| `index_head_to_head.py` | The native IVF index (one run per `vector_format`) against the exact scan: recall@10, median latency, bytes per row, build time and the rows the index read. |
+| `precision_agreement.py` | Checks that the SQL distance functions are bit-identical to the sequential double reference. |
+| `scale_sweep.sh` | Runs `head_to_head.py` over a range of corpus sizes on both the `float8[]` and `fractal_vector` columns, one line per size. |
+
+```bash
+python3 bench/index_head_to_head.py --n 20000 --dim 128
+python3 bench/precision_agreement.py
+bench/scale_sweep.sh
+```
+
+Read **rows scanned** (far below the row count means the index answered) and the **bit-identical share** (1.0000 expected). The distances an index returns are exact; recall is the quality measure.

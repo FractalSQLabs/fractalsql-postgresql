@@ -70,11 +70,16 @@ You should see `fractalsql` and `fractalsql_agents` in the extension list, and:
 FractalSQL's core is a **Stochastic Fractal Search** optimizer. It comes in
 two flavours that solve different problems:
 
-- **Sniper** (`fractal_search`): converge to the single best point in a
+- **Sniper** (`fractal_sfs_converge`): converge to the single best point in a
   continuous space.
 - **Scout** (`fractal_search_explore`): discover the *diverse* structure of
   your own data, finding distinct "islands" instead of collapsing to one
   nearest neighbour.
+
+A third entry point, the indexed `fractal_search(table, column, query, k)`,
+returns the nearest rows of a stored table through a native IVF index
+(`fractal_index_create`), and still returns exact distances -- the index only
+chooses which rows to look at. See [Discovery](api-discovery.md).
 
 Scout is what makes FractalSQL different from a plain vector DB, and it runs
 with **no model connected**. Try it on a tiny toy corpus:
@@ -264,6 +269,11 @@ cd fractalsql-postgresql-2.0.0-pg17-darwin-arm64
 `install.sh` drops the base extension, the reasoning plugin, **and** the
 agents files into the target server's own extension dir, then you run the two
 `CREATE EXTENSION` lines above.
+
+The extension needs nothing else. The optional MCP server in the tarball's
+`mcp/` folder uses Homebrew's `openssl@3` and the `libpq` from your Homebrew
+`postgresql@<major>`; if you installed PostgreSQL from Homebrew you already
+have both, otherwise `brew install openssl@3 postgresql@17` (match your major).
 
 Reasoning provider configuration (the GUCs `easy_install` sets for you in
 Option A) is documented step by step in

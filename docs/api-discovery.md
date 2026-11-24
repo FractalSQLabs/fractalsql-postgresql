@@ -9,13 +9,132 @@ The Discovery tier provides high-precision and diverse retrieval mechanisms. Unl
 ---
 
 ## `fractal_search`
+**Indexed approximate nearest-neighbour search** (table-backed)
+
+Finds the `k` nearest rows of a table to a query vector. With an index (`fractal_index_create`) it probes a few IVF cells instead of scanning every row, then **verifies** every candidate against the stored vectors: the returned distances are exact cosine distances and the order is by distance, then key. Without an index it falls back to the exact scan (the same distances as `fractal_search_telemetry`).
+
+```sql
+fractal_search(
+    table_name text,
+    vector_col text,       -- float8[] or fractal_vector column
+    query      float8[],
+    k          int4,       -- 1 .. 1000
+    options    jsonb DEFAULT '{}'
+) RETURNS TABLE(doc_id text, distance float8, scan_pos int8)
+```
+
+Rows are named by an **integer key column** (`id_col`, default `id`), not a `ctid`: a `ctid` moves on `UPDATE` and `VACUUM`, so it cannot identify a row inside an index that outlives the transaction. `doc_id` is the key as text and `scan_pos` is the key as an integer.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `index` | the index on (table, column) | Index name when a column has more than one. |
+| `nprobe` | calibrated at build time (16 if none) | Cells probed. More cells: higher recall, more rows scanned. |
+| `rerank` | INT8 30, INT4 40, FP16/FP32 0 | Candidates fetched and verified (never below k+5). |
+| `use_index` | `true` | `false` forces the exact scan. |
+| `verify` | `true` | For FP16/FP32, verify the top k+5 candidates against the table. |
+| `id_col` | `id` | The integer key column (used by the exact-scan fallback; an index remembers its own). |
+| `model` | none | Refuses the search when it differs from the model the index was built for. |
+| `ids` | none | Restricts the search to a set of keys, a jsonb array such as `to_jsonb(array_agg(id))` over an ordinary `WHERE`: `'{"ids":[5,77,100]}'`. Keys that are not rows are ignored. See below. |
+
+Rows added after the build (key above the index's `max_id`) are scanned exactly and merged; rows deleted since the build are dropped by the verify step; a vector that was *changed* in place is only picked up by `fractal_index_rebuild` (`fractal_index_info` reports `stale`). Indexed search does not apply Diversify repulsion; use `fractal_search_telemetry` for stateful diversity.
+
+**Restricting a search to a set of rows (`ids`).** This is the one-call form of "index plus filter": compute the allowed keys with ordinary SQL, then pass them in.
+
+```sql
+SELECT * FROM fractal_search('docs', 'embedding', :query, 5,
+         (SELECT jsonb_build_object('ids', jsonb_agg(id)) FROM docs WHERE tenant = 'acme'));
+```
+
+A short set (up to 4096 keys), or a table with no index, is scanned exactly: only those rows are read, so the answer is the true nearest of the set. A longer set goes through the index and is filtered, which keeps it fast on a big table; if that leaves fewer than `k` rows, the set is scanned exactly, so the answer is never short just because the index's shortlist missed the set. Every distance is exact either way, and `fractal_index_info(...)->'last_search'->>'used_index'` says which path ran. A malformed `ids` (not a JSON array of integers) is an error; an empty array returns no rows.
+
+> **Renamed:** the scalar `fractal_search(float8[], iterations, population_size, diffusion_factor)` is now `fractal_sfs_converge` (no alias). The rename ships inside the extension's `1.0` script — there is no separate upgrade script — so a database that already has the extension installed at `1.0` keeps the old name until the extension is reinstalled. The old call then fails with "function does not exist".
+
+---
+
+## `fractal_index_create` / `_rebuild` / `_refresh` / `_ensure` / `_drop` / `_info` / `_list`
+**IVF index management**
+
+```sql
+fractal_index_create(table_name text, vector_col text, options jsonb DEFAULT '{}') RETURNS jsonb  -- build and store an index
+fractal_index_rebuild(name text)  RETURNS jsonb      -- full re-cluster, same options, new generation
+fractal_index_refresh(name text)  RETURNS jsonb      -- fold the rows added since the build into the cells
+fractal_index_ensure(table_name text, vector_col text, options jsonb DEFAULT '{}') RETURNS jsonb  -- leave a fit index: build, refresh or rebuild only when needed
+fractal_index_drop(name text)     RETURNS boolean
+fractal_index_info(name text)     RETURNS jsonb      -- format, rows, staleness, status, advice, calibration, last search
+fractal_index_list()              RETURNS TABLE(name, table_name, vector_col, format, dim, rows, rows_now, stale, status, generation)
+```
+
+`fractal_index_create` options: `name` (default `<table>_<column>`), `id_col` (integer key column, default `id`), `vector_format` (`INT8` default, `INT4`, `FP16`, `FP32`), `nlist` (cells; default sqrt(rows)), `pca_dim` (INT8/INT4 code width; default dim/4, at least 8), `target_recall` (default 0.95) and `calibration_samples` (default 200; 0 skips), `model` (the embedding model's name, checked on search), `seed`.
+
+| Format | Code per row | Notes |
+| --- | --- | --- |
+| `INT8` (default) | `pca_dim` bytes (int8 residual on a PCA basis) | 4x smaller than FP32 at `pca_dim = dim/4`; shortlist of 30 verified against the table |
+| `INT4` | `pca_dim / 2` bytes | most compact; shortlist of 40 |
+| `FP16` | `2 * dim` bytes | no quantisation loss beyond half precision |
+| `FP32` | `4 * dim` bytes | the normalised vector itself |
+
+The build samples rows as queries (each left out of its own ground truth), compares the index with exact search at nprobe 1, 2, 4 ... and stores the smallest nprobe whose 95% lower bound reaches `target_recall` as the index's default (`fractal_index_info` shows the whole curve and whether the target was reached). A PCA basis depends on the data's spectrum: on isotropic data the default `pca_dim` can fall short of the target, and the calibration says so; raise `pca_dim` or use FP16/FP32.
+
+**Keeping an index current.** Rows added after the build are scanned exactly and merged into every search, so an index never misses a new row, but each search pays for the unindexed rows. `fractal_index_refresh(name)` folds them into the cells: each new row is encoded with the index's existing model (nothing is retrained) and appended to its cell, in a new generation written inside your transaction, and it returns `{"name", "added", "rows", "generation", "refreshed"}`. With nothing to add it changes nothing (`"refreshed": false`). A refresh does not touch deleted rows (they are already dropped from results) or rows whose vector was changed in place; and it keeps the cells the original build trained, so when a large share of the table is new, a rebuild fits the data better than a refresh does.
+
+**Is it healthy? `fractal_index_info` and `fractal_index_list`.** `fractal_index_info(name)` carries a verdict next to the numbers:
+
+| `status` | Meaning |
+| --- | --- |
+| `ready` | Nothing needs doing: the build's calibration reached its recall target and the table has not outgrown the index. A few deleted rows do not change this (they are dropped from results; `stale` is still `true` and `rows_deleted_since_build` counts them). |
+| `stale` | There is something to do: rows were added since the build, or more than a fifth of the rows were deleted. |
+| `degraded` | The build's own calibration did not reach its recall target (typical of INT8 or INT4 codes on tightly clustered data). |
+| `empty` | The table has no vectors left. |
+| `orphaned` | The table, or the vector or key column, the index was built on no longer exists (the catalog outlives it). `fractal_index_drop` removes the index. |
+
+`advice` is a jsonb array of plain sentences, most useful first, for example `"refresh: 60 rows (10% of the index) were added since the build; fractal_index_refresh folds them in"`, `"rebuild: 30% of the rows (180) were deleted since the build; they are dropped from results but still held in the cells"` or `"the build's calibration reached recall 0.89 against a target of 0.95; rebuild with vector_format FP16 or FP32, or search with a larger rerank"`. `rows_added_since_build` and `rows_deleted_since_build` give the counts. The advice recommends a refresh while the added rows are a minor share (up to a quarter of the index) and a rebuild beyond that, or when more than a fifth of the rows were deleted. It is advice only, never an error.
+
+`fractal_index_ensure(table_name, vector_col [, options])` is for a setup script or a scheduled job: it looks at the index on that table and column and does only what is needed. It builds the index when none exists (`created`), folds in the added rows when that is all the advice asks for (`refreshed`), rebuilds when more than a quarter of the rows were added or more than a fifth deleted (`rebuilt`), and otherwise leaves it alone (`unchanged`: the status is `ready`, `empty` or `orphaned`, or it is `degraded` and you passed no new options). It returns `{name, action, status, generation, rows}`. The options are used only when it builds or rebuilds; pass a different `vector_format` to try again on a `degraded` index. An index whose table or column is gone is reported `orphaned` and is never recreated. A search never builds or changes an index.
+
+`fractal_index_list()` is the catalog, one row per index: `SELECT * FROM fractal_index_list();` gives `name`, `table_name`, `vector_col`, `format`, `dim`, `rows` (indexed), `rows_now`, `stale`, `status` and `generation`, ordered by name, and no rows when the database has no index.
+
+The agents that find the nearest row (`fractal_agent_route_task`, `fractal_agent_outlier_intercept`, `fractal_agent_schedule_workload`), the cohort recall (`fractal_agent_recall_hybrid`) and the retrieval agents (`fractal_rag_agent`, `fractal_search_agent`) scan exactly by default. `fractalsql.agent_use_index` takes three values: `off` (the default), `on` and `auto`. In `auto` an agent goes through an index only when the index is `ready` (nothing stale beyond a refresh), calibrated to its target recall, and the table has at least `fractalsql.agent_index_min_rows` rows (default 10000); otherwise it scans exactly. Set `fractalsql.agent_use_index = on` for the session and, when a fractal_index exists on the table and column they search, they search through it instead (the setting defaults to off because an index can rarely pick a different nearest row than the exact scan; every distance is still exact).
+
+The index lives in two ordinary tables, `fractal_index_meta` and `fractal_index_cells`, created on first use in the schema the extension is installed in, so they are dumped and restored with the database. A build writes a new generation inside the caller's transaction: readers see the old or the new generation, never a partial one, and an error rolls the whole build back. `fractal_index_info` reports `rows_indexed` vs `rows_now`, `stale`, `has_delta`, the calibration, and the last search's `used_index`, `rows_scanned` and `cells_probed` in the current backend session (the "index actually used" check). A backend keeps up to 8 loaded indexes resident.
+
+`fractal_index_candidates(table_name, vector_col, query [, options]) RETURNS int8[]` returns keys for Scout: every row of the `near` (default 6) nearest cells plus `per_cell` (default 1) representatives from the others, plus rows newer than the index.
+
+The maths (k-means, quantisers, candidate search, recall estimation) is the core's `fsql_ivf_*` functions; results are bit-identical on every platform for the same rows in key order.
+
+---
+
+## The precision contract
+
+Every SQL-visible distance, norm and similarity in this host is computed by **one**
+implementation (`src/fsql_precision.h`):
+
+* the sums accumulate in **double**, in a fixed sequential order, with no fused
+  multiply-add and no vectorised reduction (the files that carry a float path are built
+  with `-ffp-contract=off -fno-tree-vectorize`, `/fp:precise /Qvec-` on MSVC);
+* the result is returned as a **double** -- the one rounding to float32 happens only where
+  a float32 result is the contract (the canonical vector text, which round-trips through
+  `%.9g`);
+* so every SQL-visible cosine, L2 distance, dot product and norm agrees **to the last bit**
+  with each other, with the indexed search's verified distances, and with every other
+  FractalSQL host;
+* the cosine is bounded to **[-1, 1]** by construction, and the comparison is
+  cross-platform: the same corpus and the same query give the same ranking on amd64,
+  arm64, ppc64le and s390x;
+* ties break on the **row id**, so the same corpus and the same query give the same
+  ordering everywhere.
+
+The Sniper convergence itself (`fractal_sfs_converge`) runs inside the core, which keeps
+its own double-precision accumulation over the unit box [-1, 1]^d; the distances it reports
+are the core's.
+
+## `fractal_sfs_converge`
 **Sniper Mode Convergence**
 
 Converges to the single best point minimizing cosine distance to a query over the unit box $[-1, 1]^d$. It is a precision tool for finding the absolute global minimum.
 
 ### Signature
 ```sql
-fractal_search(
+fractal_sfs_converge(
     query            float8[],
     iterations       int4 DEFAULT 30,
     population_size  int4 DEFAULT 50,
@@ -36,18 +155,18 @@ fractal_search(
 ### Query-Vector Dimension Limit
 The query vector may carry up to **16,384 dimensions** — the shared core library's `FSQL_MAX_DIM`, and the ceiling that actually fires (`exceeds FSQL_MAX_DIM`). This engine's own SQL-side guard allows up to 1,048,576, but the core library's limit is always the tighter one, so a query beyond 16,384 dimensions is rejected.
 
-`fractal_search_debug` and `fractal_search_explore` take the same query and share the same limit.
+`fractal_sfs_converge_debug` and `fractal_search_explore` take the same query and share the same limit.
 
 ---
 
-## `fractal_search_debug`
+## `fractal_sfs_converge_debug`
 **Sniper Mode with Trajectory Trace**
 
-Identical signature to `fractal_search`, but returns a detailed trace of the convergence process.
+Identical signature to `fractal_sfs_converge`, but returns a detailed trace of the convergence process.
 
 ### Signature
 ```sql
-fractal_search_debug(
+fractal_sfs_converge_debug(
     query            float8[],
     iterations       int4 DEFAULT 30,
     population_size  int4 DEFAULT 50,
@@ -225,6 +344,12 @@ Also available with `fractal_vector` arguments.
 ---
 
 ## Stateful Diversify & Feedback
+**Persisted ledgers.** Flushing a ledger writes a QTL v2 snapshot: every entry's weight
+and, for a rejected row, the repulsion shape (intensity and sigma) it was recorded with.
+Loading restores that snapshot exactly -- the same rejections, with the same strength -- and
+**replaces** the in-memory ledgers, so whatever the session had recorded before the load is
+gone. A ledger written by an older version (which stored no weights) comes back with every
+entry at weight 1.0, taking its repulsion shape from the current session's parameters.
 
 Scout Discovery (`fractal_search_explore`) is *stateless* diversity: MMR
 spreads one result set within a single call. The **Diversify/Repulsion**
@@ -267,7 +392,7 @@ fractal_diversify_set_params(
 | `max_shadows_considered` | Cap on how many recorded shadows influence a search. |
 | `tail_buffer_cap` | **Reserved.** Reserved for a future shadow-index release: the value is range-checked (1-1024) and stored, but has no effect on search or the ledger in v2.0.x. |
 
-Takes effect on the next `fractal_search` call.
+Takes effect on the next `fractal_sfs_converge` call.
 
 ### `fractal_detect_collapse()` → `float8`
 Returns the current **D_q** (diversity quotient) from the last search on this
@@ -309,3 +434,22 @@ SELECT fractal_search_explore(               -- 4. re-search the SAME query
 SELECT fractal_explain_result();             -- -> {dq, diversify_enabled, ...}
 SELECT fractal_diversify_disable();          -- 6. turn it off when done
 ```
+
+## Which functions use the index
+
+The `agent_use_index` setting (`off` by default; the key, GUC, module argument or property that carries it on each host is in the settings table in [Reasoning Setup](reasoning-setup.md)) decides whether the agents below search through a `fractal_index` when one covers the table and column. Every distance an indexed search returns is still exact, and rows added after the build are scanned exactly. This table lists what goes through the index and, for the rest, why not.
+
+| Function or agent | Search it does | Index |
+| --- | --- | --- |
+| `fractal_search` | nearest rows, exact scan or index | Yes: this is the indexed search |
+| `fractal_agent_route_task`, `fractal_agent_schedule_workload` | the nearest row | Yes, with `agent_use_index` |
+| `fractal_agent_outlier_intercept` (cosine) | the nearest row | Yes, with `agent_use_index` (L2 scans exactly) |
+| `fractal_search_agent`, `fractal_rag_agent` | the top rows for a question | Yes, with `agent_use_index`; a metadata filter restricts the indexed search to the matching rows |
+| `fractal_agent_recall_hybrid` | the nearest rows within a cohort | Yes where the host has it and the cohort is a list of row ids: the cohort goes to the indexed search as its `ids` option (SQLite, PostgreSQL, DuckDB, MariaDB) |
+| `fractal_hybrid_clinical_search` | the nearest rows within a cohort | No: exact scan of the cohort |
+| `fractal_agent_rebalance_sibling`, `fractal_agent_detour_classify`, `fractal_agent_track_anomaly`, `fractal_agent_trajectory_predict`, `fractal_search_trajectory`, `fractal_agent_patient_deterioration_triage` | nearest row to a computed vector (current minus baseline) | No: exact scan. The index was tuned with queries taken from the rows themselves, and a computed query has not been measured against it |
+| `fractal_cross_modal_search` | nearest rows to a combined vector | No: exact scan, for the same reason |
+| `fractal_search_telemetry`, `fractal_agent_recommend_diverse`, `fractal_agent_feedback_audit` | exact scan with Diversify repulsion | No, by design: the repulsion needs every row's distance, and the indexed search does not apply it |
+| `fractal_search_explore`, `fractal_agent_plan_explore` | population (Scout) search | No, by design: the search is exploratory, not nearest-row |
+| `fractal_index_candidates` | a shortlist of ids from the index | It is the index; the shortlist is for a caller's own follow-up search |
+| the other agents (allocate, anomaly triage, regime triage, loop detection, data analyst, SQL agent, and so on) | no vector search | Not applicable |

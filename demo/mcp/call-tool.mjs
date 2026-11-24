@@ -22,7 +22,7 @@ import { accessSync, constants as FsConstants } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const PINS = 'fractal_search,fractal_reason,fractal_agent_data_analyst,fractal_agent_diverse_portfolios';
+const PINS = 'fractal_sfs_converge,fractal_reason,fractal_agent_data_analyst,fractal_agent_diverse_portfolios';
 
 const args = process.argv.slice(2);
 let serverPath = process.env.FSQL_MCP_SERVER || null;

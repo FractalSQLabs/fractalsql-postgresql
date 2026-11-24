@@ -42,7 +42,7 @@ namespace fsqlmcp
 
     // Post-composite decode: known float8[]/int8[] composite fields arrive as
     // pg array-literal text through decodeField; re-type them to numbers so
-    // the client sees a plain JSON array (source_doc_ids int8[], verified in
+    // the client sees a plain JSON array (float8[]/int8[] fields, verified in
     // the agents SQL — NOT a text array).
     static void decodePgArrayFields( Json& row, const std::vector<const char*>& fields )
     {
@@ -237,7 +237,7 @@ namespace fsqlmcp
                 PgBind::s( "text", a.at( "node_id_col" ).get<std::string>() ),
                 bindIf( a, "iterations", "int4" ), bindIf( a, "population", "int4" ),
                 bindIf( a, "k", "int4" ), bindIf( a, "context", "text" ) } ); } } );
-        t.back().description = std::string("Schedule a workload onto the best node: fractal_search refinement "
+        t.back().description = std::string("Schedule a workload onto the best node: fractal_sfs_converge refinement "
             "pass over the node table, then a placement rationale. Returns {assigned_node, confidence, rationale, reasoning_step_failed}. "
             "Raises 'no node rows' on an empty table. A null task_vec raises an argument error (22023) instead of "
             "reaching the vector math.") + kReasoningAgent + kPartialNote;
@@ -375,38 +375,45 @@ namespace fsqlmcp
         // closed-world (no LLM step)
 
         // ---- 6 Universal Agents ----
-        // fractal_search_agent_result = (answer text, source_doc_ids int8[], execution_time_ms int4).
+        // fractal_search_agent_result = (answer text, execution_time_ms int4, source_row_ids text[], used_index, context_cut).
         t.push_back( ToolSpec{ "fractal_search_agent", "agency", ToolClass::Expensive,
             { Str("query",true,"Natural-language query."), Str("table_name",true,"Table to search."),
               Str("vector_col",true,"Embedding column."), Int("pop_size",false,"Scout population size.",50),
-              Int("iterations",false,"Scout iterations.",15) },
+              Int("iterations",false,"Scout iterations.",15),
+              Str("meta_filter",false,"Flat JSON object of column: value pairs; only rows where every column equals its value are searched.","{}") },
             std::nullopt, false, false,
             [&db]( const Json& a, CallCtx& ) {
                 Json row = agentRow( db, "fractal_search_agent", {
                     PgBind::s( "text", a.at( "query" ).get<std::string>() ),
                     PgBind::s( "text", a.at( "table_name" ).get<std::string>() ),
                     PgBind::s( "text", a.at( "vector_col" ).get<std::string>() ),
-                    bindIf( a, "pop_size", "int4" ), bindIf( a, "iterations", "int4" ) } );
-                decodePgArrayFields( row, { "source_doc_ids" } );
+                    bindIf( a, "pop_size", "int4" ), bindIf( a, "iterations", "int4" ), bindIf( a, "meta_filter", "text" ) } );
+                decodePgArrayFields( row, { "source_row_ids" } );
                 return row;
             } } );
-        t.back().description = std::string("End-to-end synthesis: embed a query -> Scout-search a table -> reason "
-            "over the matched rows' REAL content (never raw vectors). Returns {answer, source_doc_ids, "
-            "execution_time_ms}.") + kReasoningAgent + kPartialNoteNative + kDataNote;
+        t.back().description = std::string("End-to-end synthesis: embed a query -> find the nearest rows (a Scout search, or "
+            "through a fractal_index when fractalsql.agent_use_index allows it) -> reason over the matched rows' REAL content "
+            "(never raw vectors). meta_filter limits the rows searched. Returns {answer, "
+            "execution_time_ms (measured), source_row_ids (primary keys, or ctids without a single-column key), used_index, "
+            "context_cut {cells, rows}}.") + kReasoningAgent + kPartialNoteNative + kDataNote;
         t.back().openWorldHint = true; t.back().secretHint = true;
 
         // fractal_rag_agent_result = (answer text).
         t.push_back( ToolSpec{ "fractal_rag_agent", "agency", ToolClass::Expensive,
             { Str("query",true,"Natural-language query."), Str("table_name",true,"Table to search."),
-              Str("vector_col",true,"Embedding column."), Str("meta_filter",false,"Reserved for a future metadata filter.","{}") },
+              Str("vector_col",true,"Embedding column."), Str("meta_filter",false,"Flat JSON object of column: value pairs; only rows where every column equals its value are searched.","{}") },
             std::nullopt, false, false,
-            [&db]( const Json& a, CallCtx& ) { return agentRow( db, "fractal_rag_agent", {
+            [&db]( const Json& a, CallCtx& ) {
+                Json row = agentRow( db, "fractal_rag_agent", {
                 PgBind::s( "text", a.at( "query" ).get<std::string>() ),
                 PgBind::s( "text", a.at( "table_name" ).get<std::string>() ),
                 PgBind::s( "text", a.at( "vector_col" ).get<std::string>() ),
-                bindIf( a, "meta_filter", "text" ) } ); } } );
+                bindIf( a, "meta_filter", "text" ) } );
+                decodePgArrayFields( row, { "source_row_ids" } );
+                return row; } } );
         t.back().description = std::string("Lighter single-turn RAG sibling of fractal_search_agent: embed -> "
-            "Scout -> reason -> {answer} only.") + kReasoningAgent + kPartialNoteNative + kDataNote;
+            "nearest rows -> reason. meta_filter limits the rows searched. Returns {answer, source_row_ids, used_index, "
+            "context_cut {cells, rows}}.") + kReasoningAgent + kPartialNoteNative + kDataNote;
         t.back().openWorldHint = true; t.back().secretHint = true;
 
         // fractal_sql_agent_result = (generated_sql text, execution_status text, retry_count int4, result_json jsonb).

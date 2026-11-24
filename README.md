@@ -64,10 +64,12 @@ Depending on your role, you'll want to start in different places:
 ---
 
 ## 🧩 What's in the box
-
+<p align="center">
+  <img src="docs/fractalsql-postgresql-architecture.jpg" alt="FractalSQL for PostgreSQL diagram" width="900">
+</p>
 Four tiers of SQL-callable primitives, composable into agents with plain PL/pgSQL.
 
-- **Discovery**: diverse, mode-collapse-free retrieval: `fractal_search` (Sniper), `fractal_search_explore` (Scout), `fractal_search_telemetry` (table-backed top-K).
+- **Discovery**: diverse, mode-collapse-free retrieval: `fractal_sfs_converge` (Sniper), `fractal_search_explore` (Scout), `fractal_search_telemetry` (table-backed top-K), and the indexed `fractal_search` (nearest rows of a table, through the native IVF index built with `fractal_index_create`, with every distance still exact).
 - **Cognition**: in-database LLM integration: `fractal_reason` (Bedrock, Azure OpenAI, Vertex, Ollama), `fractal_embed`, `fractal_text_to_sql`.
 - **Agency**: self-correcting routines: `fractal_search_agent`, `fractal_sql_agent`, `fractal_agent_plan_explore`, `fractal_agent_detect_loop`, plus **sixteen installable agents**: see the [Agent Recipes](docs/api-agency.md).
 - **Analytics**: fractal/dimension primitives: `fractal_dimension_dfa`, `fractal_dimension_boxcount`, `fractal_optimize_portfolio`, and more.
@@ -129,13 +131,15 @@ what the hash chain can and can't prove.
 
 ## 📊 Compatibility & License
 
-| PostgreSQL | Linux | Windows x64 | macOS |
-| --- | :---: | :---: | :---: |
-| 14 | ✓ | ✓ | ✓ |
-| 15 | ✓ | ✓ | ✓ |
-| 16 | ✓ | ✓ | ✓ |
-| 17 | ✓ | ✓ | ✓ |
-| 18 | ✓ | ✓ | ✓ |
+| PostgreSQL | Linux amd64 | Linux arm64 | Windows x64 | macOS |
+| --- | :---: | :---: | :---: | :---: |
+| 14 | ✓ | ✓ | ✓ | ✓ |
+| 15 | ✓ | ✓ | ✓ | ✓ |
+| 16 | ✓ | ✓ | ✓ | ✓ |
+| 17 | ✓ | ✓ | ✓ | ✓ |
+| 18 | ✓ | ✓ | ✓ | ✓ |
+
+macOS builds cover Apple Silicon and Intel.
 
 **License**: Apache-2.0. See `LICENSE`. Third-party components are under
 their own permissive licenses (BSD-2-Clause, MIT, and others) --

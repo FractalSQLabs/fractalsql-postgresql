@@ -211,6 +211,24 @@ fractalsql.http_embed_model = 'text-embedding-005'
 
 ---
 
+## Chunking long text
+
+A document longer than the embedding model's context cannot be embedded whole. Give the vectorizer a `chunk_size` and it splits the text for you:
+
+```sql
+SELECT fractal_vectorizer_create('docs', 'body', 'embedding',
+    '{"chunk_size": 800, "chunk_overlap": 100, "chunk_mode": "paragraph"}');
+```
+
+| Option | Meaning |
+| --- | --- |
+| `chunk_size` | Largest chunk, in characters (1 to 100000). Giving it turns chunking on. |
+| `chunk_overlap` | Characters shared by neighbouring pieces when a paragraph or sentence has to be cut (0 to `chunk_size - 1`, default 0). |
+| `chunk_mode` | `paragraph` (default), `sentence` or `fixed`: see `fractal_chunk_text` in [api-analytics.md](api-analytics.md). |
+| `chunk_table` | The chunk table's name (default `<source_table>_chunks`, in the source table's schema). |
+
+The chunks go into the chunk table, `(id, parent_id, chunk_no, chunk_text, <embedding_col>)`, with one row per chunk, and the **chunks** are what the vectorizer embeds: it is registered on the chunk table, with `chunk_text` as its text column, and `fractal_vectorizer_create` returns that vectorizer's id. The embedding column has the type of the source table's column of that name, or `float8[]` when the source has none. Rows already in the source table are chunked when you create the vectorizer. After that the chunks follow the source row: an insert adds its chunks, an update of the text column rechunks the row, and a delete removes them. Search the chunk table (`fractal_search`, `fractal_rag_agent` with a `meta_filter` such as `{"parent_id": 7}`) and use `parent_id` to get back to the document. Dropping the vectorizer stops the chunking and leaves the chunk table in place. The source table needs a single-column primary key.
+
 ## SQL API Reference
 
 ### `fractal_vectorizer_create(source_table, text_col, embedding_col, options DEFAULT '{}')`
@@ -262,3 +280,9 @@ Unlike traditional extensions that spawn background workers (which can be unstab
 The Vectorizer is the right choice when you need **seamless semantic synchronization**. If your application requires that every single text update is immediately reflected in your vector index without managing external Python/Node.js workers, the Vectorizer closes that gap.
 
 If you already have a robust external ETL pipeline, you can skip the Vectorizer and use `fractal_embed()` directly to populate your `fractal_vector` columns.
+
+**Use unit-length embeddings.** With embeddings of unit length the cosine ordering and the
+L2 ordering of a query are the same, so one index answers both and the ranking does not
+depend on the vector's magnitude. Embeddings that are not unit length -- a raw pooled model
+output, say -- should be normalised once on the way in and stored normalised.
+

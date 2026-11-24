@@ -252,6 +252,14 @@
               Source="$(var.STAGE_DIR)\mcp\README.md"
               KeyPath="yes" />
       </Component>
+      <Component Id="c_McpRun"
+                 Directory="McpFolder"
+                 Guid="C1A1$(var.PG_MAJOR)15-0000-4000-B000-000000005A75">
+        <File Id="mcp_run_txt"
+              Name="RUN.txt"
+              Source="$(var.STAGE_DIR)\mcp\RUN.txt"
+              KeyPath="yes" />
+      </Component>
       <Component Id="c_McpSchemaLock"
                  Directory="BinDir"
                  Guid="C1A1$(var.PG_MAJOR)12-0000-4000-B000-000000005A72">

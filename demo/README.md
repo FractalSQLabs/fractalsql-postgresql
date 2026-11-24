@@ -62,7 +62,7 @@ there's no stale-state cleanup to do between runs.
 - **1 — Setup.** A small `demo_alerts` table with a deliberate story in
   it: a login-attempt count that escalates (3 → 3 → 17) and a latency
   spike in the last ~10 minutes. Nothing here calls the LLM yet.
-- **2 — Sniper Search.** `fractal_search()` converges to a single best
+- **2 — Sniper Search.** `fractal_sfs_converge()` converges to a single best
   point for a query vector — the fast, precise mode. No table needed;
   it operates on the query vector alone.
 - **3 — Reasoning over real data.** `fractal_reason()` gets a real
@@ -135,6 +135,7 @@ runs cleanly in **two** states and tells you which one it found:
   seeded ledgers to the `fractalsql_ledger` table via the Postgres storage
   VFS, decodes the persisted QTL blob back into a CISO event log, then
   exercises `load` / `compact` / `reset_soft` / `reset_hard` end to end.
+  The demo stack sets `FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1` (in `docker-compose.yml`); those operations are off by default, so a server of your own needs the same setting to run this demo.
 
 ```sh
 psql -d <your_database> -f demo/enterprise-qtl-audit.sql
@@ -489,7 +490,7 @@ exercises all sixteen agents end-to-end via the real `CREATE EXTENSION` path:
   audit cycle (real `fractal_detect_collapse` + real `fractal_explain_result`);
   pure analytics, **no LLM**, self-disables diversify.
 - **`fractal_agent_schedule_workload`** — refines a task vector then finds
-  the nearest node (real `fractal_search` + real `fractal_search_telemetry` →
+  the nearest node (real `fractal_sfs_converge` + real `fractal_search_telemetry` →
   real `fractal_reason`).
 - **`fractal_agent_rebalance_sibling`** — optimized book vs nearest
   historical allocation (real `fractal_optimize_portfolio` + real
@@ -644,3 +645,7 @@ DROP TABLE sfp_parcels, sfp_dim, sfp_index, sfp_prof, sfp_result, sfp_comps, sfp
   sent as `'{}'`, and the model's default system prompt explicitly
   expects "database search results" to analyze; with nothing there, it
   will say so rather than hallucinate an answer.
+
+* `demo-fractal-index.sql` -- the native IVF index end to end: the build, the indexed
+  search, the exact fallback, the delta (a row added after the build) and the proof
+  that the index was really used.

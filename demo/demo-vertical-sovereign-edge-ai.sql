@@ -87,12 +87,12 @@ SELECT fractal_dimension_boxcount(
 \echo '=== 3. Sniper Search: ideal node profile for a GPU-inference workload ==='
 
 -- Blueprint (raw primitives): converge toward the ideal node profile with
--- fractal_search (the "sniper search" in the abstract [-1,1]^5 space), then
+-- fractal_sfs_converge (the "sniper search" in the abstract [-1,1]^5 space), then
 -- map that profile to a REAL node with fractal_search_telemetry. Generalized
 -- below by the shipped fractal_agent_schedule_workload preset, which folds
 -- both steps together and reasons. doc_id is a real ctid (v2.0.20), so this
 -- join is exact regardless of any UPDATE relocating a tuple.
--- SELECT fractal_search(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], iterations => 50) AS ideal_profile;
+-- SELECT fractal_sfs_converge(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], iterations => 50) AS ideal_profile;
 --
 -- SELECT n.node_name, t.distance
 -- FROM fractal_search_telemetry('vse_nodes', 'capability',
@@ -101,7 +101,7 @@ SELECT fractal_dimension_boxcount(
 -- ORDER BY t.distance;
 
 -- Productized preset: the shipped engine refines the task vector
--- (fractal_search), finds the nearest node (fractal_search_telemetry),
+-- (fractal_sfs_converge), finds the nearest node (fractal_search_telemetry),
 -- resolves its scan position to the real node id via ctid, and reasons.
 -- assigned_node is the real node id; confidence is 1/(1+distance).
 \echo '--- Preset: fractal_agent_schedule_workload (raw search+telemetry form preserved above) ---'

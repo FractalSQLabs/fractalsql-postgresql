@@ -101,7 +101,7 @@ The database connection is the ordinary libpq surface — all standard:
 | `FSQL_MCP_STRICT_SCHEMA_HASH` | A tool-schema hash mismatch is a startup failure by default; set `false` to downgrade it to a warning. (The safety-annotation lock at `mcp/.mcp-safety-annotations-lock` is *always* hard.) |
 | `FSQL_MCP_MAX_CONNECTIONS` | Most HTTP connections served at once (default 256, never more than half the process's file-descriptor limit). A connection past the limit is answered `503` and closed. |
 
-Requests whose JSON nests deeper than 128 levels are rejected with a parse error, and an HTTP request with ambiguous framing (a repeated or non-numeric `Content-Length`, or an unsupported `Transfer-Encoding`) is refused with `400`.
+Requests whose JSON nests deeper than 128 levels are rejected with a parse error, and an HTTP request with ambiguous framing (a repeated or non-numeric `Content-Length`, an unsupported `Transfer-Encoding`, or a repeated `Host`, `Authorization`, `Origin`, `Content-Type` or `Mcp-*` header) is refused with `400`.
 
 FractalSQL's own reasoning/enterprise configuration is **not** duplicated
 here: it lives in the `fractalsql.*` GUCs as
@@ -175,7 +175,7 @@ edition back:
 
 ```
 > use the fractal_version tool
-→ {"version": "2.0.22", "edition": "Community"}
+→ {"version": "2.0.23", "edition": "Community"}
 ```
 
 A Community edition string with enterprise-tier tools returning
@@ -191,8 +191,8 @@ the SQL defaults; vector arguments are always JSON arrays of numbers — the
 server converts to the engine's native form, and back). Tools whose result is
 a row set also take `limit` (default 100, hard ceiling
 `FSQL_MCP_MAX_ROWS_CEILING`) and return `{rows, truncated, total_scanned}`.
-82 tools in all: 14 discovery + 4 cognition + 22 agency + 23 analytics +
-10 enterprise + 5 vectorizer + 4 admin. Errors are returned **verbatim, with a
+108 tools in all: 23 discovery + 4 cognition + 22 agency + 38 analytics +
+10 enterprise + 6 vectorizer + 5 admin. Errors are returned **verbatim, with a
 structured `error_class`** — exactly one of `schema`, `engine`,
 `connectivity`, `cancelled` or `server` — so a calling agent can branch
 programmatically. (`server` is the wire spelling of an internal adapter error:
@@ -203,8 +203,8 @@ only to the server's stderr log.)
 
 | Tool | Purpose |
 | --- | --- |
-| `fractal_search` | Sniper-mode SFS convergence to the single best point minimizing cosine distance to a query. |
-| `fractal_search_debug` | Same convergence with a full trajectory trace (best fits per generation, particle paths). |
+| `fractal_sfs_converge` | Sniper-mode SFS convergence to the single best point minimizing cosine distance to a query. |
+| `fractal_sfs_converge_debug` | Same convergence with a full trajectory trace (best fits per generation, particle paths). |
 | `fractal_search_explore` | Scout-mode diverse re-ranked population search over an embedding column — the anti-"mode-collapse" primitive. |
 | `fractal_search_telemetry` | Ground-truth K nearest real table rows; `doc_id` is the row's ctid (a real locator), `scan_pos` this call's handle. |
 | `fractal_hybrid_clinical_search` | Same, restricted to an explicit cohort of row-locator strings (e.g. ctids from ordinary SQL). |
@@ -215,6 +215,15 @@ only to the server's stderr log.)
 | `fractal_detect_collapse` | Current diversity quotient (D_q) for this session; null when not yet available. |
 | `fractal_explain_result` | Session Diversify diagnostics `{dq, diversify_enabled, overhead_p99_us}`. |
 | `fractal_feedback_report` / `fractal_isolate_background` | Report dwell/positive/negative engagement by `scan_pos`, feeding the shadow store. |
+| `fractal_search` | Indexed K-nearest table rows: probes the fractal_index on (table, column) and verifies every candidate against the stored vectors, so every distance it returns is exact. Falls back to an exact scan when the table has no index. Does not apply Diversify repulsion. |
+| `fractal_index_create` | Builds the IVF index over a table's embedding column and stores it in the database; samples rows to calibrate the default nprobe to the target recall. |
+| `fractal_index_rebuild` | Full re-cluster from the table's current rows with the options the index was created with, as a new generation switched in atomically. |
+| `fractal_index_drop` | Deletes the index's stored cells and metadata; the table and its vectors are untouched. |
+| `fractal_index_info` | The index's format, dimension, cells, rows indexed against now, the delta and stale flags, the calibrated nprobe and the last search's statistics. Also a `status` (ready, stale, degraded, empty or orphaned) and a plain-language `advice` list. |
+| `fractal_index_candidates` | The row keys a Scout pass should look at (the nearest cells of the index plus representatives and the rows newer than it); a shortlist, not an answer. |
+| `fractal_index_list` | The catalog: one entry per index with its table, column, format, rows, stale flag, status and generation. |
+| `fractal_index_ensure` | One call that leaves the index on a table and column fit to use: builds it when missing, folds in a few added rows, rebuilds after large changes, and otherwise changes nothing. For a setup script or a scheduled job. |
+| `fractal_index_refresh` | Folds the rows added since the build into the index's cells (a new generation, no retraining). |
 
 Worked example (Discovery needs no LLM, works on a default install):
 
@@ -267,7 +276,7 @@ failure is reported depends on which agent you called:
   is not".
 - The **C-native agents** (`fractal_search_agent`, `fractal_rag_agent`) carry
   the marker string `reasoning_step_failed: …` in their `answer` column
-  instead (their `source_doc_ids` stay intact).
+  instead (their `source_row_ids` stay intact).
 
 A full raise means something *before* the reasoning step failed (embed,
 search, bad table) — those always raise. A missing reasoning plugin is a
@@ -287,7 +296,7 @@ Thirteen end in a `fractal_reason` step (need reasoning configured):
 | `fractal_agent_rebalance_sibling` | Optimizer + nearest-historical-allocation trajectory search → LLM rationale. |
 | `fractal_agent_diverse_portfolios` | Multi-restart diverse-candidate optimizer (sharpe or pareto) → one LLM tradeoff summary. **Enterprise tier.** |
 | `fractal_agent_route_task` | Nearest-capability search + token-budget accounting → LLM rationale. |
-| `fractal_agent_schedule_workload` | `fractal_search` refinement pass + nearest-node lookup → LLM rationale. |
+| `fractal_agent_schedule_workload` | `fractal_sfs_converge` refinement pass + nearest-node lookup → LLM rationale. |
 | `fractal_agent_outlier_intercept` | Distance-to-known-bad-state safety barrier (cosine or l2) → LLM justification. |
 | `fractal_agent_patient_deterioration_triage` | Caller-built cohort + baseline→current drift → LLM triage. |
 | `fractal_agent_data_analyst` | NL question → SQL → LLM analysis; the horizontal catch-all. **Nothing runs unless you pass `auto_execute: true`** — otherwise the statement comes back in `generated_sql` and `result_json`/`analysis` stay null. |
@@ -307,8 +316,8 @@ Three are pure engines with **no LLM step** (work on any install):
 
 | Tool | Recipe |
 | --- | --- |
-| `fractal_search_agent` | Embed → Scout-search a table → reason over matched rows' content → `{answer, source_doc_ids, execution_time_ms}`. |
-| `fractal_rag_agent` | Lighter single-turn RAG sibling → `{answer}` only. |
+| `fractal_search_agent` | Embed → Scout-search a table → reason over matched rows' content → `{answer, execution_time_ms, source_row_ids}`. |
+| `fractal_rag_agent` | Lighter single-turn RAG sibling → `{answer, source_row_ids, used_index, context_cut}`; `meta_filter` limits the rows searched. |
 | `fractal_sql_agent` | Self-correcting NL→SQL; **`auto_execute` defaults to false and is never defaulted true by this server** → `{generated_sql, execution_status, retry_count, result_json}`. |
 | `fractal_agent_plan_explore` | MCTS-style exploration of up to `max_branches` strategy trajectories → one row per branch. |
 | `fractal_agent_trajectory_predict` | Forecast state by matching (current − baseline) against a table's own history. |
@@ -345,11 +354,16 @@ to run it — it then runs under the role the MCP server itself connected as:
 
 `fractal_dimension_dfa`, `fractal_dimension_boxcount`,
 `fractal_dimension_drift`, `fractal_change_point_detect`,
-`fractal_periodogram`, `fractal_spectrogram_entropy`,
+`fractal_periodogram`, `fractal_spectrogram_entropy`, `fractal_chunk_text`,
 `fractal_tda_persistence_diagram`,
 `fractal_state_fingerprint`, `fractal_cycle_detect`,
+the vector family (the canonical vector type `fractal_vector`,
+`fractal_vector_from_text`, `fractal_vector_to_json`; the algebra
+`fractal_vector_add`, `_sub`, `_scale`, `_normalize`, `_norm`, `_dims`,
+`_cosine_distance`, `_cosine_similarity`, `_l2_distance`, `_l2_squared`,
+`_negative_inner_product`; and the quantize and distance tools
 `fractal_vector_lp_distance`, `fractal_vector_quantize_int8`,
-`fractal_vector_quantize_binary`, `fractal_vector_hamming_distance`,
+`fractal_vector_quantize_binary`, `fractal_vector_hamming_distance`),
 `fractal_vascular_network`, `fractal_cortical_folding`,
 `fractal_nerve_plexus_metric`, `fractal_morphological_complexity`,
 `fractal_optimize_portfolio`, `fractal_optimize_portfolio_multimodal`
@@ -381,22 +395,25 @@ clean `enterprise tier not loaded` error **except**
 the storage layer and works on every edition. The destructive tools
 (`fractal_ledger_reset_hard` explicitly empties history; `_reset_soft`,
 `_compact`) carry the MCP `destructiveHint` annotation so a client UI can
-prompt a human first.
+prompt a human first. They also refuse unless the server's operator has set
+`FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1` in the PostgreSQL server's environment (see
+[enterprise.md](enterprise.md)); `fractal_ledger_flush` is not affected.
 
 ### Vectorizer (docs/vectorizer-setup.md)
 
 `fractal_vectorizer_create` (installs trigger(s) + backfills the queue),
 `fractal_vectorizer_pause`, `fractal_vectorizer_resume`,
 `fractal_vectorizer_drop` *(irreversible)*, and
-`fractal_vectorizer_process_queue` — the **pull-based** embedding sync: there
+`fractal_vectorizer_process_queue` — the **pull-based** embedding sync (and the read-only `fractal_vectorizer_status`, one row per vectorizer with its state, queue counts and last error): there
 is no background worker; the queue advances only when called, on your
 schedule.
 
-### Admin (4 tools)
+### Admin (5 tools)
 
 | Tool | Purpose |
 | --- | --- |
 | `fractal_version` | `{version, edition}` — the sanity check. |
+| `fractal_config_keys` | Every config key as `{name, type, session_overridable}` (`string`, `int`, `bool` or `enum`), from the SQL function `fractal_config_keys()`. `session_overridable` is false for a reload-scoped key, which needs `ALTER SYSTEM` and a reload. Read-only. |
 | `fractal_config_set` / `fractal_config_get` | Per-key wrappers over the engine's own `fractalsql.*` GUCs (`set_config(..., false)` / `current_setting()` on the server's dedicated connection; engine-key or `fractalsql.`-prefixed spelling). **Documented keys (enforced):** `reasoning_plugin`, `http_url`, `http_model`, `http_allow_plaintext`, `http_embed_url`, `http_embed_model`, `http_think`, `http_think_provider`, `http_native_url`, `http_num_ctx`, `text_to_sql_max_attempts`, `text_to_sql_allowed_statements`, `text_to_sql_use_review`, `enterprise_lib`, `enterprise_require_signature`, `enterprise_ledger_key`, `agent_partial_reasoning_fail` — `http_token` is excluded as a secret and is never set through the MCP boundary. **Scope honesty:** only `agent_partial_reasoning_fail` is a `PGC_USERSET` key that actually holds a session-level set; the reasoning/http keys are reload-scoped (`PGC_SIGHUP`), so postgres itself refuses the session set ("cannot be changed now") and the tool surfaces a clean error redirecting to `fractal_configure_reasoning` (`ALTER SYSTEM SET` + `pg_reload_conf()`) or an operator-side `ALTER SYSTEM SET`, instead of claiming a change took effect. Enterprise-posture keys require `allow_secrets: true` (explicit operator intent — a client UI prompts a human first); superuser-only keys surface the engine's privilege error verbatim. The whole `fractalsql.http_*` family (`http_url`, `http_model`, `http_embed_url`, `http_embed_model`, `http_think`, `http_think_provider`, `http_native_url`, `http_num_ctx`, `http_allow_plaintext`) is `GUC_SUPERUSER_ONLY` in the engine, so a non-superuser session gets that privilege error for those keys on the **get** as well as the set. `destructiveHint`-flagged, and every change is logged with the old and new value (`***` for secrets) — repointing `http_url` silently redirects every later reasoning call on reload. **The `get` half refuses secrets:** `http_token` and `enterprise_ledger_key` are never read back through any MCP tool or resource — check the operator-side `postgresql.conf`/environment that set them. Unset keys return `null`, and values read back via `current_setting` reflect the resolved config-file + reload state for reload-scoped keys. Both tools report `scope` in the result: per-session, this MCP session's dedicated PostgreSQL connection only. |
 | `fractal_configure_reasoning` | Sets the reasoning/embeddings GUCs (`http_url`, `http_embed_url`, `http_model`, `http_embed_model`, `http_allow_plaintext`, `http_think`) via `ALTER SYSTEM SET` + `pg_reload_conf()`. The result explicitly states the change is **queued** (SIGHUP-scoped: effective on the next backend/session), not live. Never touches any enterprise GUC, and accepts no secrets — provider tokens stay in the engine's own config surface. `destructiveHint` is set: repointing `http_url` silently reroutes prompts, so every call is logged with the old and new value. |
 
@@ -713,11 +730,12 @@ What the server does with a request that arrives at the JSON-RPC path:
 | No token, or a token that matches nothing | `401` with `WWW-Authenticate: Bearer realm="fractalsql-mcp"` |
 | A token that was presented but is wrong or expired | `401` with `WWW-Authenticate: Bearer realm="fractalsql-mcp", error="invalid_token"` |
 | A token in the query string instead of the `Authorization` header | `401` — a query string lands in proxy logs and access logs, so it is not accepted |
-| A browser `Origin` header that is not on `FSQL_MCP_ALLOWED_ORIGINS` | `403`, checked **before** the token, so an unapproved origin never reaches the credential check |
+| A browser `Origin` header that is not on `FSQL_MCP_ALLOWED_ORIGINS` | `403`, checked **before** the token, so an unapproved origin never reaches the credential check; a loopback origin is `localhost`, `[::1]` or a literal address in `127.0.0.0/8` — a name that merely begins with `127.` is not one |
 | A chunked request body | `411` — send a `Content-Length` instead |
 | A declared `Content-Length` over 32 MB | `413` |
 | A repeated or non-numeric `Content-Length` | `400` — the framing is ambiguous and is never resolved in favor of one reading |
-| `GET /healthz` and `GET /readyz` | served without a token |
+| A repeated `Host`, `Authorization`, `Origin`, `Content-Type` or `Mcp-*` header | `400` — two values for a header the server acts on are never resolved in favour of one |
+| `GET /healthz` and `GET /readyz` | served without a token; `/readyz` runs its engine probe at most once every 5 seconds and answers the cached result in between |
 
 `FSQL_MCP_ALLOWED_ORIGINS` is a comma-separated list of browser origins
 this deployment accepts. The loopback origins (`http://localhost:*`,
@@ -971,7 +989,7 @@ narrow, compose-only exception to the least-privilege advice above.
 | `error_class: "connectivity"` | The DB, or the upstream LLM provider inside the engine, was unreachable/timed out. Not the caller's problem — retry later or alert the operator. |
 | Agent result whose `answer` starts with `reasoning_step_failed:` (the C-native `fractal_search_agent`/`fractal_rag_agent`) | Not an error: the agent's computed data half is real and complete, its LLM step failed (provider down/misconfigured — see the `connectivity` row). `fractalsql.agent_partial_reasoning_fail` is on (this server sets it per session; `FSQL_MCP_AGENT_PARTIAL=false` restores the raising behavior). Re-run later for the reasoned half, or check whether you're treating the LLM column as data. |
 | Agent result whose `rationale`/`triage_summary`/`reason`/`analysis` field is `null` while a companion `reasoning_step_failed` field carries the error (the thirteen PL/pgSQL agents) | Not an error: same posture as the row above -- the computed data half is real and complete, the LLM step failed. The two-column contract is the relational form of the `{"<llm>":null,"reasoning_step_failed":"<error>"}` JSON shape, so test the LLM field for `null` rather than sniffing a marker prefix. A missing reasoning plugin is a setup mistake and raises even with the flag on. |
-| `version skew` warning in the server log | The MCP server ships against `fractalsql` `2.0.22` and the target DB reports another `fractal_version()`. Surface mismatches are possible — check the docs' compat matrix (warning only; not a startup failure). |
+| `version skew` warning in the server log | The MCP server ships against `fractalsql` `2.0.23` and the target DB reports another `fractal_version()`. Surface mismatches are possible — check the docs' compat matrix (warning only; not a startup failure). |
 | `server busy` | A concurrency cap was hit (`FSQL_MCP_MAX_CONCURRENT_*`). Retry later; the call was never dispatched. |
 | `fractal_detect_collapse` returns null | No search has run yet on this session, or Diversify is off. Run a search (with Diversify enabled) first. |
 | DFA/box-count results that look like noise | Under-sized input: DFA wants ~24+ points (16 documented), box-counting hundreds, morphology ~256+. The tool descriptions carry the empirically-verified minimums. |

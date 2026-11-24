@@ -42,7 +42,7 @@ docker compose up -d
 **Quick test** (works with no model; base Sniper search needs no LLM):
 ```bash
 docker compose exec postgres psql -U postgres -d fractalsql_demo -c \
-  "SELECT fractal_search(ARRAY[0.6, 0.8, 0.0]::float8[], iterations => 100);"
+  "SELECT fractal_sfs_converge(ARRAY[0.6, 0.8, 0.0]::float8[], iterations => 100);"
 ```
 
 Confirm both extensions loaded:
@@ -81,7 +81,7 @@ dormant-path NOTICE. `run_demo.sh --help` lists the flags
 `response-modes.sql`, which is skipped by default — see
 [Response modes](../demo/README.md#response-modes) for why it needs
 separate treatment. On this image you should see extension version
-**2.0.22**.
+**2.0.23**.
 
 **Alternative: Docker Model Runner (Docker Desktop only).** Skip the
 `ollama` container and use Docker Desktop's built-in Model Runner instead:
@@ -147,7 +147,7 @@ first start** (gcc image + `make`, per the plugin's plain-Makefile build
 standard; see [docs/mcp-plugin.md](mcp-plugin.md) for
 the full tool catalog and client config). The demo's `mcp` service reuses
 the demo database and credentials and exposes exactly four pinned tools —
-`fractal_search`, `fractal_reason`, `fractal_agent_data_analyst`, and
+`fractal_sfs_converge`, `fractal_reason`, `fractal_agent_data_analyst`, and
 `fractal_agent_diverse_portfolios` (the last one deliberately so you can see
 a real enterprise-tier call's clean "enterprise tier not loaded" behavior on
 this Community-only install). The same binary speaks stdio (the
@@ -156,7 +156,7 @@ pumps JSON-RPC into it:
 
 ```bash
 # Discovery (no LLM required) -- the one-liner (spec 9.2):
-docker compose exec mcp /demo/mcp/call-tool.sh fractal_search '{"query":[0.6,0.8,0.0]}'
+docker compose exec mcp /demo/mcp/call-tool.sh fractal_sfs_converge '{"query":[0.6,0.8,0.0]}'
 
 # The horizontal catch-all agent (an LLM-reasoned answer over real demo data).
 # Needs a reasoning model configured first -- run step 2 "Cognition" of the

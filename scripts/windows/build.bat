@@ -9,8 +9,9 @@ REM
 REM Builds fractalsql.dll against a single target PostgreSQL major on
 REM Windows using the MSVC toolchain: static CRT (/MT), whole-program
 REM optimization (/GL), static LuaJIT archive — zero runtime dependency
-REM on the Visual C++ Redistributable and zero dependency on libluajit
-REM at load time.
+REM on the Visual C++ Redistributable for fractalsql.dll itself and zero
+REM dependency on libluajit at load time. (The separate reasoning plugin DLL
+REM is built /MD and does need the Redistributable; the MSI checks for it.)
 REM
 REM Prerequisites
 REM   * Visual Studio Build Tools (cl.exe on PATH — invoke from a

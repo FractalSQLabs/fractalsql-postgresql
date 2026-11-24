@@ -62,6 +62,21 @@ ll_free(void *opaque)
  * GENERATE (default), trigger=2 tests REVIEW. */
 static int call_count = 0;
 
+/* Where the trigger file lives follows the harness that writes it. The POSIX
+ * harness writes /tmp/fractalsql_bt_evil_trigger_call.txt; the Windows
+ * harness writes it into the cluster's own data directory, which is the
+ * backend's working directory, so it is read here by bare relative name (the
+ * same contract the Windows mock and nonterminating plugins use). Reading
+ * the POSIX path on Windows would instead find whatever another host's
+ * harness left in C:\tmp -- and a trigger value that is neither 1 nor 2
+ * (the other hosts write -1 for "never trigger") makes this plugin never
+ * lie at all, which turns the gate into a false failure. */
+#ifdef _WIN32
+#define TRIGGER_FILE "fractalsql_bt_evil_trigger_call.txt"
+#else
+#define TRIGGER_FILE "/tmp/fractalsql_bt_evil_trigger_call.txt"
+#endif
+
 static int
 ll_generate(void *u, const char *p, size_t pl,
             char **response_out, size_t *response_len_out,
@@ -71,7 +86,7 @@ ll_generate(void *u, const char *p, size_t pl,
     call_count++;
 
     int trigger = 1;
-    FILE *tf = fopen("/tmp/fractalsql_bt_evil_trigger_call.txt", "r");
+    FILE *tf = fopen(TRIGGER_FILE, "r");
     if (tf != NULL)
     {
         if (fscanf(tf, "%d", &trigger) != 1)

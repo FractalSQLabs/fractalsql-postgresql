@@ -106,6 +106,15 @@ mock_generate(void *u, const char *p, size_t pl,
 
     char  sql[8192] = "SELECT 1";
     FILE *f = fopen(MOCK_SQL_FILE, "r");
+    if (f == NULL)
+    {
+        /* The reply file is missing. The harness writes it moments before the
+         * call and removes it when the run ends, so a run that overlaps this
+         * one can take it away. Say so on stderr: the default answer below is
+         * a valid statement, and without this line a gate that sees it cannot
+         * tell a missing reply file from a real reply. */
+        fprintf(stderr, "mock_reasoning_plugin: the canned reply file %s could not be opened -- answering the default\n", MOCK_SQL_FILE);
+    }
     if (f != NULL)
     {
         size_t n = fread(sql, 1, sizeof(sql) - 1, f);

@@ -82,7 +82,7 @@ Pick by the problem shape, not by the function name.
 | "Rebalance, and compare to the nearest historical allocation?" | `rebalance_sibling` | optimizer + trajectory search → LLM rationale | ✓ |
 | "Give me several distinct good portfolios, not just one?" (enterprise) | `diverse_portfolios` | multimodal optimizer → LLM tradeoff summary | ✓ |
 | "Which sub-agent should handle this incoming task?" | `route_task` | nearest-capability search + budget accounting → LLM rationale | ✓ |
-| "Which node should this workload land on (with vector refinement)?" | `schedule_workload` | `fractal_search` refine + nearest node → LLM rationale | ✓ |
+| "Which node should this workload land on (with vector refinement)?" | `schedule_workload` | `fractal_sfs_converge` refine + nearest node → LLM rationale | ✓ |
 | "Should I block this proposed action (is it near a known-bad state)?" | `outlier_intercept` | distance-to-bad-state safety barrier → LLM justification | ✓ |
 | "Triage a patient against a cohort + baseline→current drift" | `patient_deterioration_triage` | cohort search + trajectory drift → LLM triage | ✓ |
 | "Ask a natural-language question over my tables" | `data_analyst` | NL→SQL→execute → LLM analysis | ✓ |
@@ -116,7 +116,7 @@ Pick by the problem shape, not by the function name.
 > separate trailing **`reasoning_step_failed` (text) column** carrying the
 > plugin's own error message. The C-native `fractal_search_agent`/
 > `fractal_rag_agent` do the same in their `answer` column (with
-> `source_doc_ids` intact). Only the reasoning step is softened:
+> `source_row_ids` intact). Only the reasoning step is softened:
 > embed/search/analytic failures still raise, and `fractal_reason`,
 > `fractal_text_to_sql`, and `fractal_sql_agent` **keep raising** even with
 > the flag on — the raise is their result, or it preempts the data half.
@@ -623,7 +623,7 @@ warmup table with enough varied vectors to fill the window, or
 
 Use it for Sovereign-Edge node scheduling, or any "refine a task vector, then
 find the nearest capable node" workflow. Like [route_task](#route-task--fractal_agent_route_task)
-but with a `fractal_search` refinement step that route_task lacks: the "sniper
+but with a `fractal_sfs_converge` refinement step that route_task lacks: the "sniper
 search" in the abstract search space before the nearest-node lookup.
 
 **Inputs**
@@ -634,12 +634,12 @@ search" in the abstract search space before the nearest-node lookup.
 | `node_table` | `text` | — | your node/capability table |
 | `node_emb_col` | `text` | — | the embedding column in that table |
 | `node_id_col` | `text` | — | the column to return as the node id |
-| `iterations` | `int` | `30` | `fractal_search` refinement iterations |
-| `population` | `int` | `50` | `fractal_search` population size |
+| `iterations` | `int` | `30` | `fractal_sfs_converge` refinement iterations |
+| `population` | `int` | `50` | `fractal_sfs_converge` population size |
 | `k` | `int` | `5` | how many nearest nodes |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
 
-**How it works.** (1) `fractal_search(task_vec, iterations, population, 2)`:
+**How it works.** (1) `fractal_sfs_converge(task_vec, iterations, population, 2)`:
 refines the task vector (diffusion factor 2). (2)
 `fractal_search_telemetry(node_table, node_emb_col, refined, 1)` for the nearest
 node. (3) Resolves the returned `ctid` `doc_id` to the named node id via a
@@ -1087,7 +1087,7 @@ mirror the C in `src/fractalsql.c` exactly (argument order, types, defaults, and
 ### `fractal_search_agent`
 **End-to-End Synthesis Agent**
 
-Embeds a query, performs a diverse Scout search, and synthesizes the results into a reasoned answer.
+Embeds a query, finds the nearest rows (a diverse Scout search, or `fractal_search` through an index when `fractalsql.agent_use_index` allows it; see [api-discovery.md](api-discovery.md)), and synthesizes the results into a reasoned answer. `meta_filter` limits the rows that are searched.
 
 `vector_col` must be `float8[]` or `fractal_vector`, and its element width must
 match the configured embedding model's output dimension (768 for
@@ -1103,8 +1103,8 @@ the corpus scan) and fetches the matched rows' non-vector columns as a JSON
 array. That compact, LLM-readable context is what `fractal_reason` consumes.
 (The raw Scout result, by contrast, contains the top-k *embeddings*,
 useless to an LLM and large enough, at `pop_size × dim` floats, to exceed a
-local model's context window and fail the chat call.) `source_doc_ids` are the
-0-based positions of the retrieved rows in the corpus scan.
+local model's context window and fail the chat call.) `source_row_ids` are the rows' real keys.
+Text cells longer than `fractalsql.agent_context_row_bytes` (default 8192 characters; 0 means no limit) are cut, with a marker saying how much was left out, so the model is never given a silently shortened value.
 
 ```sql
 fractal_search_agent(
@@ -1112,13 +1112,17 @@ fractal_search_agent(
     table_name  text,
     vector_col  text,
     pop_size    int4 DEFAULT 50,
-    iterations  int4 DEFAULT 15
+    iterations  int4 DEFAULT 15,
+    meta_filter text DEFAULT '{}'
 ) RETURNS fractal_search_agent_result
 LANGUAGE C VOLATILE
 ```
 - `answer`: The synthesized text response from the LLM.
-- `source_doc_ids`: The indices of the rows used as context.
-- `execution_time_ms`: Total pipeline latency.
+- `execution_time_ms`: Total pipeline latency, measured.
+- `source_row_ids`: The retrieved rows' primary keys (the ctid when the table has no single-column primary key), best first.
+- `used_index`: `true` when the nearest rows came from an index, `false` for the Scout search.
+- `context_cut`: `{"cells": N, "rows": M}`: text cells cut to `agent_context_row_bytes`, and matched rows left out by the 64-row cap.
+- `meta_filter` is a flat JSON object of `column: value` pairs, for example `{"parent_id": 7}`. Only rows where every named column equals its value are searched; `null` matches NULL. The values are quoted as literals; a filter that is not an object, names a column the table does not have, or matches no row is an error, never ignored. Through an index the matching keys are passed to `fractal_search` as its `ids` option (up to 100000 keys, otherwise the exact scan runs).
 
 ### `fractal_sql_agent`
 **Self-Correcting SQL Agent**
@@ -1247,7 +1251,7 @@ through Brent's cycle detector, so a loop is flagged when it closes:
 ### `fractal_rag_agent`
 **Hybrid Retrieve-Reason Agent**
 
-Embeds a query, Scout-searches a corpus, then reasons over the retrieved context to produce a single answer: a focused, single-turn RAG pattern.
+Embeds a query, finds the nearest rows of a corpus (a Scout search, or through an index when `fractalsql.agent_use_index` allows it), then reasons over the retrieved context to produce a single answer: a focused, single-turn RAG pattern.
 
 Like `fractal_search_agent`, the reasoning step consumes the **retrieved rows'
 content** (their non-vector columns, fetched by `ctid`) rather than the raw
@@ -1266,9 +1270,11 @@ fractal_rag_agent(
 LANGUAGE C VOLATILE
 ```
 
-`meta_filter` is reserved for a future metadata `WHERE` filter; it is
-currently accepted but not yet applied to the search.
+`meta_filter` is a flat JSON object of `column: value` pairs; only rows where every column equals its value are searched (see `fractal_search_agent` for the rules).
 - `answer`: The synthesized text response from the LLM.
+- `source_row_ids`: The retrieved rows' primary keys (the ctid without a single-column primary key), best first.
+- `used_index`: `true` when the nearest rows came from an index.
+- `context_cut`: `{"cells": N, "rows": M}`, as for `fractal_search_agent`.
 
 ---
 

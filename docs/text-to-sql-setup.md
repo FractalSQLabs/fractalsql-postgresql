@@ -104,5 +104,5 @@ FractalSQL includes a comprehensive test suite to ensure the pipeline's robustne
 ## Known Limitations
 
 - **Distinct-Value Sampling**: The current version does not sample enum-like columns (e.g., `'Completed'` vs `'completed'`) to help the LLM with value normalization.
-- **Table Ranking**: For extremely large schemas, `fractal_search`-based table subset ranking is planned to replace the current linear auto-discovery.
+- **Table Ranking**: For extremely large schemas, `fractal_sfs_converge`-based table subset ranking is planned to replace the current linear auto-discovery.
 - **Schema Caps**: `fractal_schema_context()` caps explicit `table_names[]` at 512 entries to bound SPI overhead.

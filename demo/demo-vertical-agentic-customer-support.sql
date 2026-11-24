@@ -98,7 +98,7 @@ FROM fractal_agent_recall_hybrid(
 );
 
 -- 7. Repulsion-guided intervention
--- Use fractal_search to find the most diverse (non-redundant) recovery strategies
+-- Use fractal_sfs_converge to find the most diverse (non-redundant) recovery strategies
 SELECT * FROM fractal_search_explore(
     'customer_sessions', 'state_vector',
     ARRAY[0.8, 0.2, 0.1],

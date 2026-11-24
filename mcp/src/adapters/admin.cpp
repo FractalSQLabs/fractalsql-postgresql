@@ -34,13 +34,14 @@ namespace fsqlmcp
     // spelling is accepted too). http_token is deliberately absent: it is a
     // secret that is never set or read back through MCP; it belongs in the
     // operator's postgresql.conf or environment.
-    static const std::array<const char*, 17> kKnownKeys{
+    static const std::array<const char*, 22> kKnownKeys{
         "reasoning_plugin", "http_url", "http_model", "http_allow_plaintext",
         "http_embed_url", "http_embed_model", "http_think", "http_think_provider",
-        "http_native_url", "http_num_ctx", "text_to_sql_max_attempts",
+        "http_native_url", "http_response_mode", "http_num_ctx", "text_to_sql_max_attempts",
         "text_to_sql_allowed_statements", "text_to_sql_use_review",
         "enterprise_lib", "enterprise_require_signature", "enterprise_ledger_key",
-        "agent_partial_reasoning_fail"
+        "ledger_retention", "agent_partial_reasoning_fail",
+        "agent_use_index", "agent_index_min_rows", "agent_context_row_bytes"
     };
 
     // Secrets: enterprise_ledger_key (the HMAC key) and http_token (the provider
@@ -65,7 +66,7 @@ namespace fsqlmcp
     {
         const std::string bare = asBareKey( k );
         return bare == "enterprise_lib" || bare == "enterprise_require_signature" ||
-               bare == "enterprise_ledger_key";
+               bare == "enterprise_ledger_key" || bare == "ledger_retention";
     }
 
     // Accepts either spelling; the engine's GUC is always the fractalsql.-prefixed one.
@@ -184,12 +185,14 @@ namespace fsqlmcp
             { StrEnum( "key", true, "One of the documented config keys (enforced): reasoning_plugin, "
                                     "http_url, http_model, http_allow_plaintext, http_embed_url, "
                                     "http_embed_model, http_think, http_think_provider, http_native_url, "
-                                    "http_num_ctx, text_to_sql_max_attempts, text_to_sql_allowed_statements, "
+                                    "http_response_mode, http_num_ctx, text_to_sql_max_attempts, text_to_sql_allowed_statements, "
                                     "text_to_sql_use_review, enterprise_lib, enterprise_require_signature, "
-                                    "enterprise_ledger_key, agent_partial_reasoning_fail. "
+                                    "enterprise_ledger_key, ledger_retention, agent_partial_reasoning_fail, agent_use_index, "
+                                    "agent_index_min_rows, agent_context_row_bytes. "
                                     "SCOPE, per key (the engine's own GUC contexts, from src/fractalsql.c): "
-                                    "agent_partial_reasoning_fail is PGC_USERSET (any user, session-settable); "
-                                    "enterprise_ledger_key is PGC_SUSET (superuser only -- the server's privilege "
+                                    "agent_partial_reasoning_fail, agent_use_index (off, on or auto), agent_index_min_rows and "
+                                    "agent_context_row_bytes are PGC_USERSET (any user, session-settable); "
+                                    "enterprise_ledger_key and ledger_retention are PGC_SUSET (superuser only -- the server's privilege "
                                     "error surfaces verbatim); the other 15 are PGC_SIGHUP (reload-scoped) and are "
                                     "changed server-side -- postgres refuses a session-level set of those "
                                     "('cannot be changed now'), so this tool writes them with ALTER SYSTEM SET + "
@@ -200,7 +203,7 @@ namespace fsqlmcp
               Str( "value", true, "The value to set (GUC spelling: on/off for booleans; integers as integers)." ),
               Bool_( "allow_secrets", false,
                      "Must be true to set an enterprise-posture key (enterprise_lib, "
-                     "enterprise_require_signature, enterprise_ledger_key) through the MCP boundary: an "
+                     "enterprise_require_signature, enterprise_ledger_key, ledger_retention) through the MCP boundary: an "
                      "explicit operator intent, never a default.", false ) },
             std::nullopt, true, false,
             [&db]( const Json& a, CallCtx& ctx ) {
@@ -216,10 +219,11 @@ namespace fsqlmcp
                     throw ToolError( ErrorClass::Schema,
                         "unknown config key '" + key + "': fractal_config_set accepts the documented "
                         "keys (reasoning_plugin, http_url, http_model, http_allow_plaintext, http_embed_url, "
-                        "http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, "
+                        "http_embed_model, http_think, http_think_provider, http_native_url, http_response_mode, http_num_ctx, "
                         "text_to_sql_max_attempts, text_to_sql_allowed_statements, text_to_sql_use_review, "
                         "enterprise_lib, enterprise_require_signature, enterprise_ledger_key, "
-                        "agent_partial_reasoning_fail); the fractalsql.-prefixed spelling is accepted too — "
+                        "ledger_retention, agent_partial_reasoning_fail, agent_use_index, agent_index_min_rows, "
+                        "agent_context_row_bytes); the fractalsql.-prefixed spelling is accepted too — "
                         "and http_token is never set through the MCP boundary" );
                 // The config-writes switch: a key the current mode does not
                 // allow is refused BEFORE anything is changed.
@@ -306,10 +310,10 @@ namespace fsqlmcp
             } } );
         t.back().description = "Sets a config key to a value (the PostgreSQL column's wrapper over the engine's "
             "fractalsql.* GUCs for the documented keys: reasoning plugin path, http_url/http_embed_url, models, "
-            "think knobs, text-to-sql keys, agent partial-failure mode). SCOPE honesty by VERIFICATION: the tool "
-            "performs the set and then READS THE VALUE BACK -- 'effective' is a checked fact, never a claim. Two of "
-            "the seventeen keys are session-settable (agent_partial_reasoning_fail, PGC_USERSET, any user; "
-            "enterprise_ledger_key, PGC_SUSET, superuser only -- the server's privilege error surfaces verbatim) "
+            "think knobs, text-to-sql keys, agent partial-failure mode, the agents' index mode and budgets). SCOPE honesty by VERIFICATION: the tool "
+            "performs the set and then READS THE VALUE BACK -- 'effective' is a checked fact, never a claim. Of "
+            "the twenty-one keys, six are session-settable (agent_partial_reasoning_fail, agent_use_index, agent_index_min_rows and agent_context_row_bytes, PGC_USERSET, any user; "
+            "enterprise_ledger_key and ledger_retention, PGC_SUSET, superuser only -- the server's privilege error surfaces verbatim) "
             "and are changed for THIS session only. The other fifteen are PGC_SIGHUP: postgres refuses a "
             "session-level set of those ('cannot be changed now'), so this tool writes them the way postgres "
             "changes them -- ALTER SYSTEM SET + pg_reload_conf() -- and answers 'queued', because that is what "
@@ -352,6 +356,16 @@ namespace fsqlmcp
             "think_provider, native_url, num_ctx, allow_plaintext) is superuser-only in the engine -- a "
             "non-superuser session gets the server's privilege error verbatim for those keys, exactly as it "
             "does for the other superuser-only settings.";
+
+        t.push_back( ToolSpec{ "fractal_config_keys", "admin", ToolClass::Cheap,
+            {}, std::nullopt, false, true,
+            [&db]( const Json&, CallCtx& ) {
+                return Json{ { "keys", Json::parse( db.callScalar( "SELECT fractal_config_keys()", {} ).value_or( "[]" ) ) } };
+            } } );
+        t.back().idempotentHint = true;
+        t.back().description = "Every config key the engine knows, as {name, type, session_overridable}: string, int, bool or enum "
+            "(agent_use_index is an enum: off, on, auto). session_overridable is true for a key fractal_config_set can change in a session, "
+            "false for a reload-scoped key that needs ALTER SYSTEM and a reload. Lets a caller discover the knobs instead of hard-coding them.";
 
         t.push_back( ToolSpec{ "fractal_configure_reasoning", "admin", ToolClass::Cheap,
             { Str("provider_url",false,"Chat endpoint URL (e.g. http://127.0.0.1:11434/v1/chat/completions for ollama, or an OpenAI-compatible /v1/chat/completions)."),

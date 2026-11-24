@@ -39,7 +39,7 @@ WITH q AS (
     SELECT ARRAY(SELECT random() * 2 - 1 FROM generate_series(1, 8))::float8[] AS query
 ),
 r AS (
-    SELECT query, fractal_search(query, 50, 50, 2) AS best FROM q
+    SELECT query, fractal_sfs_converge(query, 50, 50, 2) AS best FROM q
 )
 SELECT
     8 AS dim,
@@ -55,7 +55,7 @@ WITH q AS (
     SELECT ARRAY(SELECT random() * 2 - 1 FROM generate_series(1, 32))::float8[] AS query
 ),
 r AS (
-    SELECT query, fractal_search(query, 50, 50, 2) AS best FROM q
+    SELECT query, fractal_sfs_converge(query, 50, 50, 2) AS best FROM q
 )
 SELECT
     32 AS dim,
@@ -71,7 +71,7 @@ WITH q AS (
     SELECT ARRAY(SELECT random() * 2 - 1 FROM generate_series(1, 128))::float8[] AS query
 ),
 r AS (
-    SELECT query, fractal_search(query, 50, 50, 2) AS best FROM q
+    SELECT query, fractal_sfs_converge(query, 50, 50, 2) AS best FROM q
 )
 SELECT
     128 AS dim,

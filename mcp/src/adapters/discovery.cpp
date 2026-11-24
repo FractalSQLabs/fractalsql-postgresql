@@ -46,17 +46,17 @@ namespace fsqlmcp
     {
         std::vector<ToolSpec> t;
 
-        // Sniper-mode convergence: fractal_search(query float8[], iterations int4=30,
+        // Sniper-mode convergence: fractal_sfs_converge(query float8[], iterations int4=30,
         // population_size int4=50, diffusion_factor int4=2) RETURNS float8[],
         // the best point itself.
-        t.push_back( ToolSpec{ "fractal_search", "discovery", ToolClass::Cheap,
+        t.push_back( ToolSpec{ "fractal_sfs_converge", "discovery", ToolClass::Cheap,
             { Vec("query", true, "Query vector."),
               Int("iterations", false, "SFS iterations.", 30),
               Int("population_size", false, "SFS population size.", 50),
               Int("diffusion_factor", false, "SFS diffusion factor.", 2) },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
-                auto call = pgSelectCall( "fractal_search", {
+                auto call = pgSelectCall( "fractal_sfs_converge", {
                     PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "query" ), "query" ) ),
                     bindIf( a, "iterations", "int4" ), bindIf( a, "population_size", "int4" ),
                     bindIf( a, "diffusion_factor", "int4" ) }, false );
@@ -67,14 +67,14 @@ namespace fsqlmcp
             "to a query over the unit box — returns the best point as a plain JSON array of numbers. Pure "
             "convergence only on Postgres: use fractal_search_explore for diverse multi-result discovery.";
 
-        t.push_back( ToolSpec{ "fractal_search_debug", "discovery", ToolClass::Cheap,
+        t.push_back( ToolSpec{ "fractal_sfs_converge_debug", "discovery", ToolClass::Cheap,
             { Vec("query", true, "Query vector."),
               Int("iterations", false, "SFS iterations.", 30),
               Int("population_size", false, "SFS population size.", 50),
               Int("diffusion_factor", false, "SFS diffusion factor.", 2) },
             std::nullopt, false, true,
             [&db]( const Json& a, CallCtx& ) {
-                auto call = pgSelectCall( "fractal_search_debug", {
+                auto call = pgSelectCall( "fractal_sfs_converge_debug", {
                     PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "query" ), "query" ) ),
                     bindIf( a, "iterations", "int4" ), bindIf( a, "population_size", "int4" ),
                     bindIf( a, "diffusion_factor", "int4" ) }, false );
@@ -82,9 +82,138 @@ namespace fsqlmcp
                 if( !r ) return Json( nullptr );
                 return Json::parse( *r );   // jsonb straight from libpq
             } } );
-        t.back().description = "Same Sniper convergence as fractal_search with a full trajectory trace: {dim, "
+        t.back().description = "Same Sniper convergence as fractal_sfs_converge with a full trajectory trace: {dim, "
             "generations, population_size, best_point, best_fit, best_fit_per_gen, paths}. best_point is a plain "
             "JSON array of numbers.";
+
+        // Indexed nearest-neighbour search: fractal_search(table, col, query, k, options) -> TABLE(doc_id, distance, scan_pos).
+        t.push_back( ToolSpec{ "fractal_search", "discovery", ToolClass::Cheap,
+            { Str("table_name", true, "Table to search."), Str("vector_col", true, "Embedding column."),
+              Vec("query", true, "Query vector."), Int("k", false, "Neighbors to return.", 5),
+              Obj("options", false, "{index:string, nprobe:int, rerank:int, use_index:bool=true, verify:bool=true, id_col:string='id', ids:int[] (restrict the search to these keys)}", Json::object() ),
+              RowLimit() },
+            std::nullopt, false, true,
+            [&db,rowCfg]( const Json& a, CallCtx& ) {
+                BoundedCount bc = boundedCount( a, "k", 5, rowCfg );
+                const std::string opts = a.contains( "options" ) && a.at( "options" ).is_object() ? a.at( "options" ).dump() : "{}";
+                auto call = pgSelectCall( "fractal_search", {
+                    PgBind::s( "text", a.at( "table_name" ).get<std::string>() ),
+                    PgBind::s( "text", a.at( "vector_col" ).get<std::string>() ),
+                    PgBind::s( "float8[]", vectors::vectorParamToText( a.at( "query" ), "query" ) ),
+                    PgBind::s( "int4", std::to_string( bc.passed ) ),
+                    PgBind::s( "jsonb", opts ) }, true );
+                return annotateRows( db.callRows( call.first, call.second ), bc );
+            } } );
+        t.back().idempotentHint = true;
+        t.back().description = "Indexed approximate K-nearest real table rows to a query vector: [{doc_id, distance, scan_pos}]. "
+            "Probes the IVF index built by fractal_index_create (default nprobe calibrated at build time) and VERIFIES every "
+            "candidate against the stored vectors, so distances are exact cosine distances, not approximations; rows added "
+            "after the build are scanned exactly and deleted rows are dropped. Falls back to the exact scan when the table has "
+            "no index. Rows are named by an integer key column (option id_col, default id), so doc_id is that key. The ids option "
+            "restricts the search to a set of keys (for example to_jsonb(array_agg(id)) over an ordinary WHERE): a short set is scanned "
+            "exactly, a long one goes through the index and is filtered. Does not apply Diversify repulsion: use "
+            "fractal_search_telemetry for stateful diversity.";
+
+        t.push_back( ToolSpec{ "fractal_index_create", "discovery", ToolClass::Expensive,
+            { Str("table_name", true, "Table to index."), Str("vector_col", true, "Embedding column."),
+              Obj("options", false, "{name:string, id_col:string='id', vector_format:INT8|INT4|FP16|FP32=INT8, nlist:int, pca_dim:int, target_recall:number=0.95, calibration_samples:int=200}", Json::object() ) },
+            std::nullopt, true, false,   /* persists the index: refused in read-only mode */
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string opts = a.contains( "options" ) && a.at( "options" ).is_object() ? a.at( "options" ).dump() : "{}";
+                auto call = pgSelectCall( "fractal_index_create", {
+                    PgBind::s( "text", a.at( "table_name" ).get<std::string>() ),
+                    PgBind::s( "text", a.at( "vector_col" ).get<std::string>() ),
+                    PgBind::s( "jsonb", opts ) }, false );
+                return Json::parse( db.callScalar( call.first, call.second ).value_or( "null" ) );
+            } } );
+        t.back().description = "Builds an IVF index (k-means cells, INT8/INT4 residual codes on a PCA basis, or FP16/FP32) over an "
+            "embedding column and stores it in the database (fractal_index_meta / fractal_index_cells). Needs an integer key "
+            "column (id_col). Samples rows to calibrate the default nprobe to target_recall. Returns {name, format, rows, nlist, "
+            "pca_dim, generation, bytes, calibrated_nprobe}. Refuses an existing name: use fractal_index_rebuild.";
+
+        t.push_back( ToolSpec{ "fractal_index_ensure", "discovery", ToolClass::Expensive,
+            { Str("table_name", true, "Table to index."), Str("vector_col", true, "Embedding column."),
+              Obj("options", false, "Used only when it builds or rebuilds: same as fractal_index_create's options.", Json::object() ) },
+            std::nullopt, true, false,   /* may build or change an index: refused in read-only mode */
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string opts = a.contains( "options" ) && a.at( "options" ).is_object() ? a.at( "options" ).dump() : "{}";
+                auto call = pgSelectCall( "fractal_index_ensure", {
+                    PgBind::s( "text", a.at( "table_name" ).get<std::string>() ),
+                    PgBind::s( "text", a.at( "vector_col" ).get<std::string>() ),
+                    PgBind::s( "jsonb", opts ) }, false );
+                return Json::parse( db.callScalar( call.first, call.second ).value_or( "null" ) );
+            } } );
+        t.back().description = "Leaves the index on a table and column fit to use, in one call: builds it when missing (created), folds in the "
+            "added rows when that is all that is needed (refreshed), rebuilds after more than a quarter of the rows were added or a fifth "
+            "deleted (rebuilt), and otherwise changes nothing (unchanged). Returns {name, action, status, generation, rows}. For a setup script "
+            "or a scheduled job; a search never builds or changes an index.";
+
+        t.push_back( ToolSpec{ "fractal_index_rebuild", "discovery", ToolClass::Expensive,
+            { Str("name", true, "Index name.") }, std::nullopt, true, false,
+            [&db]( const Json& a, CallCtx& ) {
+                auto call = pgSelectCall( "fractal_index_rebuild", { PgBind::s( "text", a.at( "name" ).get<std::string>() ) }, false );
+                return Json::parse( db.callScalar( call.first, call.second ).value_or( "null" ) );
+            } } );
+        t.back().description = "Full re-cluster from the table's current rows with the options the index was created with, as a new "
+            "generation switched in atomically (readers never see a partial index). Replaces the previous generation.";
+
+        t.push_back( ToolSpec{ "fractal_index_drop", "discovery", ToolClass::Cheap,
+            { Str("name", true, "Index name.") }, std::nullopt, true, false,
+            [&db]( const Json& a, CallCtx& ) {
+                auto call = pgSelectCall( "fractal_index_drop", { PgBind::s( "text", a.at( "name" ).get<std::string>() ) }, false );
+                return Json{ { "dropped", db.callScalar( call.first, call.second ).value_or( "f" ) == "t" } };
+            } } );
+        t.back().description = "PERMANENT: deletes the index's stored cells and metadata (the table and its vectors are untouched; "
+            "fractal_search falls back to the exact scan).";
+
+        t.push_back( ToolSpec{ "fractal_index_info", "discovery", ToolClass::Cheap,
+            { Str("name", true, "Index name.") }, std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                auto call = pgSelectCall( "fractal_index_info", { PgBind::s( "text", a.at( "name" ).get<std::string>() ) }, false );
+                return Json::parse( db.callScalar( call.first, call.second ).value_or( "null" ) );
+            } } );
+        t.back().idempotentHint = true;
+        t.back().description = "Index format, dimension, cells, rows indexed vs now, delta/stale flags, calibrated default nprobe with "
+            "its recall estimates, and the last search's statistics in this backend session (used_index, rows_scanned, cells_probed). "
+            "Also a status (ready, stale, degraded, empty or orphaned) and an advice list: for example 'refresh: 60 rows were added since the "
+            "build', 'rebuild: 30% of the rows were deleted', or 'the build's calibration reached recall 0.63 against a target of 0.95'.";
+
+        t.push_back( ToolSpec{ "fractal_index_list", "discovery", ToolClass::Cheap,
+            {}, std::nullopt, false, true,
+            [&db]( const Json&, CallCtx& ) {
+                const auto rows = db.callScalar( "SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb)::text FROM fractal_index_list() t", {} ).value_or( "[]" );
+                return Json{ { "indexes", Json::parse( rows ) } };
+            } } );
+        t.back().idempotentHint = true;
+        t.back().description = "The catalog: one entry per index with name, table_name, vector_col, format, dim, rows indexed, rows_now, stale, "
+            "status (ready, stale, degraded, empty or orphaned) and generation. An empty list means no index has been built in this database.";
+
+        t.push_back( ToolSpec{ "fractal_index_candidates", "discovery", ToolClass::Cheap,
+            { Str("table_name", true, "Table the index covers."), Str("vector_col", true, "Embedding column."),
+              Vec("query", true, "Query vector."),
+              Obj("options", false, "{near:int=6, per_cell:int=1, index:string}") },
+            std::nullopt, false, true,
+            [&db]( const Json& a, CallCtx& ) {
+                const std::string opts = a.contains( "options" ) && a.at( "options" ).is_object() ? a.at( "options" ).dump() : "{}";
+                const auto rows = db.callScalar(
+                    "SELECT coalesce(to_json(fractal_index_candidates($1::text, $2::text, $3::float8[], $4::jsonb)), '[]'::json)::text",
+                    { a.at( "table_name" ).get<std::string>(), a.at( "vector_col" ).get<std::string>(),
+                      vectors::vectorParamToText( a.at( "query" ), "query" ), opts } ).value_or( "[]" );
+                return Json{ { "candidates", Json::parse( rows ) } };
+            } } );
+        t.back().idempotentHint = true;
+        t.back().description = "The row keys a Scout pass should look at: every row of the near nearest cells of the index plus per_cell representatives from "
+            "the others, plus the rows newer than the index. A shortlist, not an answer: the distances are not computed here.";
+
+        t.push_back( ToolSpec{ "fractal_index_refresh", "discovery", ToolClass::Expensive,
+            { Str("name", true, "Index name.") }, std::nullopt, true, false,
+            [&db]( const Json& a, CallCtx& ) {
+                auto call = pgSelectCall( "fractal_index_refresh", { PgBind::s( "text", a.at( "name" ).get<std::string>() ) }, false );
+                return Json::parse( db.callScalar( call.first, call.second ).value_or( "null" ) );
+            } } );
+        t.back().description = "Folds the rows added since the build into the index's cells, as a new generation switched in atomically, "
+            "without retraining (the model is kept). Returns {name, added, rows, generation, refreshed}. Deleted rows and changed "
+            "vectors are not touched: use fractal_index_rebuild when fractal_index_info advises a rebuild.";
 
         t.push_back( ToolSpec{ "fractal_search_explore", "discovery", ToolClass::Cheap,
             { Str("table_name", true, "Table to scan."), Str("vector_col", true, "Embedding column."),

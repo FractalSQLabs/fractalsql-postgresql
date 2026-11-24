@@ -48,8 +48,8 @@ ledger persists through a Postgres-backed storage VFS into the
 
 | Function | Purpose |
 | --- | --- |
-| `fractal_ledger_flush()` | Encode truth + shadow ledgers into a QTL blob and append it to the chain. |
-| `fractal_ledger_load()` | Hydrate the in-memory ledgers from the chain's latest entry (verifies only the tip, O(1)). |
+| `fractal_ledger_flush()` | Encode truth + shadow ledgers into a QTL v2 blob (per-entry weight, shadow lambda/sigma, entries ordered by doc id then signal) and append it to the chain. |
+| `fractal_ledger_load()` | Replace the in-memory ledgers with the chain's latest entry (verifies only the tip, O(1)); it does not merge. |
 | `fractal_ledger_verify()` | Walk the ENTIRE chain (O(n), on demand) and return a `jsonb` audit report. |
 | `fractal_ledger_compact()` | Defragment / re-pack the in-memory QTL representation. |
 | `fractal_ledger_reset_soft()` | Soft-reset ledger counters without dropping history. |
@@ -135,6 +135,24 @@ nothing was truncated off the very *end*: there's nothing after the last
 row to notice its absence. That needs an external anchor (e.g. publishing
 the head hash somewhere independent). See **External anchoring** below
 for a ready-to-use recipe. (See `demo/enterprise-stress.sql` Phase E.)
+
+### Retention: fade or exact
+
+By default the ledger **fades**: `fractal_ledger_compact()` decays every Shadow weight by x0.9, and when a ledger is
+full the lowest-significance entry is evicted to make room. Set `fractalsql.ledger_retention` to `exact` when every
+recorded entry must be kept as it was written:
+
+```sql
+SET fractalsql.ledger_retention = 'exact';      -- or 'fade' (the default); superuser-only
+ALTER SYSTEM SET fractalsql.ledger_retention = 'exact';   -- the persistent default
+```
+
+In `exact` mode compaction changes nothing and nothing is evicted. A report for a handle that is not yet in a full
+ledger is refused with an error rather than displacing another entry, and a handle that is already recorded still
+accepts more weight. The mode is written into every flushed ledger, so `fractal_ledger_load()` in a session configured
+differently restores the mode the ledger was recorded with. Set it before the first report of the session. `exact`
+needs an enterprise library that supports it: with an older library the setting is refused instead of quietly running
+the default.
 
 ### External anchoring (closing the truncation gap)
 
@@ -269,3 +287,19 @@ the head, not the key and not the entry contents.
 
 For enterprise editions, licensing, and support, contact
 **enterprise@fractalsqlabs.com**.
+
+## Destructive ledger operations are off by default
+
+`fractal_ledger_compact`, `fractal_ledger_reset_soft` and `fractal_ledger_reset_hard` destroy ledger records, so they refuse unless the
+operator enables them by setting this in the environment of the PostgreSQL server (the postmaster):
+
+```sh
+FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1
+```
+
+Without it, a server nobody configured cannot have its audit chain destroyed by a statement from any account that may call the function.
+`fractal_ledger_flush` (sealing the ledgers into the chain) is routine and is not affected, and the one-way `fractal_lock_destructive`
+latch still wins when it is set. Each refusal is written to the server's log. Where the database has its own privileges, keep restricting
+who may execute these functions as well.
+
+This default changed: earlier builds allowed these operations unless the session was latched.

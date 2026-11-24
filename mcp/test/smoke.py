@@ -17,10 +17,13 @@ import threading
 import time
 
 EXPECTED_TOOLS = {
-    # discovery (14)
-    "fractal_search", "fractal_search_debug", "fractal_search_explore",
+    # discovery (22)
+    "fractal_search", "fractal_sfs_converge", "fractal_sfs_converge_debug",
+    "fractal_search_explore",
     "fractal_search_telemetry", "fractal_hybrid_clinical_search",
     "fractal_search_trajectory", "fractal_cross_modal_search",
+    "fractal_index_create", "fractal_index_rebuild", "fractal_index_refresh", "fractal_index_ensure", "fractal_index_drop",
+    "fractal_index_info", "fractal_index_list", "fractal_index_candidates",
     "fractal_diversify_enable", "fractal_diversify_disable",
     "fractal_diversify_set_params", "fractal_detect_collapse",
     "fractal_explain_result", "fractal_feedback_report", "fractal_isolate_background",
@@ -38,13 +41,19 @@ EXPECTED_TOOLS = {
     "fractal_search_agent", "fractal_rag_agent", "fractal_sql_agent",
     "fractal_agent_plan_explore", "fractal_agent_trajectory_predict",
     "fractal_agent_detect_loop",
-    # analytics (23)
+    # analytics (24)
     "fractal_dimension_dfa", "fractal_dimension_boxcount", "fractal_dimension_drift",
-    "fractal_change_point_detect", "fractal_periodogram", "fractal_spectrogram_entropy",
+    "fractal_change_point_detect", "fractal_chunk_text", "fractal_periodogram", "fractal_spectrogram_entropy",
     "fractal_tda_persistence_diagram",
     "fractal_state_fingerprint", "fractal_cycle_detect", "fractal_vector_lp_distance",
     "fractal_vector_quantize_int8", "fractal_vector_quantize_binary",
     "fractal_vector_hamming_distance", "fractal_vascular_network",
+    "fractal_vector", "fractal_vector_from_text", "fractal_vector_to_json",
+    "fractal_vector_dims", "fractal_vector_norm", "fractal_vector_normalize",
+    "fractal_vector_add", "fractal_vector_sub", "fractal_vector_l2_distance",
+    "fractal_vector_l2_squared", "fractal_vector_cosine_distance",
+    "fractal_vector_cosine_similarity", "fractal_vector_negative_inner_product",
+    "fractal_vector_scale",
     "fractal_cortical_folding", "fractal_nerve_plexus_metric",
     "fractal_morphological_complexity", "fractal_optimize_portfolio",
     "fractal_optimize_portfolio_multimodal", "fractal_optimize_portfolio_multimodal_pareto",
@@ -54,12 +63,12 @@ EXPECTED_TOOLS = {
     "fractal_ledger_compact", "fractal_ledger_reset_soft", "fractal_ledger_reset_hard",
     "fractal_ledger_truth_count", "fractal_ledger_shadow_count",
     "fractal_audit_unpack", "fractal_audit_log",
-    # vectorizer (5)
+    # vectorizer (6)
     "fractal_vectorizer_create", "fractal_vectorizer_pause", "fractal_vectorizer_resume",
-    "fractal_vectorizer_drop", "fractal_vectorizer_process_queue",
+    "fractal_vectorizer_drop", "fractal_vectorizer_process_queue", "fractal_vectorizer_status",
     # admin (4)
     "fractal_version", "fractal_configure_reasoning",
-    "fractal_config_set", "fractal_config_get",
+    "fractal_config_set", "fractal_config_get", "fractal_config_keys",
 }
 
 # Hand-maintained safety classification, deliberately NOT generated from the server
@@ -129,12 +138,22 @@ EXPECTED_SAFETY = {
     "fractal_rag_agent": ("write", True),
     "fractal_reason": ("write", True),
     "fractal_schema_context": ("read", False),
+    "fractal_index_create": ("destructive", False),
+    "fractal_index_drop": ("destructive", False),
+    "fractal_index_info": ("read", False),
+    "fractal_index_list": ("read", False),
+    "fractal_index_candidates": ("read", False),
+    "fractal_index_refresh": ("destructive", False),
+    "fractal_index_ensure": ("destructive", False),
+    "fractal_chunk_text": ("read", False),
+    "fractal_index_rebuild": ("destructive", False),
     "fractal_search": ("read", False),
     "fractal_search_agent": ("write", True),
-    "fractal_search_debug": ("read", False),
     "fractal_search_explore": ("read", False),
     "fractal_search_telemetry": ("read", False),
     "fractal_search_trajectory": ("read", False),
+    "fractal_sfs_converge": ("read", False),
+    "fractal_sfs_converge_debug": ("read", False),
     "fractal_spectrogram_entropy": ("read", False),
     "fractal_sql_agent": ("destructive", True),
     "fractal_state_fingerprint": ("read", False),
@@ -142,6 +161,20 @@ EXPECTED_SAFETY = {
     "fractal_tda_persistence_diagram": ("read", False),
     "fractal_text_to_sql": ("write", True),
     "fractal_vascular_network": ("read", False),
+    "fractal_vector": ("read", False),
+    "fractal_vector_add": ("read", False),
+    "fractal_vector_cosine_distance": ("read", False),
+    "fractal_vector_cosine_similarity": ("read", False),
+    "fractal_vector_dims": ("read", False),
+    "fractal_vector_from_text": ("read", False),
+    "fractal_vector_l2_distance": ("read", False),
+    "fractal_vector_l2_squared": ("read", False),
+    "fractal_vector_negative_inner_product": ("read", False),
+    "fractal_vector_norm": ("read", False),
+    "fractal_vector_normalize": ("read", False),
+    "fractal_vector_scale": ("read", False),
+    "fractal_vector_sub": ("read", False),
+    "fractal_vector_to_json": ("read", False),
     "fractal_vector_hamming_distance": ("read", False),
     "fractal_vector_lp_distance": ("read", False),
     "fractal_vector_quantize_binary": ("read", False),
@@ -151,8 +184,10 @@ EXPECTED_SAFETY = {
     "fractal_vectorizer_pause": ("destructive", False),
     "fractal_vectorizer_process_queue": ("destructive", False),
     "fractal_vectorizer_resume": ("destructive", False),
+    "fractal_vectorizer_status": ("read", False),
     "fractal_configure_reasoning": ("destructive", False),
     "fractal_config_get": ("read", False),
+    "fractal_config_keys": ("read", False),
     "fractal_version": ("read", False),
     "fractal_config_set": ("destructive", False),
 }
@@ -317,11 +352,11 @@ def main():
         r = cli.call("ping")
         fails += ok(r.get("result") == {}, "ping returns empty result", r)
 
-        # ---- 3. tools/list: exact 82-name catalog + schema integrity ----
+        # ---- 3. tools/list: exact 108-name catalog + schema integrity ----
         r = cli.call("tools/list")
         tools = r.get("result", {}).get("tools", [])
         names = [t.get("name") for t in tools]
-        fails += ok(set(names) == EXPECTED_TOOLS, "tools/list exact 82-name catalog",
+        fails += ok(set(names) == EXPECTED_TOOLS, "tools/list exact 108-name catalog",
                     "missing=" + str(sorted(EXPECTED_TOOLS - set(names)))[:200]
                     + " extra=" + str(sorted(set(names) - EXPECTED_TOOLS))[:200])
         fails += ok(len(names) == len(EXPECTED_TOOLS), f"tools/list count == {len(EXPECTED_TOOLS)}", len(names))
@@ -407,7 +442,7 @@ def main():
                     "no x-fractalsql-retry-tier on postgres tool meta")
 
         # ---- 4. schema-class errors, no DB touched ----
-        r = cli.call("tools/call", {"name": "fractal_search", "arguments": {"query": "not-a-vector"}})
+        r = cli.call("tools/call", {"name": "fractal_sfs_converge", "arguments": {"query": "not-a-vector"}})
         sc = r.get("result", {}).get("structuredContent", {})
         fails += ok(r.get("result", {}).get("isError") is True and sc.get("error_class") == "schema",
                     "bad vector arg -> schema error_class", r.get("result"))
@@ -419,8 +454,8 @@ def main():
         sc = r.get("result", {}).get("structuredContent", {})
         fails += ok(sc.get("error_class") == "schema", "unknown tool -> schema error_class", sc)
 
-        # ---- 4b. JSON-RPC/prompt error paths (v2.0.9 sibling port; no DB touched) ----
-        r = cli.call("tools/call", {"name": "fractal_search", "arguments": [1, 2, 3]})
+        # ---- 4b. JSON-RPC/prompt error paths (no DB touched) ----
+        r = cli.call("tools/call", {"name": "fractal_sfs_converge", "arguments": [1, 2, 3]})
         fails += ok(r.get("error", {}).get("code") == -32602
                     and "JSON object" in str(r.get("error", {}).get("message", "")),
                     "tools/call with non-object arguments -> -32602 object-required", r.get("error"))
@@ -566,7 +601,7 @@ def main():
     if pg_env_present:
         run_db_asserts(exe, ok, fails.__setattr__)
 
-    # ---- 10. CLI-phase gates (v2.0.9 sibling port: one-shot + refusal codes) ----
+    # ---- 10. CLI-phase gates (one-shot + refusal codes) ----
     fails += run_cli_phase(exe)
     fails += run_cli_edge_phase(exe)
     # ---- 11. SIGHUP forced token reload (POSIX only, v2.0.9 port of the
@@ -659,9 +694,9 @@ def run_cli_phase(exe):
             data = json.load(fh)
     tools = data.get("tools", [])
     fails += ok(r.returncode == 0 and isinstance(data.get("version"), str)
-                and len(tools) == 82
+                and len(tools) == 108
                 and any(t.get("name") == "fractal_config_set" for t in tools),
-                "--write-manifest -> FSQL_MCP_LOCK_DIR scratch manifest (82 tools)",
+                "--write-manifest -> FSQL_MCP_LOCK_DIR scratch manifest (108 tools)",
                 [r.returncode, data.get("version"), len(tools)])
     try:
         os.remove(man)
@@ -751,9 +786,9 @@ def run_cli_edge_phase(exe):
     r = run(["--list-tools"])
     rows = [ln.split("\t") for ln in r.stdout.splitlines() if ln.strip()]
     names_all = [x[0] for x in rows]
-    fails += ok(r.returncode == 0 and len(rows) == 82 and all(len(x) == 2 for x in rows)
+    fails += ok(r.returncode == 0 and len(rows) == 108 and all(len(x) == 2 for x in rows)
                 and names_all == sorted(names_all),
-                "cli: --list-tools prints 82 sorted name<TAB>category rows (no database needed)",
+                "cli: --list-tools prints 108 sorted name<TAB>category rows (no database needed)",
                 [r.returncode, len(rows)])
     for flag in ("--tool", "--category", "--host", "--path", "--tls-cert", "--tls-key",
                  "--schema-lock-path", "--safety-lock-path"):
@@ -767,7 +802,7 @@ def run_cli_edge_phase(exe):
                 "cli: --tool whitelists exactly the named tools (blanks and empty CSV items ignored)", names)
     r, names = served_tools(["--category", "ADMIN"])
     fails += ok(names is not None and "fractal_version" in names and "fractal_dimension_dfa" not in names
-                and 0 < len(names) < 82,
+                and 0 < len(names) < 93,
                 "cli: --category is case-insensitive and serves only that category", names and len(names))
     r, names = served_tools(["--category", "nosuchcategory"])
     fails += ok(names == [], "cli: an unknown --category serves zero tools", names)
@@ -826,7 +861,7 @@ def run_cli_edge_phase(exe):
     # ---- manifest-path override ----
     mp = os.path.join(scratch, "m.json")
     r = run(["--write-manifest"], env=dict(clean, FSQL_MCP_MANIFEST_PATH=mp))
-    fails += ok(r.returncode == 0 and os.path.isfile(mp) and "(82 tools)" in r.stdout,
+    fails += ok(r.returncode == 0 and os.path.isfile(mp) and "(108 tools)" in r.stdout,
                 "cli: FSQL_MCP_MANIFEST_PATH redirects --write-manifest", [r.returncode, r.stdout[:80]])
 
     # ---- HTTP start-up config refusals ----
@@ -904,7 +939,7 @@ def run_sighup_phase(exe):
         fails += ok(s == 200, "sighup phase: baseline session DELETE closes (200)", s)
 
         # New token with the file's ORIGINAL mtime RESTORED ("pinned back"
-        # the sibling's way: pinning to an arbitrary older date is a mtime
+        # the file's own way: pinning to an arbitrary older date is a mtime
         # CHANGE and the mtime check still reloads; pinning to the SAME
         # mtime the store already recorded is what the plain check alone
         # would skip — only the forced reload may pick the new token up).
@@ -1656,8 +1691,8 @@ def run_db_asserts(exe, ok, _setfails):
                 # pg boolean fields pass db.h's decodeField as the STRING 't'/'f'
                 # (only JSON-parseable text is re-typed), so 't' is true here.
                 drift = str((sc or {}).get("drift_detected", "")).lower()
-                # The partial-reasoning contract is TWO fields (the sibling's
-                # shape, and what api-agency.md now documents): the LLM column
+                # The partial-reasoning contract is TWO fields (the shape
+                # api-agency.md documents): the LLM column
                 # comes back NULL and a SEPARATE trailing 'reasoning_step_failed'
                 # column carries the raw error text. The old shape -- the
                 # marker string INSIDE the rationale column -- is what this
@@ -1695,14 +1730,14 @@ def run_db_asserts(exe, ok, _setfails):
         fails += ok(isinstance(doc_id, str) and doc_id.startswith("("),
                     "telemetry doc_id is the ctid STRING (e.g. '(0,1)')", rows)
 
-        r = cli.call("tools/call", {"name": "fractal_search",
+        r = cli.call("tools/call", {"name": "fractal_sfs_converge",
                                     "arguments": {"query": [0.6, 0.8, 0.0], "iterations": 30,
                                                   "population_size": 50, "diffusion_factor": 2}})
         sc = r.get("result", {}).get("structuredContent", {})
         vec = (sc or {}).get("value")
         fails += ok(isinstance(vec, list) and len(vec) == 3
                     and all(isinstance(x, (int, float)) or x is None for x in vec),
-                    "fractal_search returns best point as a JSON number array", sc)
+                    "fractal_sfs_converge returns best point as a JSON number array", sc)
 
         r = cli.call("tools/call", {"name": "fractal_agent_detect_loop",
                                     "arguments": {"agent_id": "smoke-agent",
@@ -1751,7 +1786,7 @@ def run_db_asserts(exe, ok, _setfails):
                     "audit_log: gated-or-ok on valid jsonb; non-JSON payload -> schema",
                     [sc1, r2.get("result")])
 
-        # ---- admin config tools (v2.0.9 sibling port: GUC-backed get/set;
+        # ---- admin config tools (GUC-backed get/set;
         # the fractalsql.-prefixed and bare engine key spelling both work) ----
         r = cli.call("tools/call", {"name": "fractal_config_get",
                                     "arguments": {"key": "agent_partial_reasoning_fail"}})
